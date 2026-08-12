@@ -19,7 +19,7 @@ from typing import Any
 
 from openpyxl import Workbook
 
-from .agent import ResponsesClient, SpreadsheetAgent
+from .agent import SpreadsheetAgent, _provider_client
 from .audit import audit_comparison
 from .benchmark import (
     VerifiedBenchmarkRunner,
@@ -31,11 +31,11 @@ from .benchmark import (
     verify_trace2skill_heldout_manifest,
 )
 from .comparison import AVAILABLE_COMPARISON_ARMS, COMPARISON_ARMS, ComparisonBenchmarkRunner
-from .config import REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
+from .config import API_PROTOCOLS, REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
 from .errors import HarnessError
 from .evolution import generate_candidate, promote_candidate
 from .preprocess import preprocess_workbook
-from .provider_compat import check_responses_tool_compatibility
+from .provider_compat import check_tool_compatibility
 from .render import (
     convert_spreadsheet_copy,
     find_libreoffice,
@@ -75,6 +75,7 @@ def _provider(args: argparse.Namespace) -> ProviderConfig:
         api_key=getattr(args, "api_key", None),
         api_key_file=getattr(args, "api_key_file", None),
         model=getattr(args, "model", None),
+        api_protocol=getattr(args, "api_protocol", None),
         reasoning_effort=getattr(args, "reasoning_effort", None),
         timeout_seconds=getattr(args, "request_timeout", None),
         max_retries=getattr(args, "request_retries", None),
@@ -87,6 +88,7 @@ def _provider(args: argparse.Namespace) -> ProviderConfig:
         min_p=getattr(args, "min_p", None),
         repetition_penalty=getattr(args, "repetition_penalty", None),
         enable_thinking=getattr(args, "enable_thinking", None),
+        litellm_timeout_seconds=getattr(args, "litellm_timeout", None),
     )
 
 
@@ -155,7 +157,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         report["provider"] = config.public_dict()
         if args.online:
             if tools_requested:
-                report["tools"] = check_responses_tool_compatibility(config)
+                report["tools"] = check_tool_compatibility(config)
                 report["online"] = {"ok": report["tools"]["ok"], "covered_by": "tools"}
                 ok = ok and bool(report["tools"]["ok"])
             else:
@@ -171,7 +173,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     ],
                     "max_output_tokens": 32,
                 }
-                with ResponsesClient(config) as client:
+                with _provider_client(config) as client:
                     turn = client.create(payload)
                 report["online"] = {"ok": "HARNESS_OK" in turn.text, "text": turn.text[:200]}
                 ok = ok and bool(report["online"]["ok"])
@@ -346,6 +348,11 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
     requested_ids = list(args.task_id or [])
     frozen_ids: list[str] = []
     if args.split_manifest:
+        if args.offset != 0 or args.limit is not None:
+            raise HarnessError(
+                "--split-manifest selects a frozen task set; use a derivative manifest "
+                "instead of --offset or --limit"
+            )
         split_path = Path(args.split_manifest).expanduser().resolve()
         verify_trace2skill_heldout_manifest(root, split_path)
         frozen = json.loads(split_path.read_text(encoding="utf-8"))
@@ -425,7 +432,7 @@ def cmd_benchmark_audit(args: argparse.Namespace) -> int:
 
 def cmd_evolve_generate(args: argparse.Namespace) -> int:
     config = _provider(args)
-    with ResponsesClient(config) as client:
+    with _provider_client(config) as client:
         candidate = generate_candidate(
             args.trajectory,
             args.output,
@@ -458,7 +465,7 @@ def cmd_evolve_promote(args: argparse.Namespace) -> int:
 
 
 def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--base-url", help="Responses API base URL ending in /v1")
+    parser.add_argument("--base-url", help="Provider API base URL ending in /v1")
     parser.add_argument("--api-key", help=argparse.SUPPRESS)
     parser.add_argument(
         "--api-key-file",
@@ -471,11 +478,16 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--model")
     parser.add_argument(
+        "--api-protocol",
+        choices=API_PROTOCOLS,
+        help="Provider protocol: responses or chat-completions",
+    )
+    parser.add_argument(
         "--reasoning-effort",
         choices=[*REASONING_EFFORTS, *REASONING_ALIASES],
-        help="Responses reasoning effort; ultra is recorded and sent as the API maximum, max",
+        help="Reasoning effort; ultra is recorded and sent as the API maximum, max",
     )
-    parser.add_argument("--request-timeout", type=float, help="Seconds per Responses request")
+    parser.add_argument("--request-timeout", type=float, help="Seconds per provider request")
     parser.add_argument(
         "--request-retries", type=int, choices=range(0, 6), help="Retries for transient failures"
     )
@@ -483,6 +495,11 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
         "--request-interval-seconds",
         type=float,
         help="Minimum start-to-start interval between Relay HTTP attempts (default: 0)",
+    )
+    parser.add_argument(
+        "--litellm-timeout",
+        type=float,
+        help="Optional LiteLLM upstream timeout in seconds via x-litellm-timeout",
     )
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--top-p", type=float)
@@ -525,7 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--tools",
         action="store_true",
-        help="With --online, check a synthetic Responses function-call round trip",
+        help="With --online, check a synthetic function-call round trip",
     )
     doctor.set_defaults(handler=cmd_doctor)
 

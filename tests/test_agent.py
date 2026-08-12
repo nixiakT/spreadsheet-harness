@@ -10,7 +10,12 @@ from typing import Any
 import httpx
 import pytest
 
-from spreadsheet_harness.agent import ResponsesClient, ResponseTurn, SpreadsheetAgent
+from spreadsheet_harness.agent import (
+    ChatCompletionsClient,
+    ResponsesClient,
+    ResponseTurn,
+    SpreadsheetAgent,
+)
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import AgentRoutingError, HarnessError, ProviderError
@@ -103,6 +108,65 @@ def test_agent_executes_and_replays_tool_call(
     trajectory = session.paths.trajectory.read_text(encoding="utf-8")
     assert "agent.completed" in trajectory
     assert "not-a-real-key" not in trajectory
+
+
+def test_agent_sanitizes_no_arg_tool_arguments_before_replay(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class NoArgReplayClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> NoArgReplayClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-tool",
+                    [
+                        {
+                            "type": "function_call",
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "list_sheets",
+                            "arguments": json.dumps({"irrelevant": "x" * 100_000}),
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-final",
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done"}],
+                    }
+                ],
+                "Done",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", NoArgReplayClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "no-arg-replay")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    SpreadsheetAgent(config, tools, first_tool_choice="list_sheets").run("Inspect")
+
+    second_input = NoArgReplayClient.requests[1]["input"]
+    replayed = next(item for item in second_input if item.get("type") == "function_call")
+    assert replayed["name"] == "list_sheets"
+    assert replayed["arguments"] == "{}"
 
 
 def test_agent_records_and_applies_explicit_generation_controls(
@@ -253,6 +317,98 @@ def test_agent_enforces_and_audits_multi_turn_tool_prefix(
             max_turns=2,
             forced_tool_prefix=("list_sheets", "list_sheets"),
         )
+
+
+def test_agent_forced_tool_prefix_reprompts_empty_response_without_advancing(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class EmptyThenForcedClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> EmptyThenForcedClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-empty",
+                    [{"type": "message", "role": "assistant", "content": []}],
+                    "",
+                    {},
+                )
+            if self.turn == 2:
+                return ResponseTurn(
+                    "response-tool",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-tool",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-final",
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+                "done",
+                {},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", EmptyThenForcedClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "forced-empty-run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    result = SpreadsheetAgent(
+        config,
+        tools,
+        forced_tool_prefix=("list_sheets",),
+        max_turns=3,
+    ).run("inspect")
+
+    assert result.final_text == "done"
+    assert [request["tool_choice"] for request in EmptyThenForcedClient.requests] == [
+        {"type": "function", "name": "list_sheets"},
+        {"type": "function", "name": "list_sheets"},
+        "auto",
+    ]
+    second_input = EmptyThenForcedClient.requests[1]["input"]
+    assert any(
+        "previous response did not call the required function"
+        in content.get("text", "")
+        for item in second_input
+        for content in item.get("content", [])
+    )
+    assert result.observed_forced_tool_prefix == ["list_sheets"]
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    reprompted = [
+        event
+        for event in events
+        if event["event"] == "agent.empty_forced_tool_response_reprompted"
+    ]
+    assert reprompted[0]["payload"]["forced_prefix_index"] == 0
 
 
 def test_agent_forced_tool_prefix_fails_closed_on_later_turn(
@@ -418,7 +574,7 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
     ).run("inspect")
 
     assert [request["tool_choice"] for request in RequiredClient.requests] == [
-        "required",
+        {"type": "function", "name": "list_sheets"},
         "required",
     ]
     assert [tool["name"] for tool in RequiredClient.requests[0]["tools"]] == [
@@ -444,6 +600,234 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
     requested = [event for event in events if event["event"] == "model.requested"]
     assert requested[0]["payload"]["available_tool_names"] == ["list_sheets"]
     assert "submit_result" in requested[1]["payload"]["available_tool_names"]
+
+
+def test_required_tool_termination_forces_submit_only_on_final_turn(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class FinalTurnClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> FinalTurnClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-tool",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-tool",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": json.dumps({"result": "final turn result"}),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", FinalTurnClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "final-required-run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    result = SpreadsheetAgent(
+        config,
+        tools,
+        max_turns=2,
+        required_tool_termination=True,
+    ).run("inspect")
+
+    assert result.final_text == "final turn result"
+    assert [tool["name"] for tool in FinalTurnClient.requests[0]["tools"]] == [
+        "list_sheets",
+        "inspect_range",
+        "range_to_latex",
+        "find_cells",
+        "write_range",
+        "fill_formula",
+        "format_range",
+        "clear_range",
+        "delete_rows",
+        "delete_columns",
+        "manage_sheet",
+        "recalculate_and_read",
+        "render_workbook",
+        "view_image",
+        "undo_last",
+        "submit_result",
+    ]
+    assert [tool["name"] for tool in FinalTurnClient.requests[1]["tools"]] == [
+        "submit_result"
+    ]
+    assert FinalTurnClient.requests[1]["tool_choice"] == {
+        "type": "function",
+        "name": "submit_result",
+    }
+
+
+def test_required_tool_termination_accepts_nonempty_text_as_terminal_fallback(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class TextFallbackClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> TextFallbackClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            return ResponseTurn(
+                "response-text",
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The workbook has been updated and verified.",
+                            }
+                        ],
+                    }
+                ],
+                "The workbook has been updated and verified.",
+                {"input_tokens": 4, "output_tokens": 6, "total_tokens": 10},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", TextFallbackClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "text-fallback-run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    result = SpreadsheetAgent(
+        config,
+        tools,
+        required_tool_termination=True,
+    ).run("inspect")
+
+    assert result.final_text == "The workbook has been updated and verified."
+    assert result.terminal_tool == "submit_result"
+    assert result.observed_terminal_tool == "assistant_text"
+    assert result.terminal_submissions == 0
+    assert result.to_dict()["function_calls_total"] == 0
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    submitted = [
+        event for event in events if event["event"] == "agent.terminal_submitted"
+    ]
+    assert submitted[0]["payload"]["observed_terminal_tool"] == "assistant_text"
+
+
+def test_required_tool_termination_reprompts_empty_response_before_final_turn(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class EmptyThenSubmitClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> EmptyThenSubmitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-empty",
+                    [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": ""}],
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": json.dumps({"result": "submitted after reprompt"}),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", EmptyThenSubmitClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "empty-reprompt-run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    result = SpreadsheetAgent(
+        config,
+        tools,
+        max_turns=2,
+        required_tool_termination=True,
+    ).run("inspect")
+
+    assert result.final_text == "submitted after reprompt"
+    assert len(EmptyThenSubmitClient.requests) == 2
+    second_input = EmptyThenSubmitClient.requests[1]["input"]
+    assert any(
+        "previous response did not call a function"
+        in content.get("text", "")
+        for item in second_input
+        for content in item.get("content", [])
+    )
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    reprompted = [
+        event
+        for event in events
+        if event["event"] == "agent.empty_required_response_reprompted"
+    ]
+    assert reprompted[0]["payload"]["turn"] == 1
 
 
 def test_agent_required_tool_termination_rejects_multiple_calls_before_execution(
@@ -557,11 +941,14 @@ def test_responses_client_flattens_generation_extensions_on_wire_and_hashes_wire
         min_p=0.0,
         repetition_penalty=1.0,
         enable_thinking=False,
+        litellm_timeout_seconds=600,
     )
     seen: list[dict[str, Any]] = []
+    seen_headers: list[dict[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content))
+        seen_headers.append(dict(request.headers))
         event = {
             "type": "response.completed",
             "response": {
@@ -572,14 +959,19 @@ def test_responses_client_flattens_generation_extensions_on_wire_and_hashes_wire
         return httpx.Response(200, text=f"data: {json.dumps(event)}\n\n")
 
     client = ResponsesClient(config)
+    headers = dict(client._client.headers)
     client._client.close()
-    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        headers=headers,
+    )
     try:
         turn = client.create({"model": config.model, "input": "test"})
     finally:
         client.close()
 
     assert len(seen) == 1
+    assert seen_headers[0]["x-litellm-timeout"] == "600"
     wire = seen[0]
     assert "extra_body" not in wire
     assert wire == {
@@ -617,6 +1009,200 @@ def test_responses_client_rejects_extra_body_top_level_collision_before_http() -
             client.create({"model": config.model, "top_k": 20})
     finally:
         client.close()
+
+
+def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "test-model",
+        api_protocol="chat-completions",
+        max_retries=0,
+        temperature=1.0,
+        top_p=0.95,
+        seed=42,
+        presence_penalty=1.5,
+        top_k=20,
+        min_p=0.0,
+        repetition_penalty=1.0,
+        enable_thinking=False,
+        litellm_timeout_seconds=600,
+    )
+    seen: list[dict[str, Any]] = []
+    seen_headers: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        seen_headers.append(dict(request.headers))
+        if len(seen) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chat-first",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "tool-call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "list_sheets",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12,
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat-second",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Done",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 3,
+                    "total_tokens": 23,
+                },
+            },
+        )
+
+    client = ChatCompletionsClient(config)
+    headers = dict(client._client.headers)
+    client._client.close()
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        headers=headers,
+    )
+    try:
+        first = client.create(
+            {
+                "model": config.model,
+                "instructions": "Use tools.",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Inspect."}],
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "list_sheets",
+                        "description": "List sheets.",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": False,
+                    }
+                ],
+                "tool_choice": {"type": "function", "name": "list_sheets"},
+                "parallel_tool_calls": False,
+                "max_output_tokens": 128,
+            }
+        )
+        second = client.create(
+            {
+                "model": config.model,
+                "input": [
+                    *first.output,
+                    {
+                        "type": "function_call_output",
+                        "call_id": "tool-call-1",
+                        "output": '{"ok":true}',
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "list_sheets",
+                        "description": "List sheets.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+                "tool_choice": "auto",
+                "max_output_tokens": 64,
+            }
+        )
+    finally:
+        client.close()
+
+    assert first.output == [
+        {
+            "type": "function_call",
+            "id": "tool-call-1",
+            "call_id": "tool-call-1",
+            "name": "list_sheets",
+            "arguments": "{}",
+        }
+    ]
+    assert first.usage == {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+    assert second.text == "Done"
+    assert second.usage == {"input_tokens": 20, "output_tokens": 3, "total_tokens": 23}
+    assert [headers["x-litellm-timeout"] for headers in seen_headers] == ["600", "600"]
+    first_wire, second_wire = seen
+    assert first_wire["messages"] == [
+        {"role": "system", "content": "Use tools."},
+        {"role": "user", "content": "Inspect."},
+    ]
+    assert first_wire["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_sheets",
+                "description": "List sheets.",
+                "parameters": {"type": "object", "properties": {}},
+                "strict": False,
+            },
+        }
+    ]
+    assert first_wire["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "list_sheets"},
+    }
+    assert first_wire["max_tokens"] == 128
+    assert first_wire["temperature"] == 1.0
+    assert first_wire["top_p"] == 0.95
+    assert first_wire["presence_penalty"] == 1.5
+    assert first_wire["seed"] == 42
+    assert first_wire["top_k"] == 20
+    assert first_wire["min_p"] == 0.0
+    assert first_wire["repetition_penalty"] == 1.0
+    assert first_wire["chat_template_kwargs"] == {"enable_thinking": False}
+    assert second_wire["messages"] == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tool-call-1",
+                    "type": "function",
+                    "function": {"name": "list_sheets", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tool-call-1", "content": '{"ok":true}'},
+    ]
+    assert first.attempt_history[0]["endpoint"] == "/chat/completions"
+    assert first.terminal_event == "chat.completion"
+    assert first.request_payload_sha256 is not None
 
 
 def test_responses_client_rejects_unknown_safe_retry_reason(monkeypatch: Any) -> None:

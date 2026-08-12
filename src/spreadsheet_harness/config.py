@@ -20,6 +20,7 @@ from .errors import HarnessError
 
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 REASONING_ALIASES = {"ultra": "max"}
+API_PROTOCOLS = ("responses", "chat-completions")
 _MAX_API_KEY_FILE_BYTES = 16 * 1024
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -180,9 +181,16 @@ class ProviderConfig:
     min_p: float | None = None
     repetition_penalty: float | None = None
     enable_thinking: bool | None = None
+    api_protocol: str = "responses"
+    litellm_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         requested = self.requested_reasoning_effort or self.reasoning_effort
+        if self.api_protocol not in API_PROTOCOLS:
+            allowed_protocols = ", ".join(API_PROTOCOLS)
+            raise HarnessError(
+                f"Unsupported API protocol {self.api_protocol!r}; use {allowed_protocols}"
+            )
         resolved = REASONING_ALIASES.get(self.reasoning_effort, self.reasoning_effort)
         if resolved not in REASONING_EFFORTS:
             allowed = ", ".join((*REASONING_EFFORTS, *REASONING_ALIASES))
@@ -253,6 +261,16 @@ class ProviderConfig:
             raise HarnessError("Generation top_k must be -1, 0, or a positive integer")
         if self.enable_thinking is not None and not isinstance(self.enable_thinking, bool):
             raise HarnessError("Generation enable_thinking must be a boolean")
+        object.__setattr__(
+            self,
+            "litellm_timeout_seconds",
+            _validate_finite_number(
+                "LiteLLM timeout",
+                self.litellm_timeout_seconds,
+                minimum=0.0,
+                minimum_inclusive=False,
+            ),
+        )
 
     def generation_dict(self) -> dict[str, Any]:
         """Return only explicitly configured generation controls."""
@@ -335,6 +353,7 @@ class ProviderConfig:
         api_key: str | None = None,
         api_key_file: str | Path | None = None,
         model: str | None = None,
+        api_protocol: str | None = None,
         reasoning_effort: str | None = None,
         timeout_seconds: float | None = None,
         max_retries: int | None = None,
@@ -347,6 +366,7 @@ class ProviderConfig:
         min_p: float | None = None,
         repetition_penalty: float | None = None,
         enable_thinking: bool | None = None,
+        litellm_timeout_seconds: float | None = None,
     ) -> ProviderConfig:
         """Read explicit values, environment, then the user's Codex config.
 
@@ -388,6 +408,12 @@ class ProviderConfig:
             base_url or os.environ.get("SHEET_AGENT_BASE_URL") or provider_data.get("base_url")
         )
         resolved_model = model or os.environ.get("SHEET_AGENT_MODEL") or config_data.get("model")
+        resolved_protocol = (
+            api_protocol
+            or os.environ.get("SHEET_AGENT_API_PROTOCOL")
+            or config_data.get("api_protocol")
+            or "responses"
+        )
         requested_effort = str(
             reasoning_effort
             or os.environ.get("SHEET_AGENT_REASONING_EFFORT")
@@ -409,6 +435,11 @@ class ProviderConfig:
             request_interval_seconds
             if request_interval_seconds is not None
             else float(os.environ.get("SHEET_AGENT_REQUEST_INTERVAL", "0"))
+        )
+        resolved_litellm_timeout = (
+            litellm_timeout_seconds
+            if litellm_timeout_seconds is not None
+            else _optional_environment_number("SHEET_AGENT_LITELLM_TIMEOUT", float)
         )
         resolved_generation = {
             "temperature": (
@@ -482,12 +513,14 @@ class ProviderConfig:
             base_url=str(resolved_url).rstrip("/"),
             api_key=str(resolved_key),
             model=str(resolved_model),
+            api_protocol=str(resolved_protocol),
             reasoning_effort=str(resolved_effort),
             timeout_seconds=float(resolved_timeout),
             max_retries=resolved_retries,
             requested_reasoning_effort=requested_effort,
             store_responses=resolved_store,
             request_interval_seconds=resolved_request_interval,
+            litellm_timeout_seconds=resolved_litellm_timeout,
             **resolved_generation,
         )
 
@@ -495,6 +528,7 @@ class ProviderConfig:
         return {
             "base_url": self.base_url,
             "model": self.model,
+            "api_protocol": self.api_protocol,
             "reasoning_effort": self.reasoning_effort,
             "requested_reasoning_effort": (
                 self.requested_reasoning_effort or self.reasoning_effort
@@ -503,6 +537,7 @@ class ProviderConfig:
             "max_retries": self.max_retries,
             "request_interval_seconds": self.request_interval_seconds,
             "store_responses": self.store_responses,
+            "litellm_timeout_seconds": self.litellm_timeout_seconds,
             "generation": self.generation_dict(),
             "api_key_configured": bool(self.api_key),
         }

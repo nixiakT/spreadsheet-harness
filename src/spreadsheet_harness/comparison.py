@@ -766,7 +766,7 @@ class ComparisonBenchmarkRunner:
                 "direct_text_stages": ["paper.reconcile"],
             },
             "forced_prefix_wire_policy": {
-                "tool_choice": "required",
+                "tool_choice": "explicit_function",
                 "available_tools": "forced tool only",
                 "terminal_tool_available": False,
             },
@@ -809,12 +809,14 @@ class ComparisonBenchmarkRunner:
             "runtime": _runtime_fingerprint(),
             "configuration": {
                 "model": self.config.model,
+                "api_protocol": self.config.api_protocol,
                 "requested_reasoning_effort": (
                     self.config.requested_reasoning_effort or self.config.reasoning_effort
                 ),
                 "reasoning_effort": self.config.reasoning_effort,
                 "provider_base_url": self.config.base_url,
                 "request_timeout_seconds": self.config.timeout_seconds,
+                "litellm_timeout_seconds": self.config.litellm_timeout_seconds,
                 "request_retries": self.config.max_retries,
                 "request_interval_seconds": self.config.request_interval_seconds,
                 "request_pacing_policy": PACING_POLICY,
@@ -839,6 +841,7 @@ class ComparisonBenchmarkRunner:
                     "delivery-safe-retry-ids-headers-backoff-pacing-v4"
                 ),
                 "store_responses": self.config.store_responses,
+                "generation": self.config.generation_dict(),
                 "max_model_calls": self.max_model_calls,
                 "max_turns_per_arm": self.max_turns_per_arm,
                 "max_total_tokens": self.max_total_tokens,
@@ -926,11 +929,14 @@ class ComparisonBenchmarkRunner:
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "instruction_type": task.instruction_type,
             "model": self.config.model,
+            "api_protocol": self.config.api_protocol,
             "requested_reasoning_effort": (
                 self.config.requested_reasoning_effort or self.config.reasoning_effort
             ),
             "reasoning_effort": self.config.reasoning_effort,
             "request_interval_seconds": self.config.request_interval_seconds,
+            "litellm_timeout_seconds": self.config.litellm_timeout_seconds,
+            "generation": self.config.generation_dict(),
             "max_model_calls": self.max_model_calls,
             "max_turns_per_arm": self.max_turns_per_arm,
             "stage_turn_caps": dict(self.stage_turn_caps[arm]),
@@ -957,7 +963,10 @@ class ComparisonBenchmarkRunner:
                     "schema_version": 9,
                     "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
                     "arm": arm,
+                    "api_protocol": self.config.api_protocol,
                     "request_interval_seconds": self.config.request_interval_seconds,
+                    "litellm_timeout_seconds": self.config.litellm_timeout_seconds,
+                    "generation": self.config.generation_dict(),
                     "request_pacing_policy": PACING_POLICY,
                     "request_pacing_scope": "comparison_runner_process",
                     "max_model_calls": self.max_model_calls,

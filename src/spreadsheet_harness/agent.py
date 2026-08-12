@@ -119,6 +119,7 @@ _SAFE_RESPONSE_HEADERS = frozenset(
     }
 )
 TERMINAL_TOOL_NAME = "submit_result"
+ASSISTANT_TEXT_TERMINAL = "assistant_text"
 _TERMINAL_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
     "name": TERMINAL_TOOL_NAME,
@@ -262,6 +263,226 @@ def _request_payload_sha256(payload: dict[str, Any], *, store_responses: bool) -
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _provider_headers(config: ProviderConfig, *, accept_sse: bool = False) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+    }
+    if accept_sse:
+        headers["Accept"] = "text/event-stream"
+    if config.litellm_timeout_seconds is not None:
+        headers["x-litellm-timeout"] = f"{config.litellm_timeout_seconds:g}"
+    return headers
+
+
+def _chat_wire_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "model": payload["model"],
+        "messages": _responses_input_to_chat_messages(
+            payload.get("instructions"),
+            payload.get("input", []),
+        ),
+    }
+    if "max_output_tokens" in payload:
+        result["max_tokens"] = payload["max_output_tokens"]
+    for name in ("temperature", "top_p", "presence_penalty"):
+        if name in payload:
+            result[name] = payload[name]
+    extra_body = payload.get("extra_body", {})
+    if extra_body:
+        if not isinstance(extra_body, dict):
+            raise HarnessError("Chat Completions extra_body must be a JSON object")
+        collisions = sorted(set(result).intersection(extra_body))
+        if collisions:
+            raise HarnessError(
+                "Chat Completions extra_body collides with top-level request fields: "
+                + ", ".join(collisions)
+            )
+        result.update(extra_body)
+    if payload.get("tools"):
+        result["tools"] = [_responses_tool_to_chat_tool(tool) for tool in payload["tools"]]
+        result["tool_choice"] = _responses_tool_choice_to_chat(
+            payload.get("tool_choice", "auto")
+        )
+        result["parallel_tool_calls"] = bool(payload.get("parallel_tool_calls", False))
+    return result
+
+
+def _chat_request_payload_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        _chat_wire_payload(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _content_part_text(content: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in content:
+        item_type = item.get("type")
+        if item_type in {"input_text", "text"}:
+            parts.append(str(item.get("text", "")))
+    return "\n".join(part for part in parts if part)
+
+
+def _content_part_to_chat(item: dict[str, Any]) -> dict[str, Any] | None:
+    item_type = item.get("type")
+    if item_type in {"input_text", "text"}:
+        return {"type": "text", "text": str(item.get("text", ""))}
+    if item_type == "input_image":
+        image_url = item.get("image_url")
+        if not isinstance(image_url, str) or not image_url:
+            return None
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": image_url,
+                "detail": str(item.get("detail", "high")),
+            },
+        }
+    return None
+
+
+def _responses_content_to_chat(content: Any) -> str | list[dict[str, Any]]:
+    if not isinstance(content, list):
+        return str(content)
+    converted = [
+        converted
+        for item in content
+        if isinstance(item, dict)
+        for converted in [_content_part_to_chat(item)]
+        if converted is not None
+    ]
+    if any(item.get("type") == "image_url" for item in converted):
+        return converted
+    return _content_part_text(content)
+
+
+def _responses_input_to_chat_messages(
+    instructions: str | None, input_items: Any
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    if instructions:
+        messages.append({"role": "system", "content": str(instructions)})
+    if isinstance(input_items, str):
+        messages.append({"role": "user", "content": input_items})
+        return messages
+    if not isinstance(input_items, list):
+        raise HarnessError("Chat Completions adapter requires list or string input")
+    for item in input_items:
+        if not isinstance(item, dict):
+            raise HarnessError("Chat Completions adapter input items must be objects")
+        item_type = item.get("type")
+        if item_type == "function_call":
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": str(item.get("call_id") or item.get("id") or ""),
+                            "type": "function",
+                            "function": {
+                                "name": str(item.get("name", "")),
+                                "arguments": (
+                                    item.get("arguments")
+                                    if isinstance(item.get("arguments"), str)
+                                    else json.dumps(
+                                        item.get("arguments", {}),
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                ),
+                            },
+                        }
+                    ],
+                }
+            )
+            continue
+        if item_type == "function_call_output":
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(item.get("call_id", "")),
+                    "content": str(item.get("output", "")),
+                }
+            )
+            continue
+        role = str(item.get("role", "user"))
+        if role not in {"system", "user", "assistant", "tool"}:
+            role = "user"
+        content = item.get("content", "")
+        messages.append({"role": role, "content": _responses_content_to_chat(content)})
+    return messages
+
+
+def _responses_tool_to_chat_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    if tool.get("type") != "function":
+        raise HarnessError("Chat Completions adapter only supports function tools")
+    function = {
+        "name": tool.get("name"),
+        "description": tool.get("description", ""),
+        "parameters": tool.get("parameters", {"type": "object"}),
+    }
+    if tool.get("strict") is not None:
+        function["strict"] = bool(tool.get("strict"))
+    return {"type": "function", "function": function}
+
+
+def _responses_tool_choice_to_chat(value: Any) -> Any:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and value.get("type") == "function":
+        return {
+            "type": "function",
+            "function": {"name": value.get("name")},
+        }
+    return value
+
+
+def _chat_usage(value: dict[str, Any]) -> dict[str, int]:
+    prompt = int(value.get("prompt_tokens", value.get("input_tokens", 0)) or 0)
+    completion = int(
+        value.get("completion_tokens", value.get("output_tokens", 0)) or 0
+    )
+    total = int(value.get("total_tokens", prompt + completion) or 0)
+    return {
+        "input_tokens": prompt,
+        "output_tokens": completion,
+        "total_tokens": total,
+    }
+
+
+def _chat_message_to_output(message: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    output: list[dict[str, Any]] = []
+    text = str(message.get("content") or "")
+    for index, call in enumerate(message.get("tool_calls") or [], start=1):
+        if not isinstance(call, dict) or call.get("type") != "function":
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        call_id = str(call.get("id") or f"chat-call-{index}")
+        output.append(
+            {
+                "type": "function_call",
+                "id": call_id,
+                "call_id": call_id,
+                "name": str(function.get("name", "")),
+                "arguments": function.get("arguments", "{}"),
+            }
+        )
+    if text or not output:
+        output.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        )
+    return output, text
 
 
 def _is_global_fatal_error(detail: Any, *, status_code: int | None = None) -> bool:
@@ -433,6 +654,42 @@ def _validated_function_calls(
     return validated
 
 
+def _no_argument_tools(tool_schemas: list[dict[str, Any]]) -> set[str]:
+    result: set[str] = set()
+    for schema in tool_schemas:
+        name = schema.get("name")
+        parameters = schema.get("parameters")
+        if not isinstance(name, str) or not isinstance(parameters, dict):
+            continue
+        properties = parameters.get("properties")
+        required = parameters.get("required")
+        if properties == {} and required == []:
+            result.add(name)
+    return result
+
+
+def _replayed_function_call(
+    function_call: dict[str, Any],
+    *,
+    arguments: dict[str, Any] | None,
+    raw_arguments: Any,
+    omit_arguments: bool,
+) -> dict[str, Any]:
+    replayed = dict(function_call)
+    if arguments is None or omit_arguments:
+        replayed["arguments"] = "{}"
+    elif isinstance(raw_arguments, str):
+        replayed["arguments"] = raw_arguments
+    else:
+        replayed["arguments"] = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    return replayed
+
+
 @dataclass
 class ResponseTurn:
     response_id: str | None
@@ -551,11 +808,7 @@ class ResponsesClient:
                 write=60.0,
                 pool=20.0,
             ),
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
+            headers=_provider_headers(config, accept_sse=True),
         )
 
     def close(self) -> None:
@@ -1150,6 +1403,609 @@ class ResponsesClient:
         raise last_error
 
 
+class ChatCompletionsClient:
+    def __init__(
+        self, config: ProviderConfig, *, pacer: RelayPacer | None = None
+    ) -> None:
+        self.config = config
+        self.pacer = pacer or RelayPacer(config.request_interval_seconds)
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=20.0,
+                read=config.timeout_seconds,
+                write=60.0,
+                pool=20.0,
+            ),
+            headers=_provider_headers(config),
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> ChatCompletionsClient:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    def _attempt_detail(
+        self,
+        *,
+        started: float,
+        logical_request_id: str,
+        client_request_id: str,
+        request_payload_sha256: str,
+        pacing: dict[str, Any],
+        headers_seconds: float | None = None,
+        terminal_seconds: float | None = None,
+        status_code: int | None = None,
+        response_headers: dict[str, str] | None = None,
+        delivery_state: str = "pre_send",
+        transport_exception_type: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "headers_seconds": round(headers_seconds, 3) if headers_seconds is not None else None,
+            "first_event_seconds": headers_seconds,
+            "terminal_seconds": (
+                round(terminal_seconds, 3) if terminal_seconds is not None else None
+            ),
+            "terminal_event": "chat.completion" if terminal_seconds is not None else None,
+            "status_code": status_code,
+            "sse_events": 0,
+            "transport_exception_type": transport_exception_type,
+            "logical_request_id": logical_request_id,
+            "client_request_id": client_request_id,
+            "request_payload_sha256": request_payload_sha256,
+            "response_headers": dict(response_headers or {}),
+            "delivery_state": delivery_state,
+            "pacing": dict(pacing),
+            "api_protocol": "chat-completions",
+            "endpoint": "/chat/completions",
+        }
+
+    def _create_once(
+        self,
+        payload: dict[str, Any],
+        *,
+        timeout_seconds: float,
+        logical_request_id: str,
+        client_request_id: str,
+        request_payload_sha256: str,
+        pacing: dict[str, Any],
+        on_text: Callable[[str], None] | None = None,
+    ) -> ResponseTurn:
+        endpoint = f"{self.config.base_url}/chat/completions"
+        started = time.monotonic()
+        headers_seconds: float | None = None
+        terminal_seconds: float | None = None
+        status_code: int | None = None
+        response_headers: dict[str, str] = {}
+        delivery_state = "pre_send"
+        try:
+            with _absolute_request_deadline(timeout_seconds):
+                response = self._client.post(
+                    endpoint,
+                    json=_chat_wire_payload(payload),
+                    headers={"X-Client-Request-ID": client_request_id},
+                    timeout=httpx.Timeout(
+                        connect=min(20.0, timeout_seconds),
+                        read=timeout_seconds,
+                        write=min(60.0, timeout_seconds),
+                        pool=min(20.0, timeout_seconds),
+                    ),
+                )
+            delivery_state = "headers_seen"
+            headers_seconds = time.monotonic() - started
+            terminal_seconds = headers_seconds
+            status_code = response.status_code
+            response_headers = _selected_response_headers(
+                response.headers, secrets=(self.config.api_key,)
+            )
+            retry_after = _retry_after_seconds(response.headers)
+            if response.status_code >= 400:
+                error_body = response.text[:4000].replace(
+                    self.config.api_key, "[REDACTED]"
+                )
+                try:
+                    error_detail: Any = response.json()
+                except json.JSONDecodeError:
+                    error_detail = error_body
+                global_fatal = _is_global_fatal_error(
+                    error_detail, status_code=response.status_code
+                )
+                explicit_overload = bool(
+                    response.status_code != 408 and _is_explicit_overload(error_detail)
+                )
+                safe_retry_reason: str | None = None
+                if not global_fatal:
+                    if response.status_code in SAFE_RETRY_HTTP_STATUSES:
+                        safe_retry_reason = f"http_{response.status_code}"
+                    elif explicit_overload:
+                        safe_retry_reason = "explicit_overload"
+                retryable = not global_fatal and (
+                    response.status_code in {408, 409, 425, 429}
+                    or 500 <= response.status_code < 600
+                    or explicit_overload
+                )
+                delivery_state = (
+                    "ambiguous_post_send"
+                    if response.status_code == 408
+                    else "headers_seen"
+                )
+                raise ProviderError(
+                    f"Chat Completions API returned HTTP {response.status_code}: {error_body}",
+                    retryable=retryable,
+                    status_code=response.status_code,
+                    retry_after=retry_after,
+                    phase="response_headers",
+                    global_fatal=global_fatal,
+                    safe_to_retry=safe_retry_reason in SAFE_AUTOMATIC_RETRY_REASONS,
+                    safe_retry_reason=safe_retry_reason,
+                    delivery_state=delivery_state,
+                    attempt_detail=self._attempt_detail(
+                        started=started,
+                        logical_request_id=logical_request_id,
+                        client_request_id=client_request_id,
+                        request_payload_sha256=request_payload_sha256,
+                        pacing=pacing,
+                        headers_seconds=headers_seconds,
+                        terminal_seconds=terminal_seconds,
+                        status_code=status_code,
+                        response_headers=response_headers,
+                        delivery_state=delivery_state,
+                    ),
+                )
+            try:
+                data = response.json()
+            except json.JSONDecodeError as exc:
+                delivery_state = "terminal_seen"
+                raise ProviderError(
+                    "Chat Completions API returned invalid JSON",
+                    retryable=False,
+                    phase="response_body",
+                    status_code=status_code,
+                    delivery_state=delivery_state,
+                    attempt_detail=self._attempt_detail(
+                        started=started,
+                        logical_request_id=logical_request_id,
+                        client_request_id=client_request_id,
+                        request_payload_sha256=request_payload_sha256,
+                        pacing=pacing,
+                        headers_seconds=headers_seconds,
+                        terminal_seconds=terminal_seconds,
+                        status_code=status_code,
+                        response_headers=response_headers,
+                        delivery_state=delivery_state,
+                    ),
+                ) from exc
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                delivery_state = "terminal_seen"
+                raise ProviderError(
+                    "Chat Completions API returned no choices",
+                    retryable=False,
+                    phase="response_body",
+                    status_code=status_code,
+                    delivery_state=delivery_state,
+                )
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if not isinstance(message, dict):
+                delivery_state = "terminal_seen"
+                raise ProviderError(
+                    "Chat Completions API returned no assistant message",
+                    retryable=False,
+                    phase="response_body",
+                    status_code=status_code,
+                    delivery_state=delivery_state,
+                )
+            output, text = _chat_message_to_output(message)
+            try:
+                _validated_function_calls(output)
+            except ProviderError as exc:
+                if exc.delivery_state is None:
+                    exc.delivery_state = "terminal_seen"
+                if exc.attempt_detail is None:
+                    exc.attempt_detail = self._attempt_detail(
+                        started=started,
+                        logical_request_id=logical_request_id,
+                        client_request_id=client_request_id,
+                        request_payload_sha256=request_payload_sha256,
+                        pacing=pacing,
+                        headers_seconds=headers_seconds,
+                        terminal_seconds=terminal_seconds,
+                        status_code=status_code,
+                        response_headers=response_headers,
+                        delivery_state="terminal_seen",
+                    )
+                raise
+            if text and on_text:
+                on_text(text)
+            return ResponseTurn(
+                str(data.get("id")) if data.get("id") is not None else None,
+                output,
+                text,
+                _chat_usage(data.get("usage") or {}),
+                elapsed_seconds=time.monotonic() - started,
+                first_event_seconds=headers_seconds,
+                headers_seconds=headers_seconds,
+                terminal_seconds=terminal_seconds,
+                terminal_event="chat.completion",
+                status_code=status_code,
+                sse_events=0,
+                logical_request_id=logical_request_id,
+                client_request_id=client_request_id,
+                request_payload_sha256=request_payload_sha256,
+                response_headers=response_headers,
+                delivery_state="terminal_seen",
+            )
+        except _AbsoluteRequestDeadlineExpired as exc:
+            delivery_state = "ambiguous_post_send"
+            raise ProviderError(
+                f"Chat Completions request exceeded its absolute {timeout_seconds:g}-second deadline",
+                retryable=True,
+                phase="total",
+                safe_to_retry=False,
+                delivery_state=delivery_state,
+                attempt_detail=self._attempt_detail(
+                    started=started,
+                    logical_request_id=logical_request_id,
+                    client_request_id=client_request_id,
+                    request_payload_sha256=request_payload_sha256,
+                    pacing=pacing,
+                    headers_seconds=headers_seconds,
+                    terminal_seconds=terminal_seconds,
+                    status_code=status_code,
+                    response_headers=response_headers,
+                    delivery_state=delivery_state,
+                    transport_exception_type=type(exc).__name__,
+                ),
+            ) from exc
+        except ProviderError:
+            raise
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
+            phase = "pool" if isinstance(exc, httpx.PoolTimeout) else "connect"
+            safe_retry_reason = (
+                "pool_timeout"
+                if isinstance(exc, httpx.PoolTimeout)
+                else "connect_timeout"
+                if isinstance(exc, httpx.ConnectTimeout)
+                else "connect_error"
+            )
+            raise ProviderError(
+                f"Chat Completions request failed before delivery during {phase}: "
+                f"{type(exc).__name__}: {exc}",
+                retryable=True,
+                phase=phase,
+                safe_to_retry=True,
+                safe_retry_reason=safe_retry_reason,
+                delivery_state="pre_send",
+                attempt_detail=self._attempt_detail(
+                    started=started,
+                    logical_request_id=logical_request_id,
+                    client_request_id=client_request_id,
+                    request_payload_sha256=request_payload_sha256,
+                    pacing=pacing,
+                    transport_exception_type=type(exc).__name__,
+                ),
+            ) from exc
+        except httpx.TimeoutException as exc:
+            delivery_state = "ambiguous_post_send"
+            phase = (
+                "read"
+                if isinstance(exc, httpx.ReadTimeout)
+                else "write"
+                if isinstance(exc, httpx.WriteTimeout)
+                else "transport"
+            )
+            raise ProviderError(
+                f"Chat Completions request timed out during {phase}",
+                retryable=True,
+                phase=phase,
+                delivery_state=delivery_state,
+                attempt_detail=self._attempt_detail(
+                    started=started,
+                    logical_request_id=logical_request_id,
+                    client_request_id=client_request_id,
+                    request_payload_sha256=request_payload_sha256,
+                    pacing=pacing,
+                    headers_seconds=headers_seconds,
+                    terminal_seconds=terminal_seconds,
+                    status_code=status_code,
+                    response_headers=response_headers,
+                    delivery_state=delivery_state,
+                    transport_exception_type=type(exc).__name__,
+                ),
+            ) from exc
+        except httpx.TransportError as exc:
+            delivery_state = "ambiguous_post_send"
+            raise ProviderError(
+                f"Chat Completions connection failed: {type(exc).__name__}: {exc}",
+                retryable=True,
+                phase="transport",
+                delivery_state=delivery_state,
+                attempt_detail=self._attempt_detail(
+                    started=started,
+                    logical_request_id=logical_request_id,
+                    client_request_id=client_request_id,
+                    request_payload_sha256=request_payload_sha256,
+                    pacing=pacing,
+                    headers_seconds=headers_seconds,
+                    terminal_seconds=terminal_seconds,
+                    status_code=status_code,
+                    response_headers=response_headers,
+                    delivery_state=delivery_state,
+                    transport_exception_type=type(exc).__name__,
+                ),
+            ) from exc
+        except httpx.HTTPError as exc:
+            delivery_state = "ambiguous_post_send"
+            raise ProviderError(
+                f"Chat Completions request failed: {type(exc).__name__}: {exc}",
+                retryable=False,
+                phase="transport",
+                delivery_state=delivery_state,
+                attempt_detail=self._attempt_detail(
+                    started=started,
+                    logical_request_id=logical_request_id,
+                    client_request_id=client_request_id,
+                    request_payload_sha256=request_payload_sha256,
+                    pacing=pacing,
+                    headers_seconds=headers_seconds,
+                    terminal_seconds=terminal_seconds,
+                    status_code=status_code,
+                    response_headers=response_headers,
+                    delivery_state=delivery_state,
+                    transport_exception_type=type(exc).__name__,
+                ),
+            ) from exc
+
+    def create(
+        self,
+        payload: dict[str, Any],
+        on_text: Callable[[str], None] | None = None,
+        *,
+        deadline: float | None = None,
+    ) -> ResponseTurn:
+        payload = self.config.apply_generation(payload)
+        started = time.monotonic()
+        last_error: ProviderError | None = None
+        attempt_history: list[dict[str, Any]] = []
+        logical_request_id = uuid.uuid4().hex
+        request_payload_sha256 = _chat_request_payload_sha256(payload)
+        for attempt in range(self.config.max_retries + 1):
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise ProviderError(
+                    "Chat Completions request could not start before the task deadline",
+                    retryable=True,
+                    phase="total",
+                    safe_to_retry=False,
+                    delivery_state="pre_send",
+                    attempts=len(attempt_history),
+                    elapsed_seconds=time.monotonic() - started,
+                    attempt_history=[dict(item) for item in attempt_history],
+                )
+            pacing = self.pacer.acquire(
+                deadline=(deadline if self.pacer.interval_seconds > 0 else None)
+            )
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise AgentTimeoutError(
+                    "Task deadline expired before the paced Relay request could start"
+                )
+            client_request_id = f"{logical_request_id}-{attempt + 1}"
+            try:
+                turn = self._create_once(
+                    payload,
+                    timeout_seconds=(
+                        min(self.config.timeout_seconds, remaining)
+                        if remaining is not None
+                        else self.config.timeout_seconds
+                    ),
+                    logical_request_id=logical_request_id,
+                    client_request_id=client_request_id,
+                    request_payload_sha256=request_payload_sha256,
+                    pacing=pacing,
+                    on_text=on_text,
+                )
+                attempt_history.append(
+                    {
+                        "attempt": attempt + 1,
+                        "outcome": "success",
+                        "elapsed_seconds": round(turn.elapsed_seconds, 3),
+                        "headers_seconds": (
+                            round(turn.headers_seconds, 3)
+                            if turn.headers_seconds is not None
+                            else None
+                        ),
+                        "first_event_seconds": (
+                            round(turn.first_event_seconds, 3)
+                            if turn.first_event_seconds is not None
+                            else None
+                        ),
+                        "terminal_seconds": (
+                            round(turn.terminal_seconds, 3)
+                            if turn.terminal_seconds is not None
+                            else None
+                        ),
+                        "terminal_event": turn.terminal_event,
+                        "status_code": turn.status_code,
+                        "sse_events": turn.sse_events,
+                        "transport_exception_type": None,
+                        "retryable": False,
+                        "safe_to_retry": False,
+                        "safe_retry_reason": None,
+                        "retry_after_seconds": None,
+                        "backoff_requested_seconds": None,
+                        "backoff_seconds": None,
+                        "overload_detected": False,
+                        "no_header_read_timeout": False,
+                        "retry_backoff_reason": None,
+                        "automatic_retry_scheduled": False,
+                        "automatic_retry_suppressed_reason": None,
+                        "logical_request_id": turn.logical_request_id
+                        or logical_request_id,
+                        "client_request_id": turn.client_request_id
+                        or client_request_id,
+                        "request_payload_sha256": turn.request_payload_sha256
+                        or request_payload_sha256,
+                        "response_headers": dict(turn.response_headers),
+                        "delivery_state": turn.delivery_state or "terminal_seen",
+                        "pacing": dict(pacing),
+                        "api_protocol": "chat-completions",
+                        "endpoint": "/chat/completions",
+                    }
+                )
+                turn.attempts = attempt + 1
+                turn.elapsed_seconds = time.monotonic() - started
+                turn.logical_request_id = logical_request_id
+                turn.client_request_id = client_request_id
+                turn.request_payload_sha256 = request_payload_sha256
+                turn.attempt_history = [dict(item) for item in attempt_history]
+                return turn
+            except ProviderError as exc:
+                last_error = exc
+                retryable = bool(exc.retryable)
+                safe_retry_reason = exc.safe_retry_reason
+                safe_to_retry = bool(
+                    retryable
+                    and exc.safe_to_retry
+                    and safe_retry_reason in SAFE_AUTOMATIC_RETRY_REASONS
+                )
+                detail = dict(exc.attempt_detail or {})
+                retry_scheduled = bool(safe_to_retry and attempt < self.config.max_retries)
+                suppressed_reason: str | None = None
+                if exc.safe_to_retry and safe_retry_reason not in SAFE_AUTOMATIC_RETRY_REASONS:
+                    suppressed_reason = "unrecognized_safe_retry_reason"
+                elif not safe_to_retry:
+                    suppressed_reason = "delivery_not_known_safe"
+                elif not retry_scheduled:
+                    suppressed_reason = "max_retries_exhausted"
+                detail.update(
+                    {
+                        "attempt": attempt + 1,
+                        "outcome": "error",
+                        "error_type": (
+                            type(exc.__cause__).__name__
+                            if exc.__cause__ is not None
+                            else type(exc).__name__
+                        ),
+                        "message": redact_sensitive_text(
+                            str(exc), secrets=(self.config.api_key,)
+                        ),
+                        "phase": exc.phase,
+                        "status_code": exc.status_code
+                        if exc.status_code is not None
+                        else detail.get("status_code"),
+                        "retryable": retryable,
+                        "safe_to_retry": safe_to_retry,
+                        "safe_retry_reason": safe_retry_reason if safe_to_retry else None,
+                        "retry_after_seconds": exc.retry_after,
+                        "backoff_requested_seconds": None,
+                        "backoff_seconds": None,
+                        "overload_detected": safe_retry_reason == "explicit_overload",
+                        "no_header_read_timeout": bool(
+                            exc.phase == "read"
+                            and (exc.attempt_detail or {}).get("headers_seconds") is None
+                        ),
+                        "retry_backoff_reason": None,
+                        "automatic_retry_scheduled": retry_scheduled,
+                        "automatic_retry_suppressed_reason": suppressed_reason,
+                        "logical_request_id": detail.get(
+                            "logical_request_id", logical_request_id
+                        ),
+                        "client_request_id": detail.get(
+                            "client_request_id", client_request_id
+                        ),
+                        "request_payload_sha256": detail.get(
+                            "request_payload_sha256", request_payload_sha256
+                        ),
+                        "response_headers": dict(detail.get("response_headers") or {}),
+                        "delivery_state": exc.delivery_state
+                        or detail.get("delivery_state")
+                        or "ambiguous_post_send",
+                        "pacing": dict(detail.get("pacing") or pacing),
+                        "api_protocol": "chat-completions",
+                        "endpoint": "/chat/completions",
+                    }
+                )
+                attempt_history.append(detail)
+                exc.retryable = retryable
+                exc.safe_to_retry = safe_to_retry
+                exc.safe_retry_reason = safe_retry_reason if safe_to_retry else None
+                exc.delivery_state = str(detail["delivery_state"])
+                if not retry_scheduled:
+                    exc.attempts = attempt + 1
+                    exc.elapsed_seconds = time.monotonic() - started
+                    exc.attempt_history = [dict(item) for item in attempt_history]
+                    raise
+                delay = exc.retry_after
+                if delay is None:
+                    if safe_retry_reason in {
+                        "explicit_overload",
+                        "http_425",
+                        "http_429",
+                        "http_503",
+                    }:
+                        base_delay = OVERLOAD_RETRY_MIN_SECONDS
+                        backoff_reason = "capacity_rejection"
+                    elif safe_retry_reason in {
+                        "connect_error",
+                        "connect_timeout",
+                        "pool_timeout",
+                    }:
+                        base_delay = CONNECT_RETRY_MIN_SECONDS
+                        backoff_reason = "pre_send_connection_failure"
+                    else:
+                        base_delay = min(2**attempt, 8)
+                        backoff_reason = "bounded_exponential"
+                    delay = base_delay
+                else:
+                    if (
+                        safe_retry_reason
+                        in {
+                            "explicit_overload",
+                            "http_425",
+                            "http_429",
+                            "http_503",
+                        }
+                        and delay < OVERLOAD_RETRY_MIN_SECONDS
+                    ):
+                        delay = OVERLOAD_RETRY_MIN_SECONDS
+                        backoff_reason = "provider_retry_after_capacity_floor"
+                    else:
+                        backoff_reason = "provider_retry_after"
+                if deadline is not None:
+                    delay = min(delay, max(deadline - time.monotonic(), 0.0))
+                sleep_seconds = min(max(delay, 0.0), RETRY_BACKOFF_MAX_SECONDS)
+                attempt_history[-1]["backoff_requested_seconds"] = round(
+                    sleep_seconds, 3
+                )
+                attempt_history[-1]["retry_backoff_reason"] = backoff_reason
+                backoff_started = time.monotonic()
+                time.sleep(sleep_seconds)
+                attempt_history[-1]["backoff_seconds"] = round(
+                    time.monotonic() - backoff_started, 3
+                )
+        assert last_error is not None
+        raise last_error
+
+
+def _provider_client(
+    config: ProviderConfig, *, pacer: RelayPacer | None = None
+) -> ResponsesClient | ChatCompletionsClient:
+    if config.api_protocol == "responses":
+        return ResponsesClient(config, pacer=pacer) if pacer is not None else ResponsesClient(config)
+    if config.api_protocol == "chat-completions":
+        return (
+            ChatCompletionsClient(config, pacer=pacer)
+            if pacer is not None
+            else ChatCompletionsClient(config)
+        )
+    raise HarnessError(f"Unsupported API protocol {config.api_protocol!r}")
+
+
 class SpreadsheetAgent:
     def __init__(
         self,
@@ -1207,7 +2063,9 @@ class SpreadsheetAgent:
                 "\nEvery response in this stage must call exactly one available function. "
                 f"When the stage is complete, call {TERMINAL_TOOL_NAME} with the complete final "
                 "response in its result field. Do not call another function in the same response "
-                f"as {TERMINAL_TOOL_NAME}."
+                f"as {TERMINAL_TOOL_NAME}. On the final allowed turn, only "
+                f"{TERMINAL_TOOL_NAME} will be available, so complete and verify the workbook "
+                "before then."
             )
         return instructions, manifest
 
@@ -1241,6 +2099,7 @@ class SpreadsheetAgent:
         system, skill_manifest = self._instructions()
         session = self.tools.session
         tool_schemas = list(self.tools.schemas)
+        no_argument_tools = _no_argument_tools(tool_schemas)
         tool_names = {str(tool.get("name", "")) for tool in tool_schemas}
         unavailable_forced_tools = sorted(set(self.forced_tool_prefix) - tool_names)
         if unavailable_forced_tools:
@@ -1280,6 +2139,7 @@ class SpreadsheetAgent:
         tool_trace: list[dict[str, Any]] = []
         observed_first_tool: str | None = None
         observed_forced_tool_prefix: list[str] = []
+        forced_prefix_index = 0
         session.recorder.record(
             "agent.started",
             {
@@ -1303,11 +2163,7 @@ class SpreadsheetAgent:
             },
         )
 
-        client_context = (
-            ResponsesClient(self.config, pacer=self.pacer)
-            if self.pacer is not None
-            else ResponsesClient(self.config)
-        )
+        client_context = _provider_client(self.config, pacer=self.pacer)
         with client_context as client:
             for turn_number in range(1, self.max_turns + 1):
                 ensure_within_deadline()
@@ -1332,23 +2188,30 @@ class SpreadsheetAgent:
                     tool_choice: str | dict[str, str] = "auto"
                     request_tool_schemas = tool_schemas
                     forced_tool = (
-                        self.forced_tool_prefix[turn_number - 1]
-                        if turn_number <= len(self.forced_tool_prefix)
+                        self.forced_tool_prefix[forced_prefix_index]
+                        if forced_prefix_index < len(self.forced_tool_prefix)
                         else None
                     )
                     if forced_tool is not None:
-                        if self.required_tool_termination:
-                            request_tool_schemas = [
-                                schema
-                                for schema in tool_schemas
-                                if schema.get("name") == forced_tool
-                            ]
-                            tool_choice = "required"
-                        else:
-                            tool_choice = {
-                                "type": "function",
-                                "name": forced_tool,
-                            }
+                        request_tool_schemas = [
+                            schema
+                            for schema in tool_schemas
+                            if schema.get("name") == forced_tool
+                        ]
+                        tool_choice = {
+                            "type": "function",
+                            "name": forced_tool,
+                        }
+                    elif self.required_tool_termination and turn_number == self.max_turns:
+                        request_tool_schemas = [
+                            schema
+                            for schema in tool_schemas
+                            if schema.get("name") == TERMINAL_TOOL_NAME
+                        ]
+                        tool_choice = {
+                            "type": "function",
+                            "name": TERMINAL_TOOL_NAME,
+                        }
                     elif self.required_tool_termination:
                         tool_choice = "required"
                     payload.update(
@@ -1359,9 +2222,14 @@ class SpreadsheetAgent:
                         }
                     )
                 input_chars, input_bytes = _serialized_size(input_items)
-                request_body_chars, request_body_bytes = _serialized_size(
-                    _wire_payload(payload, store_responses=self.config.store_responses)
+                wire_request = (
+                    _wire_payload(
+                        payload, store_responses=self.config.store_responses
+                    )
+                    if self.config.api_protocol == "responses"
+                    else _chat_wire_payload(payload)
                 )
+                request_body_chars, request_body_bytes = _serialized_size(wire_request)
                 context_metrics = {
                     "input_serialized_chars": input_chars,
                     "input_serialized_bytes": input_bytes,
@@ -1501,8 +2369,8 @@ class SpreadsheetAgent:
                     )
                     raise
                 expected_forced_tool = (
-                    self.forced_tool_prefix[turn_number - 1]
-                    if turn_number <= len(self.forced_tool_prefix)
+                    self.forced_tool_prefix[forced_prefix_index]
+                    if forced_prefix_index < len(self.forced_tool_prefix)
                     else None
                 )
                 if expected_forced_tool is not None:
@@ -1515,14 +2383,45 @@ class SpreadsheetAgent:
                         if len(observed_forced_tools) == 1
                         else None
                     )
-                    if turn_number == 1:
-                        observed_first_tool = observed_forced_tool
                     if observed_forced_tools != [expected_forced_tool]:
+                        if not observed_forced_tools and turn_number < self.max_turns:
+                            recent_items = list(turn.output)
+                            recent_items.append(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": (
+                                                "Your previous response did not call the "
+                                                "required function. Continue by calling "
+                                                f"{expected_forced_tool} exactly once."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            )
+                            recent_summaries = []
+                            recent_raw_tool_output_chars = 0
+                            recent_image_bytes = 0
+                            recent_image_count = 0
+                            session.recorder.record(
+                                "agent.empty_forced_tool_response_reprompted",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "forced_prefix_index": forced_prefix_index,
+                                    "requested_forced_tool": expected_forced_tool,
+                                    "observed_forced_tools": observed_forced_tools,
+                                },
+                            )
+                            continue
                         session.recorder.record(
                             "agent.routing_failed",
                             {
                                 "stage": self.stage,
                                 "forced_turn": turn_number,
+                                "forced_prefix_index": forced_prefix_index,
                                 "requested_forced_tool": expected_forced_tool,
                                 "observed_forced_tools": observed_forced_tools,
                             },
@@ -1532,7 +2431,10 @@ class SpreadsheetAgent:
                             f"{expected_forced_tool!r} call; observed {observed_forced_tools!r}"
                         )
                     assert observed_forced_tool is not None
+                    if forced_prefix_index == 0:
+                        observed_first_tool = observed_forced_tool
                     observed_forced_tool_prefix.append(observed_forced_tool)
+                    forced_prefix_index += 1
                 if self.required_tool_termination and len(function_calls) > 1:
                     observed_names = [
                         str(function_call.get("name", ""))
@@ -1624,19 +2526,88 @@ class SpreadsheetAgent:
                     return result
                 if not function_calls:
                     if self.required_tool_termination:
+                        final_text = turn.text.strip()
+                        if not final_text:
+                            if turn_number < self.max_turns:
+                                recent_items = list(turn.output)
+                                recent_items.append(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "input_text",
+                                                "text": (
+                                                    "Your previous response did not call a "
+                                                    "function. This stage requires exactly one "
+                                                    "available function call. Continue by calling "
+                                                    "one available tool, or finish by calling "
+                                                    f"{TERMINAL_TOOL_NAME}."
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                )
+                                recent_summaries = []
+                                recent_raw_tool_output_chars = 0
+                                recent_image_bytes = 0
+                                recent_image_count = 0
+                                session.recorder.record(
+                                    "agent.empty_required_response_reprompted",
+                                    {
+                                        "stage": self.stage,
+                                        "turn": turn_number,
+                                        "required_tool_choice": True,
+                                        "observed_tools": [],
+                                    },
+                                )
+                                continue
+                            session.recorder.record(
+                                "agent.routing_failed",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "required_tool_choice": True,
+                                    "observed_tools": [],
+                                },
+                            )
+                            raise AgentRoutingError(
+                                "Required-tool stage returned no function call; "
+                                f"finish with {TERMINAL_TOOL_NAME!r}"
+                            )
+                        result = AgentResult(
+                            final_text=final_text,
+                            turns=turn_number,
+                            tool_calls=calls,
+                            usage=total_usage,
+                            response_id=last_id,
+                            request_timings=request_timings,
+                            context_policy=dict(CONTEXT_POLICY),
+                            budget=(
+                                self.budget.to_dict()
+                                if self.budget is not None
+                                else None
+                            ),
+                            stage=self.stage,
+                            tool_trace=tool_trace,
+                            first_tool_choice=self.first_tool_choice,
+                            observed_first_tool=observed_first_tool,
+                            forced_tool_prefix=list(self.forced_tool_prefix),
+                            observed_forced_tool_prefix=observed_forced_tool_prefix,
+                            post_prefix_tool_choice="required",
+                            terminal_tool=TERMINAL_TOOL_NAME,
+                            observed_terminal_tool=ASSISTANT_TEXT_TERMINAL,
+                        )
                         session.recorder.record(
-                            "agent.routing_failed",
+                            "agent.terminal_submitted",
                             {
                                 "stage": self.stage,
                                 "turn": turn_number,
-                                "required_tool_choice": True,
-                                "observed_tools": [],
+                                "terminal_tool": TERMINAL_TOOL_NAME,
+                                "observed_terminal_tool": ASSISTANT_TEXT_TERMINAL,
                             },
                         )
-                        raise AgentRoutingError(
-                            "Required-tool stage returned no function call; "
-                            f"finish with {TERMINAL_TOOL_NAME!r}"
-                        )
+                        session.recorder.record("agent.completed", result.to_dict())
+                        return result
                     result = AgentResult(
                         final_text=turn.text,
                         turns=turn_number,
@@ -1658,7 +2629,9 @@ class SpreadsheetAgent:
                     return result
 
                 archived_tool_history.extend(recent_summaries)
-                next_recent_items = list(turn.output)
+                next_recent_items = [
+                    item for item in turn.output if item.get("type") != "function_call"
+                ]
                 next_recent_summaries: list[dict[str, Any]] = []
                 pending_tool_results: list[tuple[str, str, Any, dict[str, Any]]] = []
                 pending_image_items: list[dict[str, Any]] = []
@@ -1667,6 +2640,7 @@ class SpreadsheetAgent:
                     ensure_within_deadline()
                     calls += 1
                     name = str(function_call.get("name", ""))
+                    parsed_arguments: dict[str, Any] | None = None
                     raw_arguments = function_call.get("arguments", "{}")
                     try:
                         arguments = (
@@ -1681,9 +2655,18 @@ class SpreadsheetAgent:
                         outcome = None
                         summary_arguments: Any = raw_arguments
                     else:
+                        parsed_arguments = arguments
                         outcome = self.tools.invoke(name, arguments)
                         outcome_data = outcome.data
                         summary_arguments = arguments
+                    next_recent_items.append(
+                        _replayed_function_call(
+                            function_call,
+                            arguments=parsed_arguments,
+                            raw_arguments=raw_arguments,
+                            omit_arguments=name in no_argument_tools,
+                        )
+                    )
                     model_visible_outcome = dict(outcome_data)
                     image_attached: bool | None = None
                     if outcome and outcome.image_path:
@@ -1771,7 +2754,12 @@ class SpreadsheetAgent:
 
                 remaining_output_chars = _RAW_TOOL_TURN_MAX_CHARS
                 next_tool_output_chars = 0
-                for index, (call_id, name, summary_arguments, outcome_data) in enumerate(
+                for index, (
+                    call_id,
+                    name,
+                    summary_arguments,
+                    outcome_data,
+                ) in enumerate(
                     pending_tool_results
                 ):
                     remaining_calls = len(pending_tool_results) - index

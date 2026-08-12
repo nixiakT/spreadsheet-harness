@@ -241,9 +241,9 @@ def test_paper_vision_three_turn_required_route_attaches_image_and_submits_yaml(
     )
 
     assert [request["tool_choice"] for request in VisionClient.requests] == [
-        "required",
-        "required",
-        "required",
+        {"type": "function", "name": "render_workbook"},
+        {"type": "function", "name": "view_image"},
+        {"type": "function", "name": "submit_result"},
     ]
     assert [
         [tool["name"] for tool in request["tools"]]
@@ -251,7 +251,7 @@ def test_paper_vision_three_turn_required_route_attaches_image_and_submits_yaml(
     ] == [
         ["render_workbook"],
         ["view_image"],
-        ["render_workbook", "view_image", "submit_result"],
+        ["submit_result"],
     ]
     third_input = VisionClient.requests[2]["input"]
     assert any(

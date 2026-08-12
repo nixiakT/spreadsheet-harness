@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from openpyxl import Workbook
 
+from spreadsheet_harness import cli as cli_module
 from spreadsheet_harness.agent import AgentResult
 from spreadsheet_harness.arms import PaperStageValidationError
 from spreadsheet_harness.benchmark import SpreadsheetTask
@@ -94,6 +95,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
             "test-model",
             max_retries=3,
             request_interval_seconds=20.0,
+            litellm_timeout_seconds=600,
         ),
         tmp_path / "comparison",
         skill_registry=SkillRegistry([]),
@@ -129,7 +131,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "direct_text_stages": ["paper.reconcile"],
     }
     assert manifest["forced_prefix_wire_policy"] == {
-        "tool_choice": "required",
+        "tool_choice": "explicit_function",
         "available_tools": "forced tool only",
         "terminal_tool_available": False,
     }
@@ -164,6 +166,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["overload_retry_min_seconds"] == 15.0
     assert manifest["configuration"]["connect_retry_min_seconds"] == 30.0
     assert manifest["configuration"]["request_interval_seconds"] == 20.0
+    assert manifest["configuration"]["litellm_timeout_seconds"] == 600.0
     assert manifest["configuration"]["max_turns_per_arm"] == 20
     assert manifest["configuration"]["request_pacing_policy"] == (
         "process_local_min_attempt_start_interval_v1"
@@ -272,6 +275,73 @@ def test_comparison_manifest_records_custom_turn_caps_and_zero_pacing(
         },
         "ours": {"solve": 100},
     }
+
+
+def test_comparison_manifest_records_and_locks_generation_controls(tmp_path: Path) -> None:
+    tasks = _tasks(tmp_path)
+    output = tmp_path / "generation-lock"
+    first = ComparisonBenchmarkRunner(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            api_protocol="chat-completions",
+            seed=41,
+            temperature=1.0,
+            litellm_timeout_seconds=600,
+        ),
+        output,
+        skill_registry=SkillRegistry([]),
+    )
+    first._prepare_manifest(tasks)
+
+    manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["configuration"]["api_protocol"] == "chat-completions"
+    assert manifest["configuration"]["litellm_timeout_seconds"] == 600.0
+    assert manifest["configuration"]["generation"] == {
+        "temperature": 1.0,
+        "seed": 41,
+    }
+
+    second = ComparisonBenchmarkRunner(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            api_protocol="chat-completions",
+            seed=42,
+            temperature=1.0,
+            litellm_timeout_seconds=600,
+        ),
+        output,
+        skill_registry=SkillRegistry([]),
+    )
+    with pytest.raises(HarnessError, match="different frozen config"):
+        second._prepare_manifest(tasks)
+
+
+def test_split_manifest_rejects_offset_or_limit(monkeypatch: Any, tmp_path: Path) -> None:
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"task_ids": []}), encoding="utf-8")
+    parser = cli_module.build_parser()
+    monkeypatch.setattr(
+        cli_module,
+        "download_verified",
+        lambda _: tmp_path / "dataset",
+    )
+    monkeypatch.setattr(cli_module, "load_verified_tasks", lambda _: [])
+    monkeypatch.setattr(
+        cli_module,
+        "verify_trace2skill_heldout_manifest",
+        lambda *_: {"valid": True},
+    )
+
+    for selector in (["--offset", "1"], ["--limit", "1"]):
+        args = parser.parse_args(
+            ["benchmark", "compare", "--split-manifest", str(split), *selector]
+        )
+        with pytest.raises(HarnessError, match="derivative manifest"):
+            cli_module.cmd_benchmark_compare(args)
 
 
 def test_comparison_rejects_unreachable_turn_ceiling(tmp_path: Path) -> None:
@@ -623,12 +693,14 @@ def test_comparison_runner_calls_arm_without_answer_metadata(
     assert row["max_turns_per_arm"] == 100
     assert row["stage_turn_caps"] == {"solve": 100}
     assert row["request_interval_seconds"] == 0.0
+    assert row["litellm_timeout_seconds"] is None
     assert "TOP_SECRET" not in json.dumps(captured, default=str)
     trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
     configured = [item for item in trajectory if item["event"] == "benchmark.configured"]
     assert configured[0]["payload"]["max_model_calls"] == 100
     assert configured[0]["payload"]["max_turns_per_arm"] == 100
     assert configured[0]["payload"]["stage_turn_caps"] == {"solve": 100}
+    assert configured[0]["payload"]["litellm_timeout_seconds"] is None
     evaluation = [item for item in trajectory if item["event"] == "benchmark.evaluated"]
     assert len(evaluation) == 1
     assert evaluation[0]["payload"]["passed"] is False

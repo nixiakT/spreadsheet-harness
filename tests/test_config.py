@@ -21,6 +21,7 @@ _GENERATION_ENVIRONMENT = (
     "SHEET_AGENT_REPETITION_PENALTY",
     "SHEET_AGENT_ENABLE_THINKING",
 )
+_PROVIDER_EXTENSION_ENVIRONMENT = ("SHEET_AGENT_LITELLM_TIMEOUT",)
 
 
 def _secure_key_file(path: Path, key: str, *, trailing_newline: bool = True) -> Path:
@@ -36,7 +37,7 @@ def _isolate_provider_environment(
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.delenv("SHEET_AGENT_API_KEY_FILE", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    for name in _GENERATION_ENVIRONMENT:
+    for name in (*_GENERATION_ENVIRONMENT, *_PROVIDER_EXTENSION_ENVIRONMENT):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -86,6 +87,44 @@ def test_request_interval_is_public_and_validated() -> None:
         )
 
 
+def test_api_protocol_is_explicit_public_and_validated() -> None:
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "test-model",
+        api_protocol="chat-completions",
+    )
+
+    assert config.api_protocol == "chat-completions"
+    assert config.public_dict()["api_protocol"] == "chat-completions"
+    with pytest.raises(HarnessError, match="API protocol"):
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            api_protocol="chat",
+        )
+
+
+def test_litellm_timeout_is_explicit_public_and_validated() -> None:
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "test-model",
+        litellm_timeout_seconds=600,
+    )
+
+    assert config.litellm_timeout_seconds == 600.0
+    assert config.public_dict()["litellm_timeout_seconds"] == 600.0
+    with pytest.raises(HarnessError, match="LiteLLM timeout"):
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            litellm_timeout_seconds=0,
+        )
+
+
 def test_benchmark_cli_exposes_turn_and_pacing_controls() -> None:
     parser = build_parser()
     comparison = parser.parse_args(
@@ -96,8 +135,12 @@ def test_benchmark_cli_exposes_turn_and_pacing_controls() -> None:
             "100",
             "--max-turns-per-arm",
             "100",
+            "--api-protocol",
+            "chat-completions",
             "--request-interval-seconds",
             "0",
+            "--litellm-timeout",
+            "600",
         ]
     )
     single = parser.parse_args(
@@ -113,7 +156,9 @@ def test_benchmark_cli_exposes_turn_and_pacing_controls() -> None:
 
     assert comparison.max_model_calls == 100
     assert comparison.max_turns_per_arm == 100
+    assert comparison.api_protocol == "chat-completions"
     assert comparison.request_interval_seconds == 0.0
+    assert comparison.litellm_timeout == 600.0
     assert single.max_turns == 100
     assert single.request_interval_seconds == 0.0
 
@@ -204,14 +249,17 @@ def test_generation_discovery_reads_environment_and_cli_overrides(
     monkeypatch.setenv("SHEET_AGENT_MIN_P", "0")
     monkeypatch.setenv("SHEET_AGENT_REPETITION_PENALTY", "1")
     monkeypatch.setenv("SHEET_AGENT_ENABLE_THINKING", "off")
+    monkeypatch.setenv("SHEET_AGENT_LITELLM_TIMEOUT", "300")
 
     config = ProviderConfig.discover(
         base_url="https://example.test/v1",
         api_key="not-a-real-key",
         model="test-model",
         temperature=1.0,
+        litellm_timeout_seconds=600,
     )
 
+    assert config.litellm_timeout_seconds == 600.0
     assert config.generation_dict() == {
         "temperature": 1.0,
         "top_p": 0.95,
@@ -284,10 +332,14 @@ def test_generation_cli_flags_preserve_explicit_false(tmp_path: Path, monkeypatc
             "--repetition-penalty",
             "1",
             "--disable-thinking",
+            "--litellm-timeout",
+            "600",
         ]
     )
 
-    assert _provider(args).generation_dict() == {
+    config = _provider(args)
+    assert config.litellm_timeout_seconds == 600.0
+    assert config.generation_dict() == {
         "temperature": 1.0,
         "top_p": 1.0,
         "seed": 42,

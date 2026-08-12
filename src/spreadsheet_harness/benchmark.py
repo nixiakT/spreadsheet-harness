@@ -729,12 +729,14 @@ class VerifiedBenchmarkRunner:
             "runtime": _runtime_fingerprint(),
             "configuration": {
                 "model": self.config.model,
+                "api_protocol": self.config.api_protocol,
                 "requested_reasoning_effort": (
                     self.config.requested_reasoning_effort or self.config.reasoning_effort
                 ),
                 "reasoning_effort": self.config.reasoning_effort,
                 "provider_base_url": self.config.base_url,
                 "request_timeout_seconds": self.config.timeout_seconds,
+                "litellm_timeout_seconds": self.config.litellm_timeout_seconds,
                 "request_retries": self.config.max_retries,
                 "request_interval_seconds": self.config.request_interval_seconds,
                 "request_pacing_policy": PACING_POLICY,
@@ -742,6 +744,7 @@ class VerifiedBenchmarkRunner:
                 "request_pacing_retries_included": True,
                 "request_pacing_first_attempt_immediate": True,
                 "store_responses": self.config.store_responses,
+                "generation": self.config.generation_dict(),
                 "max_turns": self.max_turns,
                 "max_output_tokens": self.max_output_tokens,
                 "context_policy": CONTEXT_POLICY,
@@ -764,7 +767,7 @@ class VerifiedBenchmarkRunner:
                 raise HarnessError(f"Invalid benchmark manifest: {self.manifest_path}") from exc
             if actual != expected:
                 raise HarnessError(
-                    "Refusing to resume with a different model, effort, task set, or run config"
+                    "Refusing to resume with a different provider, task set, or run config"
                 )
             return
         if self.results_path.is_file() and self.results_path.stat().st_size:
@@ -832,14 +835,17 @@ class VerifiedBenchmarkRunner:
             "protocol": task.protocol,
             "benchmark_protocol_version": BENCHMARK_PROTOCOL_VERSION,
             "model": self.config.model,
+            "api_protocol": self.config.api_protocol,
             "requested_reasoning_effort": (
                 self.config.requested_reasoning_effort or self.config.reasoning_effort
             ),
             "reasoning_effort": self.config.reasoning_effort,
             "provider_base_url": self.config.base_url,
             "request_timeout_seconds": self.config.timeout_seconds,
+            "litellm_timeout_seconds": self.config.litellm_timeout_seconds,
             "request_retries": self.config.max_retries,
             "request_interval_seconds": self.config.request_interval_seconds,
+            "generation": self.config.generation_dict(),
             "request_pacing_scope": "single_worker_process",
             "max_turns": self.max_turns,
             "max_output_tokens": self.max_output_tokens,
@@ -861,6 +867,9 @@ class VerifiedBenchmarkRunner:
                     "schema_version": BENCHMARK_MANIFEST_SCHEMA_VERSION,
                     "benchmark_protocol_version": BENCHMARK_PROTOCOL_VERSION,
                     "request_interval_seconds": self.config.request_interval_seconds,
+                    "litellm_timeout_seconds": self.config.litellm_timeout_seconds,
+                    "api_protocol": self.config.api_protocol,
+                    "generation": self.config.generation_dict(),
                     "request_pacing_policy": PACING_POLICY,
                     "request_pacing_scope": "single_worker_process",
                     "max_turns": self.max_turns,
@@ -1042,6 +1051,9 @@ class VerifiedBenchmarkRunner:
                                 "reasoning_effort": self.config.reasoning_effort,
                                 "provider_base_url": self.config.base_url,
                                 "request_timeout_seconds": self.config.timeout_seconds,
+                                "litellm_timeout_seconds": (
+                                    self.config.litellm_timeout_seconds
+                                ),
                                 "request_retries": self.config.max_retries,
                                 "request_interval_seconds": (
                                     self.config.request_interval_seconds

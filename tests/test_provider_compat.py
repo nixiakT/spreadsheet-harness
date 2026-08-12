@@ -9,7 +9,11 @@ from spreadsheet_harness.agent import ResponseTurn
 from spreadsheet_harness.cli import build_parser, cmd_doctor
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import HarnessError, ProviderError
-from spreadsheet_harness.provider_compat import check_responses_tool_compatibility
+from spreadsheet_harness.provider_compat import (
+    check_chat_completions_tool_compatibility,
+    check_responses_tool_compatibility,
+    check_tool_compatibility,
+)
 
 
 class ScriptedResponsesClient:
@@ -110,6 +114,76 @@ def test_tool_compatibility_canary_forces_and_replays_function_call(
         "value": "SPREADSHEET_HARNESS_CANARY_7B19",
     }
     assert second["tool_choice"] == "auto"
+
+
+def test_chat_tool_compatibility_canary_uses_chat_client(monkeypatch: Any) -> None:
+    ScriptedResponsesClient.requests = []
+    monkeypatch.setattr(
+        "spreadsheet_harness.provider_compat.ChatCompletionsClient",
+        ScriptedResponsesClient,
+    )
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "qwen36-35b-a3b",
+        api_protocol="chat-completions",
+        reasoning_effort="none",
+        max_retries=0,
+    )
+
+    report = check_chat_completions_tool_compatibility(config)
+
+    assert report == {
+        "ok": True,
+        "protocol": "chat_completions_tool_calls_v1",
+        "endpoint": "/chat/completions",
+        "forced_function_call": True,
+        "call_id_replayed": True,
+        "function_call_output_consumed": True,
+        "terminal_text": True,
+        "requests": 2,
+        "generation": {},
+        "usage": {"input_tokens": 30, "output_tokens": 7, "total_tokens": 37},
+    }
+    first, second = ScriptedResponsesClient.requests
+    assert first["tool_choice"] == {
+        "type": "function",
+        "name": "harness_compat_echo",
+    }
+    assert second["tool_choice"] == "auto"
+
+
+def test_tool_compatibility_dispatches_by_protocol(monkeypatch: Any) -> None:
+    calls: list[str] = []
+
+    def responses(_: ProviderConfig) -> dict[str, Any]:
+        calls.append("responses")
+        return {"ok": True}
+
+    def chat(_: ProviderConfig) -> dict[str, Any]:
+        calls.append("chat")
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.provider_compat.check_responses_tool_compatibility",
+        responses,
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.provider_compat.check_chat_completions_tool_compatibility",
+        chat,
+    )
+
+    check_tool_compatibility(_config())
+    check_tool_compatibility(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "qwen36-35b-a3b",
+            api_protocol="chat-completions",
+        )
+    )
+
+    assert calls == ["responses", "chat"]
 
 
 def test_tool_compatibility_canary_applies_generation_to_both_requests(

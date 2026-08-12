@@ -22,7 +22,6 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
-from .agent import ResponsesClient
 from .trajectory import read_trajectory
 
 _CANDIDATE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -314,7 +313,7 @@ def extract_evidence(
 def _response_text(response: Any, stage: str) -> tuple[str, str | None]:
     text = getattr(response, "text", None)
     if not isinstance(text, str) or not text.strip():
-        raise ValueError(f"ResponsesClient returned empty text during {stage}")
+        raise ValueError(f"Provider client returned empty text during {stage}")
     response_id = getattr(response, "response_id", None)
     return _SECRET_VALUE.sub("[REDACTED]", text.strip()), (
         str(response_id) if response_id is not None else None
@@ -366,7 +365,7 @@ def _candidate_parent(output_root: str | Path) -> Path:
 def generate_candidate(
     trajectories: Iterable[str | Path],
     output_root: str | Path,
-    client: ResponsesClient,
+    client: Any,
     *,
     model: str | None = None,
     candidate_id: str | None = None,

@@ -411,11 +411,13 @@ def test_benchmark_passes_max_output_tokens_to_agent(
     assert captured["max_turns"] == 30
     assert row["max_turns"] == 30
     assert row["request_interval_seconds"] == 0.0
+    assert row["litellm_timeout_seconds"] is None
     assert row["request_pacing_scope"] == "single_worker_process"
     trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
     configured = [item for item in trajectory if item["event"] == "benchmark.configured"]
     assert configured[0]["payload"]["max_turns"] == 30
     assert configured[0]["payload"]["request_interval_seconds"] == 0.0
+    assert configured[0]["payload"]["litellm_timeout_seconds"] is None
     evaluation = [item for item in trajectory if item["event"] == "benchmark.evaluated"]
     assert len(evaluation) == 1
     payload = evaluation[0]["payload"]
@@ -495,7 +497,46 @@ def test_benchmark_manifest_prevents_mixed_model_resume(tmp_path: Path) -> None:
         recalculate=False,
     )
 
-    with pytest.raises(HarnessError, match="different model"):
+    with pytest.raises(HarnessError, match="different provider"):
+        second._prepare_manifest([task])
+
+
+def test_benchmark_manifest_prevents_mixed_generation_resume(tmp_path: Path) -> None:
+    initial = tmp_path / "initial.xlsx"
+    golden = tmp_path / "golden.xlsx"
+    _book(initial, {"Sheet": [[1]]})
+    _book(golden, {"Sheet": [[1]]})
+    task = SpreadsheetTask("1", "noop", initial, golden, "Cell-Level", "A1", None)
+    output = tmp_path / "results"
+    first = VerifiedBenchmarkRunner(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "model-a",
+            seed=41,
+            temperature=1.0,
+            litellm_timeout_seconds=600,
+        ),
+        output,
+        enable_code=False,
+        recalculate=False,
+    )
+    first._prepare_manifest([task])
+    second = VerifiedBenchmarkRunner(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "model-a",
+            seed=42,
+            temperature=1.0,
+            litellm_timeout_seconds=600,
+        ),
+        output,
+        enable_code=False,
+        recalculate=False,
+    )
+
+    with pytest.raises(HarnessError, match="different provider"):
         second._prepare_manifest([task])
 
 
@@ -514,7 +555,7 @@ def test_benchmark_manifest_detects_changed_workbook(tmp_path: Path) -> None:
     runner._prepare_manifest([task])
     _book(initial, {"Sheet": [[2]]})
 
-    with pytest.raises(HarnessError, match="different model"):
+    with pytest.raises(HarnessError, match="different provider"):
         runner._prepare_manifest([task])
 
 
