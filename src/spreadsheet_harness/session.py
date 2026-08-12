@@ -73,6 +73,14 @@ def _intersects(left: tuple[int, int, int, int], right: tuple[int, int, int, int
     )
 
 
+def _table_ref(table: Any) -> str:
+    """Return an openpyxl table range across TableList API variants."""
+    ref = getattr(table, "ref", table)
+    if not isinstance(ref, str):
+        raise ToolInputError(f"Workbook table has invalid ref: {ref!r}")
+    return ref
+
+
 @dataclass(frozen=True)
 class SessionPaths:
     root: Path
@@ -329,11 +337,11 @@ class WorkbookSession:
                 for item in formula_sheet.merged_cells.ranges
                 if _intersects(bounds, range_boundaries(str(item)))
             ]
-            tables = [
-                {"name": name, "ref": table.ref}
-                for name, table in formula_sheet.tables.items()
-                if _intersects(bounds, range_boundaries(table.ref))
-            ]
+            tables = []
+            for name in formula_sheet.tables.keys():
+                ref = _table_ref(formula_sheet.tables[name])
+                if _intersects(bounds, range_boundaries(ref)):
+                    tables.append({"name": name, "ref": ref})
             return {
                 "ok": True,
                 "sheet": sheet,

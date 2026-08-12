@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from spreadsheet_harness.errors import ToolInputError
 from spreadsheet_harness.session import WorkbookSession
@@ -54,3 +55,18 @@ def test_range_limits(sample_workbook: Path, tmp_path: Path) -> None:
         session.inspect_range("Sales", "A1:Z1000")
     with pytest.raises(ToolInputError, match="rectangular"):
         session.write_range("Sales", "A1", [[1], [2, 3]])
+
+
+def test_inspect_range_reports_tables(sample_workbook: Path, tmp_path: Path) -> None:
+    workbook = load_workbook(sample_workbook)
+    sheet = workbook["Sales"]
+    table = Table(displayName="SalesTable", ref="A1:D3")
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+    sheet.add_table(table)
+    workbook.save(sample_workbook)
+    workbook.close()
+
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    inspected = session.inspect_range("Sales", "A1:D3")
+
+    assert inspected["tables"] == [{"name": "SalesTable", "ref": "A1:D3"}]
