@@ -23,6 +23,7 @@ from typing import Any
 
 from .agent import (
     ASSISTANT_TEXT_TERMINAL,
+    BUDGET_EXHAUSTED_TERMINAL,
     CONNECT_RETRY_MIN_SECONDS,
     FINAL_RECOVERY_TERMINAL,
     OVERLOAD_RETRY_MIN_SECONDS,
@@ -52,6 +53,7 @@ from .benchmark import (
     SpreadsheetTask,
     _atomic_write_json,
     _reject_duplicate_json_keys,
+    _run_spec_source_fingerprint,
     _runtime_fingerprint,
     _sha256,
     _source_fingerprint,
@@ -66,6 +68,7 @@ from .code_interpreter import STRICT_ISOLATION_POLICY, ensure_strict_code_isolat
 from .config import ProviderConfig
 from .errors import (
     AGENT_EXECUTION_FAILURE_REASONS,
+    LEGACY_AGENT_EXECUTION_FAILURE_REASONS,
     AgentBudgetError,
     AgentExecutionFailure,
     AgentRoutingError,
@@ -94,8 +97,10 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v24"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 13
+V24_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v24"
+V24_COMPARISON_MANIFEST_SCHEMA_VERSION = 13
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v25"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 14
 PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
 PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
 PILOT_RUN_SPEC_FILENAME = "qwen35-trace2skill-local-pilot16-run-spec-v1.json"
@@ -123,7 +128,7 @@ LEGACY_COMPARISON_CONFIGURATION_POLICIES = {
     "resume_journal_policy": "durable-inflight-fail-closed-no-replay-v3",
     "request_attempt_audit_policy": "exact-attempt-history-per-response-v1",
 }
-COMPARISON_CONFIGURATION_POLICIES = {
+V24_COMPARISON_CONFIGURATION_POLICIES = {
     "code_workbook_formula_gate": (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
     ),
@@ -136,8 +141,14 @@ COMPARISON_CONFIGURATION_POLICIES = {
     "model_execution_failure_policy": (
         "known-false-score-artifact-and-request-audited-nonbreaker-v1"
     ),
-    "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
+    "model_execution_failure_reasons": sorted(
+        LEGACY_AGENT_EXECUTION_FAILURE_REASONS
+    ),
     "circuit_breaker_nonbreaker_categories": ["model_execution_failure"],
+}
+COMPARISON_CONFIGURATION_POLICIES = {
+    **V24_COMPARISON_CONFIGURATION_POLICIES,
+    "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
 }
 
 
@@ -183,6 +194,17 @@ RUN_SPEC_ANCHORS = (
         schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
         phase="post_optimization_evaluation",
         split_manifest_id="qwen35-trace2skill-local-postopt16-v1",
+        comparison_protocol_version=V24_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
+    ),
+    RunSpecAnchor(
+        run_spec_id="qwen36-local-confirm-eval16-v1-bare-ours-v25-seed41",
+        filename="qwen35-trace2skill-local-confirm16-run-spec-v1.json",
+        sha256="61ec4d37d0548e1be63ebf8619feb591d98ca78d7dce4d9d573886498ca74984",
+        schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
+        phase="post_optimization_confirmation",
+        split_manifest_id="qwen35-trace2skill-local-confirm16-v1",
         comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
         comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
         launchable=True,
@@ -482,6 +504,7 @@ def comparison_execution_contract(
     return {
         "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
         "comparison_manifest_schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "source_contract": _run_spec_source_fingerprint(),
         "split_provenance": split_provenance,
         "arms": list(arms),
         "provider": {
@@ -528,7 +551,7 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
     configuration = manifest.get("configuration")
     if not isinstance(configuration, dict):
         return {}
-    return {
+    contract = {
         "comparison_protocol_version": manifest.get("comparison_protocol_version"),
         "comparison_manifest_schema_version": manifest.get("schema_version"),
         "split_provenance": manifest.get("split_provenance"),
@@ -565,6 +588,9 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
         },
         "skills_for_ours_only": configuration.get("skills_for_ours_only"),
     }
+    if manifest.get("comparison_protocol_version") == COMPARISON_PROTOCOL_VERSION:
+        contract["source_contract"] = _run_spec_source_fingerprint()
+    return contract
 
 
 def _run_key(task_id: str, arm: str) -> str:
@@ -598,7 +624,14 @@ def _allowed_observed_terminals_policy(
     return {
         arm: {
             stage: (
-                [ASSISTANT_TEXT_TERMINAL]
+                [
+                    ASSISTANT_TEXT_TERMINAL,
+                    *(
+                        [BUDGET_EXHAUSTED_TERMINAL]
+                        if protocol_version == COMPARISON_PROTOCOL_VERSION
+                        else []
+                    ),
+                ]
                 if arm == "paper" and stage == "reconcile"
                 else [
                     TERMINAL_TOOL_NAME,
@@ -610,6 +643,11 @@ def _allowed_observed_terminals_policy(
                             protocol_version != LEGACY_COMPARISON_PROTOCOL_VERSION
                             or arm == "ours"
                         )
+                        else []
+                    ),
+                    *(
+                        [BUDGET_EXHAUSTED_TERMINAL]
+                        if protocol_version == COMPARISON_PROTOCOL_VERSION
                         else []
                     ),
                 ]
@@ -1439,6 +1477,7 @@ class ComparisonBenchmarkRunner:
                 else None
             ),
         )
+        self._manifest(tasks)
         self._prepare_repository_source_state()
         ensure_strict_code_isolation((self.config.api_key,))
         return self._manifest(tasks)
@@ -2097,9 +2136,20 @@ class ComparisonBenchmarkRunner:
         session: WorkbookSession | None = None
 
         def remaining_seconds(stage: str) -> float:
-            budget.ensure_within_time(stage=stage)
+            ensure_postprocess_time(stage)
             assert budget.deadline is not None
             return max(budget.deadline - monotonic(), 0.001)
+
+        def ensure_postprocess_time(stage: str) -> None:
+            termination = budget.to_dict().get("termination")
+            reason = termination.get("reason") if isinstance(termination, dict) else None
+            if reason in {"max_model_calls", "max_total_tokens"}:
+                if budget.deadline is not None and monotonic() >= budget.deadline:
+                    raise AgentTimeoutError(
+                        f"Agent exceeded the task timeout during {stage}"
+                    )
+                return
+            budget.ensure_within_time(stage=stage)
 
         try:
             session = WorkbookSession.create(
@@ -2162,15 +2212,15 @@ class ComparisonBenchmarkRunner:
                     session.workbook_path,
                     timeout_seconds=min(120.0, remaining_seconds("recalculate")),
                 )
-                budget.ensure_within_time(stage="recalculate")
-            budget.ensure_within_time(stage="score")
+                ensure_postprocess_time("recalculate")
+            ensure_postprocess_time("score")
             comparison = compare_workbooks(
                 task.golden_path,
                 session.workbook_path,
                 task.answer_position,
                 answer_sheet=task.answer_sheet,
             )
-            budget.ensure_within_time(stage="score")
+            ensure_postprocess_time("score")
             agent_evidence = result.to_dict()
             if not isinstance(agent_evidence, dict):
                 raise HarnessError("Agent result evidence must be a JSON object")
@@ -2228,8 +2278,8 @@ class ComparisonBenchmarkRunner:
         except Exception as caught:
             effective_exc = caught
             try:
-                budget.ensure_within_time(stage="postprocess")
-            except AgentBudgetError as budget_exc:
+                ensure_postprocess_time("postprocess")
+            except (AgentBudgetError, AgentTimeoutError) as budget_exc:
                 effective_exc = budget_exc
             safe_error = str(effective_exc).replace(self.config.api_key, "[REDACTED]")
             row.update(
@@ -2243,7 +2293,11 @@ class ComparisonBenchmarkRunner:
                 }
             )
             if isinstance(effective_exc, AgentBudgetError):
-                row["error_category"] = "budget_exhausted"
+                row["error_category"] = (
+                    "task_timeout"
+                    if effective_exc.reason == "max_elapsed_seconds"
+                    else "budget_exhausted"
+                )
             elif isinstance(effective_exc, AgentTimeoutError):
                 row["error_category"] = "task_timeout"
             elif isinstance(effective_exc, PaperStageValidationError):

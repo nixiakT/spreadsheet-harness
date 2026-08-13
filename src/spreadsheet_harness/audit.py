@@ -35,6 +35,9 @@ from .comparison import (
     LEGACY_COMPARISON_PROTOCOL_VERSION,
     LEGACY_PILOT_MANIFEST_SHA256,
     RUN_SPEC_COPY_FILENAME,
+    V24_COMPARISON_CONFIGURATION_POLICIES,
+    V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V24_COMPARISON_PROTOCOL_VERSION,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
@@ -45,7 +48,7 @@ from .comparison import (
     verify_pilot_run_spec_contract,
     verify_pilot_run_spec_provenance,
 )
-from .errors import AGENT_EXECUTION_FAILURE_REASONS, HarnessError
+from .errors import HarnessError
 
 
 @dataclass(frozen=True)
@@ -53,23 +56,49 @@ class _AuditProtocolContract:
     protocol_version: str
     manifest_schema_version: int
     configuration_policies: dict[str, Any]
+    allowed_model_failure_reasons: frozenset[str]
     require_v24_outcome_fields: bool
     strict_current_source: bool
+    allow_budget_exhaustion_evidence: bool = False
+    allow_final_response_token_overage: bool = False
+    require_exact_agent_evidence: bool = False
 
 
 _V23_AUDIT_CONTRACT = _AuditProtocolContract(
     protocol_version=LEGACY_COMPARISON_PROTOCOL_VERSION,
     manifest_schema_version=LEGACY_COMPARISON_MANIFEST_SCHEMA_VERSION,
     configuration_policies=LEGACY_COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=frozenset(),
     require_v24_outcome_fields=False,
     strict_current_source=False,
 )
 _V24_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=V24_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V24_COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=frozenset(
+        {"edit_recovery_exhausted", "workbook_unchanged"}
+    ),
+    require_v24_outcome_fields=True,
+    strict_current_source=False,
+)
+_V25_AUDIT_CONTRACT = _AuditProtocolContract(
     protocol_version=COMPARISON_PROTOCOL_VERSION,
     manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
     configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=frozenset(
+        {
+            "budget_exhausted",
+            "edit_recovery_exhausted",
+            "terminal_submission_invalid",
+            "workbook_unchanged",
+        }
+    ),
     require_v24_outcome_fields=True,
     strict_current_source=True,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
 )
 
 
@@ -82,6 +111,11 @@ def _select_audit_contract(
         manifest.get("comparison_protocol_version"),
         manifest.get("schema_version"),
     )
+    if identity == (
+        _V25_AUDIT_CONTRACT.protocol_version,
+        _V25_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V25_AUDIT_CONTRACT
     if identity == (
         _V24_AUDIT_CONTRACT.protocol_version,
         _V24_AUDIT_CONTRACT.manifest_schema_version,
@@ -98,11 +132,13 @@ def _select_audit_contract(
     if manifest.get("schema_version") not in {
         _V23_AUDIT_CONTRACT.manifest_schema_version,
         _V24_AUDIT_CONTRACT.manifest_schema_version,
+        _V25_AUDIT_CONTRACT.manifest_schema_version,
     }:
         _add_reason(reasons, "comparison_manifest_schema_mismatch")
     if manifest.get("comparison_protocol_version") not in {
         _V23_AUDIT_CONTRACT.protocol_version,
         _V24_AUDIT_CONTRACT.protocol_version,
+        _V25_AUDIT_CONTRACT.protocol_version,
     }:
         _add_reason(reasons, "comparison_manifest_protocol_mismatch")
     return None
@@ -111,6 +147,73 @@ def _select_audit_contract(
 def _add_reason(reasons: list[str], reason: str) -> None:
     if reason not in reasons:
         reasons.append(reason)
+
+
+def _non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _usage_triplet(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    usage = {
+        field: _non_negative_int(value.get(field))
+        for field in ("input_tokens", "output_tokens", "total_tokens")
+    }
+    if any(tokens is None for tokens in usage.values()):
+        return None
+    normalized = {field: int(tokens) for field, tokens in usage.items()}
+    if normalized["input_tokens"] + normalized["output_tokens"] != normalized[
+        "total_tokens"
+    ]:
+        return None
+    return normalized
+
+
+def _v25_budget_exhaustion(
+    row: dict[str, Any],
+    contract: _AuditProtocolContract | None,
+) -> tuple[bool, dict[str, Any] | None]:
+    budget = row.get("budget")
+    termination = budget.get("termination") if isinstance(budget, dict) else None
+    limit = budget.get("limit") if isinstance(budget, dict) else None
+    used = budget.get("used") if isinstance(budget, dict) else None
+    reason = termination.get("reason") if isinstance(termination, dict) else None
+    limit_field = (
+        "model_calls"
+        if reason == "max_model_calls"
+        else "total_tokens"
+        if reason == "max_total_tokens"
+        else None
+    )
+    ceiling = limit.get(limit_field) if isinstance(limit, dict) and limit_field else None
+    consumed = used.get(limit_field) if isinstance(used, dict) and limit_field else None
+    exhausted = bool(
+        isinstance(ceiling, int)
+        and not isinstance(ceiling, bool)
+        and isinstance(consumed, int)
+        and not isinstance(consumed, bool)
+        and consumed >= ceiling
+    )
+    valid = bool(
+        contract is not None
+        and contract.allow_budget_exhaustion_evidence
+        and row.get("status") == "completed"
+        and row.get("outcome_kind") == "model_execution_failure"
+        and row.get("passed") is False
+        and row.get("model_failure_reason") == "budget_exhausted"
+        and row.get("error_category") == "model_execution_failure"
+        and row.get("error_type") == "AgentExecutionFailure"
+        and row.get("error_retryable") is False
+        and isinstance(termination, dict)
+        and reason in {"max_model_calls", "max_total_tokens"}
+        and exhausted
+        and isinstance(termination.get("stage"), str)
+        and termination["stage"]
+    )
+    return valid, termination if isinstance(termination, dict) else None
 
 
 def _text_sha256(value: str) -> str:
@@ -751,6 +854,7 @@ def _audit_row_contract(
     arm: str,
     manifest: dict[str, Any],
     manifest_sha256: str | None,
+    contract: _AuditProtocolContract | None,
 ) -> None:
     reasons: list[str] = record["reasons"]
     configuration = manifest.get("configuration")
@@ -795,15 +899,49 @@ def _audit_row_contract(
     if not isinstance(used, dict):
         _add_reason(reasons, "budget_used_invalid")
     else:
+        budget_exhaustion, budget_termination = _v25_budget_exhaustion(row, contract)
         for field in ("model_calls", "total_tokens"):
             value = used.get(field)
             ceiling = expected_limit[field]
+            single_response_token_overage = False
+            if (
+                field == "total_tokens"
+                and budget_exhaustion
+                and contract is not None
+                and contract.allow_final_response_token_overage
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and isinstance(ceiling, int)
+                and not isinstance(ceiling, bool)
+                and value > ceiling
+                and (budget_termination or {}).get("reason") == "max_total_tokens"
+            ):
+                timings = (row.get("agent") or {}).get("request_timings")
+                timing_tokens = (
+                    [timing.get("total_tokens") for timing in timings]
+                    if isinstance(timings, list)
+                    and timings
+                    and all(isinstance(timing, dict) for timing in timings)
+                    else []
+                )
+                single_response_token_overage = bool(
+                    timing_tokens
+                    and all(
+                        isinstance(tokens, int)
+                        and not isinstance(tokens, bool)
+                        and tokens >= 0
+                        for tokens in timing_tokens
+                    )
+                    and sum(timing_tokens) == value
+                    and sum(timing_tokens[:-1]) < ceiling
+                    and sum(timing_tokens[:-1]) + timing_tokens[-1] > ceiling
+                )
             if (
                 isinstance(value, bool)
                 or not isinstance(value, int)
                 or value < 0
                 or not isinstance(ceiling, int)
-                or value > ceiling
+                or (value > ceiling and not single_response_token_overage)
             ):
                 _add_reason(reasons, f"budget_used_invalid:{field}")
 
@@ -813,6 +951,7 @@ def _audit_completed_agent(
     row: dict[str, Any],
     arm: str,
     manifest: dict[str, Any],
+    contract: _AuditProtocolContract | None,
 ) -> None:
     reasons: list[str] = record["reasons"]
     agent = row.get("agent")
@@ -826,17 +965,47 @@ def _audit_completed_agent(
     expected_prefixes = (manifest.get("forced_tool_prefix_routing") or {}).get(arm)
     expected_tools = (manifest.get("stage_allowed_tools") or {}).get(arm)
     allowed_terminals = (manifest.get("allowed_observed_terminals") or {}).get(arm)
+    budget_exhaustion, budget_termination = _v25_budget_exhaustion(row, contract)
+    exact_evidence = bool(contract and contract.require_exact_agent_evidence)
     if not isinstance(stages, list) or not isinstance(expected_caps, dict):
         _add_reason(reasons, "agent_stages_invalid")
         return
     expected_names = list(expected_caps)
-    if [stage.get("name") if isinstance(stage, dict) else None for stage in stages] != expected_names:
+    observed_names = [
+        stage.get("name") if isinstance(stage, dict) else None for stage in stages
+    ]
+    budget_truncated_paper_stages = bool(
+        budget_exhaustion
+        and arm == "paper"
+        and observed_names
+        and observed_names == expected_names[: len(observed_names)]
+        and observed_names[-1] == (budget_termination or {}).get("stage")
+    )
+    if budget_exhaustion and (
+        not observed_names
+        or observed_names[-1] != (budget_termination or {}).get("stage")
+    ):
+        _add_reason(reasons, "agent_budget_termination_stage_mismatch")
+    if observed_names != expected_names and not budget_truncated_paper_stages:
         _add_reason(reasons, "agent_stage_order_mismatch")
         return
     timing_count = 0
+    expected_aggregate_timings: list[dict[str, Any]] = []
+    expected_aggregate_tool_trace: list[dict[str, Any]] = []
+    aggregate_turns = 0
+    aggregate_tool_calls = 0
+    aggregate_terminal_submissions = 0
+    aggregate_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    cumulative_model_calls = 0
+    cumulative_total_tokens = 0
     for stage in stages:
         assert isinstance(stage, dict)
         name = str(stage["name"])
+        budget_failure_stage = bool(
+            budget_exhaustion
+            and stage is stages[-1]
+            and name == (budget_termination or {}).get("stage")
+        )
         if stage.get("max_turns") != expected_caps.get(name):
             _add_reason(reasons, f"agent_stage_turn_cap_mismatch:{name}")
         if stage.get("allowed_tools") != (expected_tools or {}).get(name):
@@ -844,31 +1013,64 @@ def _audit_completed_agent(
         prefix = (expected_prefixes or {}).get(name)
         if stage.get("forced_tool_prefix") != prefix:
             _add_reason(reasons, f"agent_forced_prefix_mismatch:{name}")
-        if stage.get("observed_forced_tool_prefix") != prefix:
+        observed_prefix = stage.get("observed_forced_tool_prefix")
+        observed_is_expected_prefix = bool(
+            isinstance(prefix, list)
+            and isinstance(observed_prefix, list)
+            and observed_prefix == prefix[: len(observed_prefix)]
+        )
+        if observed_prefix != prefix and not (
+            budget_failure_stage and observed_is_expected_prefix
+        ):
             _add_reason(reasons, f"agent_observed_prefix_mismatch:{name}")
         if prefix:
-            if stage.get("first_tool_choice") != prefix[0] or stage.get(
-                "observed_first_tool"
-            ) != prefix[0]:
+            expected_observed_first = (
+                prefix[0] if isinstance(observed_prefix, list) and observed_prefix else None
+            )
+            if stage.get("first_tool_choice") != prefix[0] or (
+                stage.get("observed_first_tool")
+                != (
+                    expected_observed_first
+                    if budget_failure_stage
+                    else prefix[0]
+                )
+            ):
                 _add_reason(reasons, f"agent_first_tool_mismatch:{name}")
         expected_terminal = (
             "assistant_text"
             if arm == "paper" and name == "reconcile"
             else (manifest.get("post_prefix_routing") or {}).get("terminal_tool")
         )
-        if stage.get("terminal_tool") != expected_terminal:
-            _add_reason(reasons, f"agent_terminal_tool_mismatch:{name}")
-        if stage.get("observed_terminal_tool") not in (allowed_terminals or {}).get(name, []):
+        budget_reconcile_terminal = bool(
+            budget_failure_stage and arm == "paper" and name == "reconcile"
+        )
+        if budget_failure_stage:
+            terminal_valid = stage.get("observed_terminal_tool") == "budget_exhausted"
+        else:
+            observed_terminal = stage.get("observed_terminal_tool")
+            terminal_valid = (
+                observed_terminal != "budget_exhausted"
+                and observed_terminal in (allowed_terminals or {}).get(name, [])
+            )
+        if not terminal_valid:
             _add_reason(reasons, f"agent_observed_terminal_invalid:{name}")
         stage_agent = stage.get("agent")
         if not isinstance(stage_agent, dict):
             _add_reason(reasons, f"agent_stage_evidence_missing:{name}")
             continue
         turns = stage_agent.get("turns")
+        zero_turn_budget_failure = bool(budget_failure_stage and turns == 0)
+        if budget_reconcile_terminal and exact_evidence:
+            expected_budget_terminal = "assistant_text" if zero_turn_budget_failure else None
+            terminal_matches = stage.get("terminal_tool") == expected_budget_terminal
+        else:
+            terminal_matches = stage.get("terminal_tool") == expected_terminal
+        if not terminal_matches:
+            _add_reason(reasons, f"agent_terminal_tool_mismatch:{name}")
         if (
             isinstance(turns, bool)
             or not isinstance(turns, int)
-            or turns < 1
+            or (turns < 1 and not zero_turn_budget_failure)
             or turns > expected_caps[name]
         ):
             _add_reason(reasons, f"agent_stage_turns_invalid:{name}")
@@ -877,6 +1079,166 @@ def _audit_completed_agent(
             _add_reason(reasons, f"agent_stage_request_count_mismatch:{name}")
         else:
             timing_count += len(stage_timings)
+            timings_are_dicts = all(isinstance(timing, dict) for timing in stage_timings)
+            if exact_evidence and timings_are_dicts:
+                expected_aggregate_timings.extend(
+                    {"stage": name, **timing} for timing in stage_timings
+                )
+            if any(
+                not isinstance(timing, dict)
+                or ("stage" in timing and timing.get("stage") != name)
+                for timing in stage_timings
+            ):
+                _add_reason(reasons, f"agent_stage_request_stage_mismatch:{name}")
+        if exact_evidence:
+            wrapper_trace = stage.get("tool_trace")
+            nested_trace = stage_agent.get("tool_trace")
+            if not isinstance(wrapper_trace, list) or not all(
+                isinstance(item, dict) for item in wrapper_trace
+            ):
+                _add_reason(reasons, f"agent_stage_tool_trace_invalid:{name}")
+                wrapper_trace = []
+            if nested_trace != wrapper_trace:
+                _add_reason(reasons, f"agent_stage_tool_trace_mismatch:{name}")
+            if stage.get("tool_name_trace") != [
+                str(item.get("name", "")) for item in wrapper_trace
+            ]:
+                _add_reason(reasons, f"agent_stage_tool_names_mismatch:{name}")
+            trace_names = [str(item.get("name", "")) for item in wrapper_trace]
+            successful_trace_names = [
+                str(item.get("name", ""))
+                for item in wrapper_trace
+                if item.get("ok") is True
+            ]
+            if isinstance(observed_prefix, list):
+                missing_in_response_budget_tool = bool(
+                    budget_failure_stage
+                    and not zero_turn_budget_failure
+                    and len(observed_prefix) == len(trace_names) + 1
+                    and trace_names == observed_prefix[:-1]
+                )
+                if trace_names[: len(observed_prefix)] != observed_prefix and not (
+                    missing_in_response_budget_tool
+                ):
+                    _add_reason(reasons, f"agent_stage_prefix_trace_mismatch:{name}")
+                requires_successful_prefix = arm == "paper" and name in {
+                    "vision_verify",
+                    "latex_verify",
+                }
+                if requires_successful_prefix and successful_trace_names[
+                    : len(observed_prefix)
+                ] != observed_prefix:
+                    _add_reason(reasons, f"agent_stage_prefix_success_mismatch:{name}")
+            allowed_stage_tools = (expected_tools or {}).get(name)
+            if allowed_stage_tools != "all" and any(
+                item.get("name") not in (allowed_stage_tools or [])
+                for item in wrapper_trace
+            ):
+                _add_reason(reasons, f"agent_stage_tool_not_allowed:{name}")
+            expected_aggregate_tool_trace.extend(
+                {"stage": name, **item} for item in wrapper_trace
+            )
+
+            stage_tool_calls = _non_negative_int(stage_agent.get("tool_calls"))
+            stage_terminal_submissions = _non_negative_int(
+                stage_agent.get("terminal_submissions")
+            )
+            if stage_tool_calls != len(wrapper_trace):
+                _add_reason(reasons, f"agent_stage_tool_count_mismatch:{name}")
+            if stage_terminal_submissions is None:
+                _add_reason(reasons, f"agent_stage_terminal_count_invalid:{name}")
+            expected_terminal_submissions = int(
+                stage.get("observed_terminal_tool") == "submit_result"
+            )
+            if (
+                arm == "paper"
+                and name != "solve"
+                and not budget_failure_stage
+                and stage.get("observed_terminal_tool") == "assistant_text"
+            ):
+                expected_terminal_submissions = 0
+            if stage_terminal_submissions != expected_terminal_submissions:
+                _add_reason(reasons, f"agent_stage_terminal_count_mismatch:{name}")
+            expected_function_calls = (
+                None
+                if stage_tool_calls is None or stage_terminal_submissions is None
+                else stage_tool_calls + stage_terminal_submissions
+            )
+            if stage_agent.get("function_calls_total") != expected_function_calls:
+                _add_reason(reasons, f"agent_stage_function_count_mismatch:{name}")
+            if isinstance(turns, int) and not isinstance(turns, bool):
+                aggregate_turns += turns
+            if stage_tool_calls is not None:
+                aggregate_tool_calls += stage_tool_calls
+            if stage_terminal_submissions is not None:
+                aggregate_terminal_submissions += stage_terminal_submissions
+
+            stage_usage = _usage_triplet(stage_agent.get("usage"))
+            if stage_usage is None:
+                _add_reason(reasons, f"agent_stage_usage_invalid:{name}")
+            else:
+                for field, value in stage_usage.items():
+                    aggregate_usage[field] += value
+                timing_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                timing_usage_valid = isinstance(stage_timings, list)
+                if isinstance(stage_timings, list):
+                    for timing in stage_timings:
+                        timing_tokens = _usage_triplet(timing)
+                        if timing_tokens is None:
+                            timing_usage_valid = False
+                            break
+                        for field, value in timing_tokens.items():
+                            timing_usage[field] += value
+                if not timing_usage_valid or timing_usage != stage_usage:
+                    _add_reason(reasons, f"agent_stage_timing_usage_mismatch:{name}")
+                cumulative_total_tokens += stage_usage["total_tokens"]
+            if isinstance(stage_timings, list):
+                cumulative_model_calls += len(stage_timings)
+
+            stage_budget = stage_agent.get("budget")
+            stage_limit = (
+                stage_budget.get("limit") if isinstance(stage_budget, dict) else None
+            )
+            stage_used = (
+                stage_budget.get("used") if isinstance(stage_budget, dict) else None
+            )
+            row_budget = row.get("budget") or {}
+            stage_budget_valid = bool(
+                isinstance(stage_budget, dict)
+                and stage_limit == row_budget.get("limit")
+                and isinstance(stage_used, dict)
+                and all(
+                    _non_negative_int(stage_used.get(field)) is not None
+                    for field in ("model_calls", "total_tokens")
+                )
+                and stage_used.get("model_calls") == cumulative_model_calls
+                and stage_used.get("total_tokens") == cumulative_total_tokens
+                and (
+                    stage_budget.get("termination") is None
+                    or (
+                        budget_failure_stage
+                        and stage_budget.get("termination") == budget_termination
+                    )
+                )
+            )
+            if not stage_budget_valid:
+                _add_reason(reasons, f"agent_stage_budget_mismatch:{name}")
+        elif zero_turn_budget_failure:
+            stage_budget = stage_agent.get("budget")
+            stage_used = (
+                stage_budget.get("used") if isinstance(stage_budget, dict) else None
+            )
+            row_used = ((row.get("budget") or {}).get("used") or {})
+            if (
+                not isinstance(stage_budget, dict)
+                or stage_budget.get("termination") != budget_termination
+                or not isinstance(stage_used, dict)
+                or any(
+                    stage_used.get(field) != row_used.get(field)
+                    for field in ("model_calls", "total_tokens")
+                )
+            ):
+                _add_reason(reasons, f"agent_stage_budget_mismatch:{name}")
     budget_calls = ((row.get("budget") or {}).get("used") or {}).get("model_calls")
     aggregate_timings = agent.get("request_timings")
     if (
@@ -885,6 +1247,8 @@ def _audit_completed_agent(
         or len(aggregate_timings) != budget_calls
     ):
         _add_reason(reasons, "agent_request_count_mismatch")
+    if exact_evidence and aggregate_timings != expected_aggregate_timings:
+        _add_reason(reasons, "agent_request_timings_mismatch")
     if not bool(_request_attempt_audit(row)["exact"]):
         _add_reason(reasons, "request_attempt_audit_inexact")
     expected_endpoint = (
@@ -909,6 +1273,21 @@ def _audit_completed_agent(
     used = (row.get("budget") or {}).get("used") or {}
     if not isinstance(usage, dict) or usage.get("total_tokens") != used.get("total_tokens"):
         _add_reason(reasons, "agent_budget_token_mismatch")
+    if exact_evidence:
+        if _usage_triplet(usage) != aggregate_usage:
+            _add_reason(reasons, "agent_stage_usage_mismatch")
+        if agent.get("turns") != aggregate_turns:
+            _add_reason(reasons, "agent_turn_count_mismatch")
+        if agent.get("tool_calls") != aggregate_tool_calls:
+            _add_reason(reasons, "agent_tool_count_mismatch")
+        if agent.get("terminal_submissions") != aggregate_terminal_submissions:
+            _add_reason(reasons, "agent_terminal_count_mismatch")
+        if agent.get("function_calls_total") != (
+            aggregate_tool_calls + aggregate_terminal_submissions
+        ):
+            _add_reason(reasons, "agent_function_count_mismatch")
+        if agent.get("tool_trace") != expected_aggregate_tool_trace:
+            _add_reason(reasons, "agent_tool_trace_mismatch")
     agent_budget = agent.get("budget")
     agent_limit = agent_budget.get("limit") if isinstance(agent_budget, dict) else None
     agent_used = agent_budget.get("used") if isinstance(agent_budget, dict) else None
@@ -919,6 +1298,20 @@ def _audit_completed_agent(
         for field in ("model_calls", "total_tokens")
     ):
         _add_reason(reasons, "agent_budget_usage_mismatch")
+    if (
+        not isinstance(agent_budget, dict)
+        or agent_budget.get("termination")
+        != (row.get("budget") or {}).get("termination")
+    ):
+        _add_reason(reasons, "agent_budget_termination_mismatch")
+    if exact_evidence and any(
+        expected != used.get(field)
+        for field, expected in (
+            ("model_calls", cumulative_model_calls),
+            ("total_tokens", cumulative_total_tokens),
+        )
+    ):
+        _add_reason(reasons, "agent_final_stage_budget_mismatch")
 
 
 def _audit_completed_row(
@@ -932,7 +1325,15 @@ def _audit_completed_row(
     contract: _AuditProtocolContract | None,
 ) -> None:
     reasons: list[str] = record["reasons"]
-    _audit_row_contract(record, row, task, arm, manifest, manifest_sha256)
+    _audit_row_contract(
+        record,
+        row,
+        task,
+        arm,
+        manifest,
+        manifest_sha256,
+        contract,
+    )
     if row.get("status") != "completed":
         _add_reason(reasons, "status_not_completed")
         return
@@ -951,7 +1352,11 @@ def _audit_completed_row(
             _add_reason(reasons, "model_execution_failure_not_failed")
         if row.get("error_category") != "model_execution_failure":
             _add_reason(reasons, "model_execution_failure_category_invalid")
-        if row.get("model_failure_reason") not in AGENT_EXECUTION_FAILURE_REASONS:
+        if (
+            contract is None
+            or row.get("model_failure_reason")
+            not in contract.allowed_model_failure_reasons
+        ):
             _add_reason(reasons, "model_execution_failure_reason_invalid")
         if row.get("error_type") != "AgentExecutionFailure":
             _add_reason(reasons, "model_execution_failure_type_invalid")
@@ -969,7 +1374,7 @@ def _audit_completed_row(
         )
     ):
         _add_reason(reasons, "scored_outcome_has_failure_metadata")
-    _audit_completed_agent(record, row, arm, manifest)
+    _audit_completed_agent(record, row, arm, manifest, contract)
 
     run_dir = _absolute_path(row.get("run_dir"), base=root)
     output = _absolute_path(row.get("output_workbook"), base=root)

@@ -21,6 +21,7 @@ import httpx
 from .budget import RunBudget
 from .config import ProviderConfig
 from .errors import (
+    MODEL_EXECUTION_BUDGET_TERMINATIONS,
     AgentBudgetError,
     AgentExecutionFailure,
     AgentRoutingError,
@@ -139,6 +140,7 @@ _SAFE_RESPONSE_HEADERS = frozenset(
 TERMINAL_TOOL_NAME = "submit_result"
 ASSISTANT_TEXT_TERMINAL = "assistant_text"
 FINAL_RECOVERY_TERMINAL = "final_recovery_code_interpreter"
+BUDGET_EXHAUSTED_TERMINAL = "budget_exhausted"
 _TERMINAL_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
     "name": TERMINAL_TOOL_NAME,
@@ -1643,7 +1645,8 @@ class ChatCompletionsClient:
                     status_code=status_code,
                     delivery_state=delivery_state,
                 )
-            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            choice = choices[0] if isinstance(choices[0], dict) else None
+            message = choice.get("message") if isinstance(choice, dict) else None
             if not isinstance(message, dict):
                 delivery_state = "terminal_seen"
                 raise ProviderError(
@@ -1655,7 +1658,7 @@ class ChatCompletionsClient:
                 )
             output, text = _chat_message_to_output(message)
             try:
-                _validated_function_calls(output)
+                function_calls = _validated_function_calls(output)
             except ProviderError as exc:
                 if exc.delivery_state is None:
                     exc.delivery_state = "terminal_seen"
@@ -1673,6 +1676,31 @@ class ChatCompletionsClient:
                         delivery_state="terminal_seen",
                     )
                 raise
+            finish_reason = choice.get("finish_reason")
+            expected_finish_reason = "tool_calls" if function_calls else "stop"
+            if finish_reason != expected_finish_reason:
+                delivery_state = "terminal_seen"
+                raise ProviderError(
+                    "Chat Completions API returned an incomplete or inconsistent "
+                    f"finish_reason: {finish_reason!r}; expected "
+                    f"{expected_finish_reason!r}",
+                    retryable=False,
+                    phase="response_body",
+                    status_code=status_code,
+                    delivery_state=delivery_state,
+                    attempt_detail=self._attempt_detail(
+                        started=started,
+                        logical_request_id=logical_request_id,
+                        client_request_id=client_request_id,
+                        request_payload_sha256=request_payload_sha256,
+                        pacing=pacing,
+                        headers_seconds=headers_seconds,
+                        terminal_seconds=terminal_seconds,
+                        status_code=status_code,
+                        response_headers=response_headers,
+                        delivery_state=delivery_state,
+                    ),
+                )
             if text and on_text:
                 on_text(text)
             return ResponseTurn(
@@ -2401,6 +2429,18 @@ class SpreadsheetAgent:
                 agent_result=result,
             )
 
+        def budget_execution_failure(
+            error: AgentBudgetError,
+            *,
+            turns: int,
+        ) -> AgentExecutionFailure:
+            return execution_failure(
+                str(error),
+                reason="budget_exhausted",
+                turns=turns,
+                observed_terminal_tool=BUDGET_EXHAUSTED_TERMINAL,
+            )
+
         def safe_edit_recovery_diagnostics(
             outcome_data: dict[str, Any],
         ) -> str | None:
@@ -2433,7 +2473,18 @@ class SpreadsheetAgent:
         client_context = _provider_client(self.config, pacer=self.pacer)
         with client_context as client:
             for turn_number in range(1, self.max_turns + 1):
-                ensure_within_deadline()
+                try:
+                    ensure_within_deadline()
+                except AgentBudgetError as exc:
+                    if (
+                        exc.reason in MODEL_EXECUTION_BUDGET_TERMINATIONS
+                        and request_timings
+                    ):
+                        raise budget_execution_failure(
+                            exc,
+                            turns=len(request_timings),
+                        ) from exc
+                    raise
                 history_text = _render_history_summary(archived_tool_history)
                 input_items = [initial_input]
                 if history_text:
@@ -2453,6 +2504,17 @@ class SpreadsheetAgent:
                 })
                 final_turn_code_recovery = False
                 final_turn_recovery_was_active = False
+                terminal_route_forced = False
+                remaining_model_calls = (
+                    self.budget.remaining_model_calls()
+                    if self.budget is not None
+                    else None
+                )
+                budget_terminal_turn = bool(
+                    self.required_tool_termination
+                    and remaining_model_calls == 1
+                )
+                final_agent_turn = turn_number == self.max_turns
                 if tool_schemas:
                     tool_choice: str | dict[str, str] = "auto"
                     request_tool_schemas = tool_schemas
@@ -2468,7 +2530,7 @@ class SpreadsheetAgent:
                         and self.require_workbook_change
                         and self.force_code_on_stalled_edit
                         and "code_interpreter" in tool_names
-                        and turn_number == self.max_turns
+                        and final_agent_turn
                     ):
                         final_turn_recovery_was_active = stalled_edit_recovery_active
                         final_turn_code_recovery = bool(
@@ -2492,7 +2554,10 @@ class SpreadsheetAgent:
                                 request_max_output_tokens,
                                 _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
                             )
-                    elif self.required_tool_termination and turn_number == self.max_turns:
+                    elif self.required_tool_termination and (
+                        final_agent_turn or budget_terminal_turn
+                    ):
+                        terminal_route_forced = True
                         request_tool_schemas = [
                             schema
                             for schema in tool_schemas
@@ -2549,6 +2614,14 @@ class SpreadsheetAgent:
                                 "budget": exc.budget,
                             },
                         )
+                        if (
+                            exc.reason in MODEL_EXECUTION_BUDGET_TERMINATIONS
+                            and request_timings
+                        ):
+                            raise budget_execution_failure(
+                                exc,
+                                turns=len(request_timings),
+                            ) from exc
                         raise
                 session.recorder.record(
                     "model.requested",
@@ -2641,18 +2714,6 @@ class SpreadsheetAgent:
                         "timing": turn.timing_dict(),
                     },
                 )
-                if budget_error is not None:
-                    session.recorder.record(
-                        "agent.budget_exceeded",
-                        {
-                            "turn": turn_number,
-                            "stage": self.stage,
-                            "reason": budget_error.reason,
-                            "budget": budget_error.budget,
-                        },
-                    )
-                    raise budget_error
-                ensure_within_deadline()
                 try:
                     function_calls = _validated_function_calls(turn.output)
                 except ProviderError as exc:
@@ -2671,6 +2732,9 @@ class SpreadsheetAgent:
                 )
                 if expected_forced_tool is None and final_turn_code_recovery:
                     expected_forced_tool = "code_interpreter"
+                if expected_forced_tool is None and terminal_route_forced:
+                    expected_forced_tool = TERMINAL_TOOL_NAME
+                observed_forced_prefix_tool: str | None = None
                 if expected_forced_tool is not None:
                     observed_forced_tools = [
                         str(function_call.get("name", ""))
@@ -2682,7 +2746,11 @@ class SpreadsheetAgent:
                         else None
                     )
                     if observed_forced_tools != [expected_forced_tool]:
-                        if not observed_forced_tools and turn_number < self.max_turns:
+                        if (
+                            expected_forced_tool != TERMINAL_TOOL_NAME
+                            and not observed_forced_tools
+                            and turn_number < self.max_turns
+                        ):
                             missing_forced_tool_prompt = (
                                 _edit_recovery_prompt(
                                     "The previous recovery response did not call the required "
@@ -2741,8 +2809,7 @@ class SpreadsheetAgent:
                     if forced_prefix_index == 0:
                         observed_first_tool = observed_forced_tool
                     if forced_prefix_index < len(self.forced_tool_prefix):
-                        observed_forced_tool_prefix.append(observed_forced_tool)
-                        forced_prefix_index += 1
+                        observed_forced_prefix_tool = observed_forced_tool
                 if self.required_tool_termination and len(function_calls) > 1:
                     observed_names = [
                         str(function_call.get("name", ""))
@@ -2761,6 +2828,31 @@ class SpreadsheetAgent:
                         "Required-tool stage expected exactly one function call; "
                         f"observed {observed_names!r}"
                     )
+                if budget_error is not None:
+                    if observed_forced_prefix_tool is not None:
+                        observed_forced_tool_prefix.append(
+                            observed_forced_prefix_tool
+                        )
+                        forced_prefix_index += 1
+                    session.recorder.record(
+                        "agent.budget_exceeded",
+                        {
+                            "turn": turn_number,
+                            "stage": self.stage,
+                            "reason": budget_error.reason,
+                            "budget": budget_error.budget,
+                        },
+                    )
+                    if budget_error.reason in MODEL_EXECUTION_BUDGET_TERMINATIONS:
+                        raise budget_execution_failure(
+                            budget_error,
+                            turns=turn_number,
+                        ) from budget_error
+                    raise budget_error
+                ensure_within_deadline()
+                if observed_forced_prefix_tool is not None:
+                    observed_forced_tool_prefix.append(observed_forced_prefix_tool)
+                    forced_prefix_index += 1
                 terminal_calls = [
                     (function_call, call_id)
                     for function_call, call_id in function_calls
@@ -2794,13 +2886,24 @@ class SpreadsheetAgent:
                             else raw_arguments
                         )
                     except json.JSONDecodeError as exc:
-                        raise AgentRoutingError(
+                        message = (
                             f"Terminal tool {TERMINAL_TOOL_NAME!r} returned invalid JSON: {exc}"
+                        )
+                        raise execution_failure(
+                            message,
+                            reason="terminal_submission_invalid",
+                            turns=turn_number,
+                            observed_terminal_tool=TERMINAL_TOOL_NAME,
+                            terminal_submissions=1,
                         ) from exc
                     final_text = arguments.get("result") if isinstance(arguments, dict) else None
                     if not isinstance(final_text, str) or not final_text.strip():
-                        raise AgentRoutingError(
-                            f"Terminal tool {TERMINAL_TOOL_NAME!r} requires a non-empty result"
+                        raise execution_failure(
+                            f"Terminal tool {TERMINAL_TOOL_NAME!r} requires a non-empty result",
+                            reason="terminal_submission_invalid",
+                            turns=turn_number,
+                            observed_terminal_tool=TERMINAL_TOOL_NAME,
+                            terminal_submissions=1,
                         )
                     if stalled_edit_recovery_active:
                         if turn_number < self.max_turns:
@@ -3359,7 +3462,7 @@ class SpreadsheetAgent:
                 can_recover_with_code = (
                     self.force_code_on_stalled_edit
                     and "code_interpreter" in tool_names
-                    and turn_number < self.max_turns
+                    and not final_agent_turn
                 )
                 state_recovery_succeeded = (
                     turn_actual_workbook_change
@@ -3379,7 +3482,7 @@ class SpreadsheetAgent:
                 if (
                     self.required_tool_termination
                     and self.force_code_on_stalled_edit
-                    and turn_number == self.max_turns
+                    and final_agent_turn
                     and final_turn_code_recovery
                     and final_code_recovery_succeeded
                 ):
@@ -3484,7 +3587,7 @@ class SpreadsheetAgent:
                     self.require_workbook_change
                     and self.force_code_on_stalled_edit
                     and "code_interpreter" in tool_names
-                    and turn_number == self.max_turns
+                    and final_agent_turn
                     and final_turn_code_recovery
                 ):
                     session.recorder.record(

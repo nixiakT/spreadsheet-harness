@@ -19,10 +19,19 @@ from typing import Any, Literal
 import yaml
 from openpyxl.utils import get_column_letter
 
-from .agent import BASE_INSTRUCTIONS, AgentResult, SpreadsheetAgent
+from .agent import (
+    ASSISTANT_TEXT_TERMINAL,
+    BASE_INSTRUCTIONS,
+    BUDGET_EXHAUSTED_TERMINAL,
+    TERMINAL_TOOL_NAME,
+    AgentResult,
+    SpreadsheetAgent,
+)
 from .budget import RunBudget
 from .config import ProviderConfig
 from .errors import (
+    MODEL_EXECUTION_BUDGET_TERMINATIONS,
+    AgentBudgetError,
     AgentExecutionFailure,
     AgentTimeoutError,
     HarnessError,
@@ -283,11 +292,14 @@ This arm has deterministic profiling, advisory spreadsheet skills, native spread
 rendering, LibreOffice recalculation, and code_interpreter. Use code_interpreter as the primary
 execution path for inspection, editing, saving, and verification; use native tools afterwards only
 for a specific narrow gap such as formula fill, recalculation, rendering, or one target-range
-check. The editable artifact still must be changed in this run. Do not stop after explaining a
-formula or asking whether to apply it. Apply the requested change, save SHEET_WORKBOOK when using
-Python, reopen or inspect the exact edited range, and only then submit the result. The first two
-responses are routed to code_interpreter: inspect or edit in the first, then finish verification
-or any remaining edit in the second. Never spend a routed call printing a plan or placeholder.
+check. Keep every inspection bounded to representative rows/cells; never print a whole sheet or a
+long cell-by-cell dump. The editable artifact still must be changed in this run. Do not stop after
+explaining a formula or asking whether to apply it. Apply the requested change and save
+SHEET_WORKBOOK by the second code_interpreter call whenever the target can be identified safely.
+Then reopen or inspect only the exact edited range and its immediate boundary, and submit promptly.
+Reserve the final model turn for submit_result rather than further exploration. The first two
+responses are routed to code_interpreter: inspect or edit in the first, then make the first saved
+edit in the second. Never spend a routed call printing a plan or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
 
@@ -728,12 +740,41 @@ def _run_stage(
     workbook_after: str | None = None
     try:
         result = agent.run(prompt)
-    except AgentExecutionFailure as exc:
-        if not isinstance(exc.agent_result, AgentResult):
+    except (AgentBudgetError, AgentExecutionFailure) as exc:
+        failure = exc
+        if isinstance(exc, AgentBudgetError):
+            if exc.reason not in MODEL_EXECUTION_BUDGET_TERMINATIONS:
+                raise
+            requires_terminal_tool = allowed_tools is None or bool(allowed_tools)
+            failure = AgentExecutionFailure(
+                str(exc),
+                reason="budget_exhausted",
+                agent_result=AgentResult(
+                    final_text=str(exc),
+                    turns=0,
+                    tool_calls=0,
+                    usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    response_id=None,
+                    budget=budget.to_dict(),
+                    stage=name,
+                    first_tool_choice=(
+                        forced_tool_prefix[0] if forced_tool_prefix else None
+                    ),
+                    forced_tool_prefix=list(forced_tool_prefix),
+                    observed_forced_tool_prefix=[],
+                    terminal_tool=(
+                        TERMINAL_TOOL_NAME
+                        if requires_terminal_tool
+                        else ASSISTANT_TEXT_TERMINAL
+                    ),
+                    observed_terminal_tool=BUDGET_EXHAUSTED_TERMINAL,
+                ),
+            )
+        if not isinstance(failure.agent_result, AgentResult):
             raise
-        exc.failed_stage = _failed_stage(
+        failure.failed_stage = _failed_stage(
             name=name,
-            result=exc.agent_result,
+            result=failure.agent_result,
             elapsed_seconds=time.monotonic() - stage_started,
             allowed_tools=allowed_tools,
             max_turns=max_turns,
@@ -743,7 +784,9 @@ def _run_stage(
             user_task=user_task,
             preview=preview,
         )
-        raise
+        if failure is exc:
+            raise
+        raise failure from exc
     finally:
         if read_only:
             workbook_after = _workbook_sha256(session, stage=name)
@@ -995,23 +1038,38 @@ def _compact_ours_profile(profile_data: dict[str, Any]) -> str:
         "schema_version": profile_data.get("schema_version"),
         "profile_sha256": profile_data.get("profile_sha256"),
         "source": profile_data.get("source"),
+        "backend": profile_data.get("backend"),
+        "task_independent": profile_data.get("task_independent"),
         "sheets": [],
         "truncation": profile_data.get("truncation", {}),
     }
     for sheet in profile_data.get("sheets", []):
-        regions = [
-            {
+        regions = []
+        for region in sheet.get("regions", []):
+            provenance = region.get("provenance") or {}
+            sample_by_cell = {
+                item.get("cell"): item
+                for item in region.get("sample", [])
+                if isinstance(item, dict) and isinstance(item.get("cell"), str)
+            }
+            sample = [
+                sample_by_cell[cell]
+                for cell in provenance.get("sample_cells", [])
+                if cell in sample_by_cell
+            ]
+            regions.append({
                 "range": region.get("range"),
                 "header_rows": region.get("header_rows"),
                 "data_start_row": region.get("data_start_row"),
                 "row_count": region.get("row_count"),
                 "column_count": region.get("column_count"),
                 "type_counts": region.get("type_counts"),
+                "number_formats": region.get("number_formats"),
                 "unit_hints": region.get("unit_hints"),
-                "sample_cells": (region.get("provenance") or {}).get("sample_cells", []),
-            }
-            for region in sheet.get("regions", [])
-        ]
+                "sample": sample,
+                "confidence": region.get("confidence"),
+                "provenance": provenance,
+            })
         compact["sheets"].append(
             {
                 "name": sheet.get("name"),
@@ -1022,6 +1080,8 @@ def _compact_ours_profile(profile_data: dict[str, Any]) -> str:
                 "formula_clusters": sheet.get("formula_clusters", []),
                 "merges": sheet.get("merges", []),
                 "tables": sheet.get("tables", []),
+                "confidence": sheet.get("confidence", {}),
+                "provenance": sheet.get("provenance", {}),
                 "truncation": sheet.get("truncation", {}),
             }
         )

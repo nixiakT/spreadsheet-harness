@@ -3,8 +3,15 @@
 import re
 from typing import Any
 
-AGENT_EXECUTION_FAILURE_REASONS = frozenset(
+LEGACY_AGENT_EXECUTION_FAILURE_REASONS = frozenset(
     {"edit_recovery_exhausted", "workbook_unchanged"}
+)
+AGENT_EXECUTION_FAILURE_REASONS = LEGACY_AGENT_EXECUTION_FAILURE_REASONS | {
+    "budget_exhausted",
+    "terminal_submission_invalid",
+}
+MODEL_EXECUTION_BUDGET_TERMINATIONS = frozenset(
+    {"max_model_calls", "max_total_tokens"}
 )
 
 _SECRET_VALUE = re.compile(

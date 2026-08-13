@@ -107,6 +107,17 @@ class RunBudget:
         with self._lock:
             return self._to_dict_locked(time.monotonic())
 
+    def remaining_model_calls(self) -> int | None:
+        """Return unreserved response slots, or ``None`` for an unlimited budget."""
+
+        with self._lock:
+            if self.max_model_calls is None:
+                return None
+            return max(
+                self.max_model_calls - self._model_calls - len(self._reservations),
+                0,
+            )
+
     def _terminate_locked(
         self,
         reason: str,

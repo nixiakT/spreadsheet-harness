@@ -425,7 +425,7 @@ def test_fresh_pilot_output_claim_rolls_back_after_publish_sync_failure(
     assert not list(tmp_path.glob(".pilot.claim-*"))
 
 
-def test_documented_v24_compare_command_matches_run_spec_contract(
+def test_historical_v24_contract_is_parseable_but_current_runner_differs(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -521,6 +521,108 @@ def test_documented_v24_compare_command_matches_run_spec_contract(
         skills=skills,
     )
 
+    assert actual != document["execution"]
+    assert actual["comparison_protocol_version"] == "resource_matched_multi_arm_v25"
+    assert actual["comparison_manifest_schema_version"] == 14
+
+
+def test_documented_v25_confirmation_command_matches_run_spec_contract(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    key_file = tmp_path / "confirmation.key"
+    key_file.write_text("file-only-secret\n", encoding="utf-8")
+    key_file.chmod(0o600)
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    document, provenance, _ = cli._load_pilot_run_spec_from_repository(
+        "benchmarks/protocols/qwen35-trace2skill-local-confirm16-run-spec-v1.json"
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "compare",
+            "--dataset",
+            "benchmarks/data/spreadsheetbench_verified_400",
+            "--split-manifest",
+            "benchmarks/protocols/qwen35-trace2skill-local-confirm16-v1.json",
+            "--run-spec",
+            "benchmarks/protocols/qwen35-trace2skill-local-confirm16-run-spec-v1.json",
+            "--output",
+            "benchmarks/results/qwen36-local-confirm-eval16-v1-bare-ours-v25-seed41",
+            "--api-key-file",
+            str(key_file),
+            "--arm",
+            "bare",
+            "--arm",
+            "ours",
+            "--base-url",
+            "http://101.37.174.109:8010/v1",
+            "--model",
+            "qwen36-35b-a3b",
+            "--api-protocol",
+            "chat-completions",
+            "--reasoning-effort",
+            "none",
+            "--request-timeout",
+            "700",
+            "--request-retries",
+            "0",
+            "--request-interval-seconds",
+            "0",
+            "--litellm-timeout",
+            "600",
+            "--temperature",
+            "1",
+            "--top-p",
+            "1",
+            "--seed",
+            "41",
+            "--presence-penalty",
+            "2",
+            "--top-k",
+            "40",
+            "--min-p",
+            "0",
+            "--repetition-penalty",
+            "1",
+            "--disable-thinking",
+            "--max-model-calls",
+            "8",
+            "--max-turns-per-arm",
+            "8",
+            "--max-total-tokens",
+            "120000",
+            "--max-output-tokens",
+            "4096",
+            "--task-timeout",
+            "1200",
+            "--arm-order-seed",
+            "20260812",
+            "--circuit-breaker",
+            "3",
+        ]
+    )
+    config = cli._provider(args)
+    skills = cli._skills(args).freeze()
+    actual = cli.comparison_execution_contract(
+        config,
+        arms=tuple(args.arm),
+        max_model_calls=args.max_model_calls,
+        max_turns_per_arm=args.max_turns_per_arm,
+        max_total_tokens=args.max_total_tokens,
+        max_output_tokens=args.max_output_tokens,
+        task_timeout_seconds=args.task_timeout,
+        recalculate=not args.no_recalculate,
+        arm_order_seed=args.arm_order_seed,
+        circuit_breaker_threshold=args.circuit_breaker,
+        split_provenance=document["execution"]["split_provenance"],
+        skills=skills,
+    )
+
+    assert cli.require_launchable_run_spec(provenance) is not None
     assert actual == document["execution"]
 
 

@@ -14,6 +14,7 @@ from spreadsheet_harness import arms
 from spreadsheet_harness.agent import AgentResult, ResponseTurn
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
+from spreadsheet_harness.errors import AgentBudgetError
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import ToolOutcome
 from spreadsheet_harness.trajectory import read_trajectory
@@ -495,6 +496,75 @@ def test_ours_consumes_deterministic_profile_with_skills(
     assert len(profile_events[0]["payload"]["profile_sha256"]) == 64
 
 
+def test_compact_ours_profile_keeps_bounded_values_formats_and_provenance() -> None:
+    rendered = arms._compact_ours_profile(
+        {
+            "schema_version": "deterministic-workbook-profile-v1",
+            "profile_sha256": "a" * 64,
+            "source": {"format": "xlsx", "sha256": "b" * 64},
+            "backend": {"reader": "openpyxl"},
+            "task_independent": True,
+            "sheets": [
+                {
+                    "name": "Data",
+                    "state": "visible",
+                    "used_region": "A1:B2",
+                    "counts": {"nonempty_cells": 4},
+                    "regions": [
+                        {
+                            "range": "A1:B2",
+                            "header_rows": 1,
+                            "data_start_row": 2,
+                            "row_count": 2,
+                            "column_count": 2,
+                            "type_counts": {"text": 2, "number": 2},
+                            "number_formats": {"0.00": 2},
+                            "unit_hints": [{"unit": "USD", "cells": ["B1"]}],
+                            "sample": [
+                                {"cell": "A1", "kind": "text", "value": "Amount"},
+                                {"cell": "B2", "kind": "number", "value": 42},
+                            ],
+                            "confidence": "medium",
+                            "provenance": {
+                                "method": "deterministic-four-neighbor-components",
+                                "sheet": "Data",
+                                "range": "A1:B2",
+                                "sample_cells": ["A1", "B2"],
+                            },
+                        }
+                    ],
+                    "formula_clusters": [],
+                    "merges": [],
+                    "tables": [],
+                    "confidence": {"inventory": "high"},
+                    "provenance": {
+                        "method": "openpyxl-read-only-profile",
+                        "sheet": "Data",
+                        "range": "A1:B2",
+                    },
+                    "truncation": {},
+                }
+            ],
+            "truncation": {"sheets": False},
+        }
+    )
+    compact = json.loads(rendered)
+    sheet = compact["sheets"][0]
+    region = sheet["regions"][0]
+
+    assert region["sample"][0] == {
+        "cell": "A1",
+        "kind": "text",
+        "value": "Amount",
+    }
+    assert region["number_formats"] == {"0.00": 2}
+    assert region["provenance"]["range"] == "A1:B2"
+    assert sheet["confidence"] == {"inventory": "high"}
+    assert sheet["provenance"]["sheet"] == "Data"
+    assert compact["backend"] == {"reader": "openpyxl"}
+    assert compact["task_independent"] is True
+
+
 def test_paper_stages_share_budget_and_aggregate_usage_and_timings(
     sample_workbook: Path,
     tmp_path: Path,
@@ -583,6 +653,40 @@ def test_paper_stages_share_budget_and_aggregate_usage_and_timings(
     serialized = result.to_dict()
     assert serialized["arm"] == "paper"
     assert len(serialized["stages"]) == 5
+
+
+def test_arm_does_not_reclassify_elapsed_budget_as_model_failure(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    class TimedOutAgent:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def run(self, _: str) -> AgentResult:
+            raise AgentBudgetError(
+                "elapsed task budget expired",
+                reason="max_elapsed_seconds",
+                budget={},
+            )
+
+    monkeypatch.setattr(arms, "SpreadsheetAgent", TimedOutAgent)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "elapsed-budget")
+
+    with pytest.raises(AgentBudgetError) as caught:
+        arms.run_arm(
+            "bare",
+            _config(),
+            session,
+            None,
+            "inspect",
+            4_000,
+            300,
+            RunBudget(max_model_calls=8, max_total_tokens=120_000),
+        )
+
+    assert caught.value.reason == "max_elapsed_seconds"
 
 
 def test_comparison_turn_caps_scale_to_trace2skill_ceiling() -> None:

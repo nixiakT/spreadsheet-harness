@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from openpyxl import Workbook
 
+from spreadsheet_harness import benchmark as benchmark_module
 from spreadsheet_harness import cli as cli_module
 from spreadsheet_harness.agent import AgentResult
 from spreadsheet_harness.arms import PaperStageValidationError
@@ -15,7 +16,11 @@ from spreadsheet_harness.benchmark import SpreadsheetTask, compare_workbooks
 from spreadsheet_harness.comparison import (
     AVAILABLE_COMPARISON_ARMS,
     COMPARISON_ARMS,
+    COMPARISON_MANIFEST_SCHEMA_VERSION,
     COMPARISON_PROTOCOL_VERSION,
+    RUN_SPEC_ANCHORS,
+    V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V24_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     RunSpecAnchor,
     _arm_order,
@@ -27,6 +32,7 @@ from spreadsheet_harness.comparison import (
 )
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import (
+    AgentBudgetError,
     AgentExecutionFailure,
     AgentRoutingError,
     CodeIsolationError,
@@ -111,8 +117,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 13
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v24"
+    assert manifest["schema_version"] == 14
+    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 14
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v25"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -161,22 +168,26 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "ours": {"solve": "all"},
     }
     assert manifest["allowed_observed_terminals"]["paper"]["reconcile"] == [
-        "assistant_text"
+        "assistant_text",
+        "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["ours"]["solve"] == [
         "submit_result",
         "assistant_text",
         "final_recovery_code_interpreter",
+        "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["bare"]["solve"] == [
         "submit_result",
         "assistant_text",
         "final_recovery_code_interpreter",
+        "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["paper"]["solve"] == [
         "submit_result",
         "assistant_text",
         "final_recovery_code_interpreter",
+        "budget_exhausted",
     ]
     assert manifest["forced_prefix_wire_policy"] == {
         "tool_choice": "explicit_function",
@@ -263,7 +274,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "known-false-score-artifact-and-request-audited-nonbreaker-v1"
     )
     assert manifest["configuration"]["model_execution_failure_reasons"] == [
+        "budget_exhausted",
         "edit_recovery_exhausted",
+        "terminal_submission_invalid",
         "workbook_unchanged",
     ]
     assert manifest["hidden_from_models"] == [
@@ -718,12 +731,19 @@ def test_legacy_run_spec_is_parseable_but_never_launchable() -> None:
         require_launchable_run_spec(provenance)
 
 
-def test_v24_run_spec_is_fresh_only() -> None:
+def test_v24_run_spec_is_historical_and_read_only() -> None:
     document, provenance, _ = load_pilot_run_spec(
         Path("benchmarks/protocols/qwen35-trace2skill-local-postopt16-run-spec-v1.json")
     )
 
-    anchor = require_launchable_run_spec(provenance)
+    with pytest.raises(HarnessError, match="read-only"):
+        require_launchable_run_spec(provenance)
+
+    anchor = next(
+        candidate
+        for candidate in RUN_SPEC_ANCHORS
+        if candidate.run_spec_id == document["run_spec_id"]
+    )
 
     assert anchor == RunSpecAnchor(
         run_spec_id=document["run_spec_id"],
@@ -732,12 +752,83 @@ def test_v24_run_spec_is_fresh_only() -> None:
         schema_version=document["schema_version"],
         phase="post_optimization_evaluation",
         split_manifest_id="qwen35-trace2skill-local-postopt16-v1",
+        comparison_protocol_version=V24_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
+    )
+
+
+def test_v25_confirmation_run_spec_is_fresh_only() -> None:
+    document, provenance, _ = load_pilot_run_spec(
+        Path("benchmarks/protocols/qwen35-trace2skill-local-confirm16-run-spec-v1.json")
+    )
+
+    anchor = require_launchable_run_spec(provenance)
+
+    assert anchor == RunSpecAnchor(
+        run_spec_id=document["run_spec_id"],
+        filename="qwen35-trace2skill-local-confirm16-run-spec-v1.json",
+        sha256="61ec4d37d0548e1be63ebf8619feb591d98ca78d7dce4d9d573886498ca74984",
+        schema_version=document["schema_version"],
+        phase="post_optimization_confirmation",
+        split_manifest_id="qwen35-trace2skill-local-confirm16-v1",
         comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
-        comparison_manifest_schema_version=13,
+        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
         launchable=True,
     )
     with pytest.raises(HarnessError, match="fresh-only"):
         require_launchable_run_spec(provenance, resume=True)
+
+
+def test_v25_source_contract_exactly_matches_current_source() -> None:
+    document, _, _ = load_pilot_run_spec(
+        Path("benchmarks/protocols/qwen35-trace2skill-local-confirm16-run-spec-v1.json")
+    )
+
+    assert document["execution"]["source_contract"] == (
+        benchmark_module._run_spec_source_fingerprint()
+    )
+
+
+@pytest.mark.parametrize(
+    "source_contract",
+    [
+        {
+            "schema_version": 1,
+            "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
+            "sha256": "0" * 64,
+            "file_count": 21,
+        },
+        {
+            "schema_version": 1,
+            "policy": "tampered-policy",
+            "sha256": "0" * 64,
+            "file_count": 21,
+        },
+    ],
+)
+def test_v25_preflight_rejects_stale_or_tampered_source_contract(
+    tmp_path: Path,
+    monkeypatch: Any,
+    source_contract: dict[str, Any],
+) -> None:
+    runner, tasks = _pilot_run_spec_runner(
+        tmp_path,
+        monkeypatch,
+        spec_filename="qwen35-trace2skill-local-confirm16-run-spec-v1.json",
+    )
+    runner.run_spec_document["execution"]["source_contract"] = source_contract
+    events: list[str] = []
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: events.append("isolation") or {},
+    )
+
+    with pytest.raises(HarnessError, match="execution contract"):
+        runner.preflight(tasks)
+
+    assert events == []
+    assert not runner.output_dir.exists()
 
 
 def test_pilot_split_requires_canonical_run_spec_in_runner(
@@ -868,7 +959,7 @@ def test_repository_source_state_rejects_remote_query_failure(
         verify_repository_source_state(tmp_path)
 
 
-def test_preflight_verifies_source_before_isolation(
+def test_historical_v24_preflight_rejects_before_source_or_isolation(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -887,10 +978,10 @@ def test_preflight_verifies_source_before_isolation(
         lambda *_args, **_kwargs: events.append("isolation") or {},
     )
 
-    manifest = runner.preflight(tasks)
+    with pytest.raises(HarnessError, match="read-only"):
+        runner.preflight(tasks)
 
-    assert events == ["source", "isolation"]
-    assert manifest["repository_source"] == {"schema_version": 1}
+    assert events == []
     assert not runner.output_dir.exists()
 
 
@@ -1861,13 +1952,42 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
         output_sha256 = hashlib.sha256(output.read_bytes()).hexdigest()
         timings = [
             {
-                "turn": turn,
+                "turn": 1,
+                "stage": "solve",
                 "attempts": 1,
                 "attempt_history": [
                     {"api_protocol": "responses", "endpoint": "/responses"}
                 ],
-            }
-            for turn in range(1, 4)
+                "input_tokens": 2,
+                "output_tokens": 0,
+                "total_tokens": 2,
+            },
+            {
+                "turn": 2,
+                "stage": "solve",
+                "attempts": 1,
+                "attempt_history": [
+                    {"api_protocol": "responses", "endpoint": "/responses"}
+                ],
+                "input_tokens": 2,
+                "output_tokens": 0,
+                "total_tokens": 2,
+            },
+            {
+                "turn": 3,
+                "stage": "solve",
+                "attempts": 1,
+                "attempt_history": [
+                    {"api_protocol": "responses", "endpoint": "/responses"}
+                ],
+                "input_tokens": 4,
+                "output_tokens": 2,
+                "total_tokens": 6,
+            },
+        ]
+        tool_trace = [
+            {"name": "code_interpreter", "ok": True},
+            {"name": "code_interpreter", "ok": True},
         ]
         budget = {
             "limit": {
@@ -1903,10 +2023,10 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
             "max_turns_per_arm": 20,
             "stage_turn_caps": {"solve": 20},
             "calculation_backend": "not_recalculated",
-                "status": "completed",
-                "outcome_kind": "scored",
-                "passed": comparison["passed"],
-                "artifact_score_passed": comparison["passed"],
+            "status": "completed",
+            "outcome_kind": "scored",
+            "passed": comparison["passed"],
+            "artifact_score_passed": comparison["passed"],
             "comparison": comparison,
             "run_dir": str(task_dir),
             "output_workbook": str(output),
@@ -1914,8 +2034,15 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
             "budget": budget,
             "agent": {
                 "arm": "bare",
+                "turns": 3,
+                "tool_calls": 2,
                 "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
                 "request_timings": timings,
+                "tool_trace": [
+                    {"stage": "solve", **item} for item in tool_trace
+                ],
+                "terminal_submissions": 1,
+                "function_calls_total": 3,
                 "budget": budget,
                 "stages": [
                     {
@@ -1931,7 +2058,25 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                         ],
                         "terminal_tool": "submit_result",
                         "observed_terminal_tool": "submit_result",
-                        "agent": {"turns": 3, "request_timings": timings},
+                        "tool_name_trace": [
+                            "code_interpreter",
+                            "code_interpreter",
+                        ],
+                        "tool_trace": tool_trace,
+                        "agent": {
+                            "turns": 3,
+                            "tool_calls": 2,
+                            "usage": {
+                                "input_tokens": 8,
+                                "output_tokens": 2,
+                                "total_tokens": 10,
+                            },
+                            "request_timings": timings,
+                            "tool_trace": tool_trace,
+                            "terminal_submissions": 1,
+                            "function_calls_total": 3,
+                            "budget": budget,
+                        },
                     }
                 ],
             },
@@ -2082,6 +2227,55 @@ def test_comparison_requires_evidence_for_known_model_execution_failure(
     assert row["error_type"] == "HarnessError"
 
 
+def test_comparison_records_token_budget_exhaustion_as_completed_false(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task = _tasks(tmp_path)[0]
+
+    class BudgetFailureEvidence:
+        def __init__(self, budget: Any) -> None:
+            self.budget = budget
+
+        def to_dict(self) -> dict[str, Any]:
+            snapshot = self.budget.to_dict()
+            return {
+                "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+                "request_timings": [{"turn": 1, "total_tokens": 11}],
+                "budget": snapshot,
+            }
+
+    def exhaust_budget(**kwargs: Any) -> AgentResult:
+        budget = kwargs["budget"]
+        reservation = budget.begin_model_call(stage="solve")
+        with pytest.raises(AgentBudgetError):
+            budget.record_response(reservation, {"total_tokens": 11}, stage="solve")
+        raise AgentExecutionFailure(
+            "token budget exhausted",
+            reason="budget_exhausted",
+            agent_result=BudgetFailureEvidence(budget),
+        )
+
+    monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", exhaust_budget)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "budget-failure",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=3,
+        max_turns_per_arm=3,
+        max_total_tokens=10,
+        recalculate=False,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "completed"
+    assert row["passed"] is False
+    assert row["outcome_kind"] == "model_execution_failure"
+    assert row["model_failure_reason"] == "budget_exhausted"
+    assert row["budget"]["used"]["total_tokens"] == 11
+
+
 def test_known_model_execution_failure_row_passes_full_audit(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -2106,14 +2300,25 @@ def test_known_model_execution_failure_row_passes_full_audit(
 
         def to_dict(self) -> dict[str, Any]:
             budget = self.budget.to_dict()
+            tool_trace = [
+                {"name": "code_interpreter", "ok": True},
+                {"name": "code_interpreter", "ok": True},
+            ]
             return {
                 "arm": "bare",
+                "turns": 2,
+                "tool_calls": 2,
                 "usage": {
                     "input_tokens": 8,
                     "output_tokens": 2,
                     "total_tokens": 10,
                 },
                 "request_timings": self.timings,
+                "tool_trace": [
+                    {"stage": "solve", **item} for item in tool_trace
+                ],
+                "terminal_submissions": 0,
+                "function_calls_total": 2,
                 "budget": budget,
                 "stages": [
                     {
@@ -2132,7 +2337,25 @@ def test_known_model_execution_failure_row_passes_full_audit(
                         ],
                         "terminal_tool": "submit_result",
                         "observed_terminal_tool": "final_recovery_code_interpreter",
-                        "agent": {"turns": 2, "request_timings": self.timings},
+                        "tool_name_trace": [
+                            "code_interpreter",
+                            "code_interpreter",
+                        ],
+                        "tool_trace": tool_trace,
+                        "agent": {
+                            "turns": 2,
+                            "tool_calls": 2,
+                            "usage": {
+                                "input_tokens": 8,
+                                "output_tokens": 2,
+                                "total_tokens": 10,
+                            },
+                            "request_timings": self.timings,
+                            "tool_trace": tool_trace,
+                            "terminal_submissions": 0,
+                            "function_calls_total": 2,
+                            "budget": budget,
+                        },
                     }
                 ],
             }
@@ -2154,10 +2377,14 @@ def test_known_model_execution_failure_row_passes_full_audit(
             timings.append(
                 {
                     "turn": turn,
+                    "stage": "solve",
                     "attempts": 1,
                     "attempt_history": [
                         {"api_protocol": "responses", "endpoint": "/responses"}
                     ],
+                    "input_tokens": 4,
+                    "output_tokens": 1,
+                    "total_tokens": 5,
                 }
             )
         raise AgentExecutionFailure(
@@ -2291,8 +2518,59 @@ def test_end_to_end_deadline_covers_scoring(
     row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
 
     assert row["status"] == "error"
-    assert row["error_category"] == "budget_exhausted"
+    assert row["error_category"] == "task_timeout"
     assert row["budget"]["termination"]["reason"] == "max_elapsed_seconds"
+
+
+def test_deadline_after_token_termination_records_timeout_row(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task = _tasks(tmp_path)[0]
+    now = [100.0]
+    monkeypatch.setattr("spreadsheet_harness.comparison.monotonic", lambda: now[0])
+    monkeypatch.setattr("spreadsheet_harness.budget.time.monotonic", lambda: now[0])
+
+    def token_failure(**kwargs: Any) -> AgentResult:
+        budget = kwargs["budget"]
+        reservation = budget.begin_model_call(stage="solve")
+        with pytest.raises(AgentBudgetError):
+            budget.record_response(
+                reservation,
+                {"total_tokens": 11},
+                stage="solve",
+            )
+        now[0] = 102.0
+        raise AgentExecutionFailure(
+            "token budget exhausted",
+            reason="budget_exhausted",
+            agent_result=AgentResult(
+                "token budget exhausted",
+                1,
+                0,
+                {"total_tokens": 11},
+                "response",
+            ),
+        )
+
+    monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", token_failure)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "deadline-after-token-budget",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=3,
+        max_turns_per_arm=3,
+        max_total_tokens=10,
+        task_timeout_seconds=1,
+        recalculate=False,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "error"
+    assert row["error_category"] == "task_timeout"
+    assert row["error_type"] == "AgentTimeoutError"
+    assert row["budget"]["termination"]["reason"] == "max_total_tokens"
 
 
 def test_comparison_fails_before_writes_when_strict_isolation_is_unavailable(

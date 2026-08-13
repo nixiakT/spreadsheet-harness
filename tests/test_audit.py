@@ -9,14 +9,24 @@ from typing import Any
 import pytest
 from openpyxl import Workbook, load_workbook
 
+from spreadsheet_harness.arms import (
+    COMPARISON_FORCED_TOOL_PREFIX_POLICY,
+    comparison_stage_turn_caps,
+)
 from spreadsheet_harness.audit import audit_comparison
 from spreadsheet_harness.benchmark import SpreadsheetTask, compare_workbooks
 from spreadsheet_harness.comparison import (
+    COMPARISON_CONFIGURATION_POLICIES,
     COMPARISON_PROTOCOL_VERSION,
     CONTINUATION_SOURCE_FILENAME,
     INFLIGHT_FILENAME,
     INTERRUPTED_SEALS_FILENAME,
+    V24_COMPARISON_CONFIGURATION_POLICIES,
+    V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V24_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
+    _allowed_observed_terminals_policy,
+    _stage_allowed_tools_policy,
 )
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.skills import SkillRegistry
@@ -107,14 +117,41 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
     timings = [
         {
             "turn": turn,
+            "stage": "solve",
             "attempts": 1,
-            "attempt_history": [attempt],
+            "attempt_history": [dict(attempt)],
+            "input_tokens": 2 if turn < 3 else 4,
+            "output_tokens": 0 if turn < 3 else 2,
+            "total_tokens": 2 if turn < 3 else 6,
         }
         for turn in range(1, 4)
     ]
+    stage_budget = {
+        "limit": {
+            "model_calls": 3,
+            "total_tokens": 100,
+            "elapsed_seconds": 30,
+        },
+        "used": {
+            "model_calls": 3,
+            "total_tokens": 10,
+            "elapsed_seconds": 0.9,
+        },
+        "termination": None,
+    }
+    tool_trace = [
+        {"name": "code_interpreter", "ok": True},
+        {"name": "code_interpreter", "ok": True},
+    ]
     stage_agent = {
         "turns": 3,
-        "request_timings": timings,
+        "tool_calls": 2,
+        "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
+        "request_timings": json.loads(json.dumps(timings)),
+        "tool_trace": json.loads(json.dumps(tool_trace)),
+        "terminal_submissions": 1,
+        "function_calls_total": 3,
+        "budget": stage_budget,
     }
     stage = {
         "name": "solve",
@@ -126,6 +163,8 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "observed_forced_tool_prefix": ["code_interpreter", "code_interpreter"],
         "terminal_tool": "submit_result",
         "observed_terminal_tool": "submit_result",
+        "tool_name_trace": ["code_interpreter", "code_interpreter"],
+        "tool_trace": tool_trace,
         "agent": stage_agent,
     }
     row = {
@@ -152,22 +191,17 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "comparison": comparison.to_dict(),
         "agent": {
             "arm": "bare",
+            "turns": 3,
+            "tool_calls": 2,
             "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
-            "request_timings": timings,
+            "request_timings": json.loads(json.dumps(timings)),
+            "tool_trace": [
+                {"stage": "solve", **item} for item in tool_trace
+            ],
+            "terminal_submissions": 1,
+            "function_calls_total": 3,
             "stages": [stage],
-            "budget": {
-                "limit": {
-                    "model_calls": 3,
-                    "total_tokens": 100,
-                    "elapsed_seconds": 30,
-                },
-                "used": {
-                    "model_calls": 3,
-                    "total_tokens": 10,
-                    "elapsed_seconds": 0.9,
-                },
-                "termination": None,
-            },
+            "budget": stage_budget,
         },
         "budget": {
             "limit": {
@@ -182,6 +216,211 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "output_workbook": str(output),
         "output_sha256": _sha256(output),
     }
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return results, task, row
+
+
+def _paper_budget_fixture(
+    tmp_path: Path,
+    *,
+    failed_stage: str,
+    termination_reason: str = "max_total_tokens",
+    failure_turns: int = 0,
+) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    caps = comparison_stage_turn_caps(20, ("paper",))["paper"]
+    expected_names = list(caps)
+    failed_index = expected_names.index(failed_stage)
+    manifest["arms"] = ["paper"]
+    manifest["configuration"]["max_model_calls"] = 20
+    manifest["configuration"]["max_turns_per_arm"] = 20
+    manifest["stage_turn_caps"] = {"paper": caps}
+    manifest["forced_tool_prefix_routing"] = {
+        "paper": {
+            name: list(prefix)
+            for name, prefix in COMPARISON_FORCED_TOOL_PREFIX_POLICY["paper"].items()
+        }
+    }
+    manifest["stage_allowed_tools"] = _stage_allowed_tools_policy(("paper",))
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
+        {"paper": caps}
+    )
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    old_run_dir = Path(row["run_dir"])
+    run_dir = old_run_dir.with_name("paper")
+    old_run_dir.rename(run_dir)
+    output = run_dir / "artifacts" / "output.xlsx"
+    attempt = {"api_protocol": "responses", "endpoint": "/responses"}
+    aggregate_timings: list[dict[str, Any]] = []
+    stages: list[dict[str, Any]] = []
+    for name in expected_names[: failed_index + 1]:
+        prefix = list(COMPARISON_FORCED_TOOL_PREFIX_POLICY["paper"][name])
+        is_failure = name == failed_stage
+        turns = failure_turns if is_failure else max(len(prefix), 1)
+        per_turn_tokens = 0
+        timings = [
+            {
+                "turn": turn,
+                "stage": name,
+                "attempts": 1,
+                "attempt_history": [dict(attempt)],
+                "input_tokens": per_turn_tokens,
+                "output_tokens": 0,
+                "total_tokens": per_turn_tokens,
+            }
+            for turn in range(1, turns + 1)
+        ]
+        aggregate_timings.extend(json.loads(json.dumps(timings)))
+        terminal_tool = "assistant_text" if name == "reconcile" else "submit_result"
+        terminal_submissions = 0
+        tool_trace = [
+            {"name": tool_name, "ok": True}
+            for tool_name in ([] if is_failure else prefix)
+        ]
+        stage_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        stage_budget = {
+            "limit": {
+                "model_calls": 20,
+                "total_tokens": 100,
+                "elapsed_seconds": 30,
+            },
+            "used": {
+                "model_calls": len(aggregate_timings),
+                "total_tokens": 0,
+                "elapsed_seconds": 0.5,
+            },
+            "termination": None,
+        }
+        stages.append(
+            {
+                "name": name,
+                "max_turns": caps[name],
+                "allowed_tools": manifest["stage_allowed_tools"]["paper"][name],
+                "first_tool_choice": prefix[0] if prefix else None,
+                "observed_first_tool": prefix[0] if prefix and not is_failure else None,
+                "forced_tool_prefix": prefix,
+                "observed_forced_tool_prefix": [] if is_failure else prefix,
+                "terminal_tool": (
+                    ("assistant_text" if turns == 0 else None)
+                    if is_failure and name == "reconcile"
+                    else terminal_tool
+                ),
+                "observed_terminal_tool": (
+                    "budget_exhausted" if is_failure else "assistant_text"
+                ),
+                "tool_name_trace": [item["name"] for item in tool_trace],
+                "tool_trace": json.loads(json.dumps(tool_trace)),
+                "agent": {
+                    "turns": turns,
+                    "tool_calls": len(tool_trace),
+                    "usage": stage_usage,
+                    "request_timings": timings,
+                    "tool_trace": json.loads(json.dumps(tool_trace)),
+                    "terminal_submissions": terminal_submissions,
+                    "function_calls_total": len(tool_trace) + terminal_submissions,
+                    "budget": stage_budget,
+                },
+            }
+        )
+
+    used_calls = len(aggregate_timings)
+    used_tokens = 100 if termination_reason == "max_total_tokens" else 10
+    if aggregate_timings:
+        aggregate_timings[-1]["input_tokens"] = used_tokens
+        aggregate_timings[-1]["total_tokens"] = used_tokens
+        timing_stage = next(
+            stage
+            for stage in reversed(stages)
+            if stage["agent"]["request_timings"]
+        )
+        timing_stage["agent"]["request_timings"][-1]["input_tokens"] = used_tokens
+        timing_stage["agent"]["request_timings"][-1]["total_tokens"] = used_tokens
+        timing_stage["agent"]["usage"]["input_tokens"] = used_tokens
+        timing_stage["agent"]["usage"]["total_tokens"] = used_tokens
+    limit_calls = used_calls if termination_reason == "max_model_calls" else 20
+    if termination_reason == "max_model_calls":
+        manifest["configuration"]["max_model_calls"] = limit_calls
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    termination = {
+        "reason": termination_reason,
+        "message": "budget exhausted",
+        "stage": failed_stage,
+        "elapsed_seconds": 1.0,
+    }
+    budget = {
+        "limit": {
+            "model_calls": limit_calls,
+            "total_tokens": 100,
+            "elapsed_seconds": 30,
+        },
+        "used": {
+            "model_calls": used_calls,
+            "total_tokens": used_tokens,
+            "elapsed_seconds": 1.0,
+        },
+        "termination": termination,
+    }
+    for index, stage in enumerate(stages):
+        stage_budget = stage["agent"]["budget"]
+        stage_budget["limit"]["model_calls"] = limit_calls
+        stage_budget["used"]["model_calls"] = sum(
+            item["agent"]["turns"] for item in stages[: index + 1]
+        )
+        stage_budget["used"]["total_tokens"] = sum(
+            item["agent"]["usage"]["total_tokens"] for item in stages[: index + 1]
+        )
+    stages[-1]["agent"]["budget"] = json.loads(json.dumps(budget))
+    aggregate_tool_trace = [
+        {"stage": stage["name"], **item}
+        for stage in stages
+        for item in stage["tool_trace"]
+    ]
+    aggregate_turns = sum(stage["agent"]["turns"] for stage in stages)
+    aggregate_tool_calls = sum(stage["agent"]["tool_calls"] for stage in stages)
+    aggregate_terminal_submissions = sum(
+        stage["agent"]["terminal_submissions"] for stage in stages
+    )
+    row.update(
+        {
+            "arm": "paper",
+            "comparison_manifest_sha256": _sha256(manifest_path),
+            "max_model_calls": limit_calls,
+            "max_turns_per_arm": 20,
+            "stage_turn_caps": caps,
+            "status": "completed",
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "budget exhausted",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "budget_exhausted",
+            "run_dir": str(run_dir),
+            "output_workbook": str(output),
+            "agent": {
+                "arm": "paper",
+                "turns": aggregate_turns,
+                "tool_calls": aggregate_tool_calls,
+                "usage": {
+                    "input_tokens": used_tokens,
+                    "output_tokens": 0,
+                    "total_tokens": used_tokens,
+                },
+                "request_timings": aggregate_timings,
+                "tool_trace": aggregate_tool_trace,
+                "terminal_submissions": aggregate_terminal_submissions,
+                "function_calls_total": (
+                    aggregate_tool_calls + aggregate_terminal_submissions
+                ),
+                "stages": stages,
+                "budget": budget,
+            },
+            "budget": budget,
+        }
+    )
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return results, task, row
 
@@ -359,6 +598,456 @@ def test_audit_accepts_known_model_execution_failure_as_completed_false(
     assert summary["rows"][0]["model_failure_reason"] == "workbook_unchanged"
 
 
+def test_audit_accepts_only_one_provable_response_token_overage(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row.update(
+        {
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "token budget exhausted",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "budget_exhausted",
+        }
+    )
+    row["budget"]["used"]["total_tokens"] = 110
+    row["budget"]["termination"] = {
+        "reason": "max_total_tokens",
+        "message": "token budget exhausted",
+        "stage": "solve",
+        "elapsed_seconds": 1.0,
+    }
+    row["agent"]["usage"]["total_tokens"] = 110
+    row["agent"]["budget"] = row["budget"]
+    row["agent"]["stages"][0]["observed_terminal_tool"] = "budget_exhausted"
+    stage_agent = row["agent"]["stages"][0]["agent"]
+    stage_agent["budget"] = json.loads(json.dumps(row["budget"]))
+    stage_agent["usage"] = {"input_tokens": 108, "output_tokens": 2, "total_tokens": 110}
+    stage_agent["terminal_submissions"] = 0
+    stage_agent["function_calls_total"] = stage_agent["tool_calls"]
+    row["agent"]["usage"] = dict(stage_agent["usage"])
+    row["agent"]["terminal_submissions"] = 0
+    row["agent"]["function_calls_total"] = row["agent"]["tool_calls"]
+    for aggregate_timing, stage_timing, tokens in zip(
+        row["agent"]["request_timings"],
+        stage_agent["request_timings"],
+        (40, 40, 30),
+        strict=True,
+    ):
+        for timing in (aggregate_timing, stage_timing):
+            timing["input_tokens"] = tokens
+            timing["output_tokens"] = 0
+            timing["total_tokens"] = tokens
+    row["agent"]["request_timings"][-1]["output_tokens"] = 2
+    row["agent"]["request_timings"][-1]["input_tokens"] = 28
+    stage_agent["request_timings"][-1]["output_tokens"] = 2
+    stage_agent["request_timings"][-1]["input_tokens"] = 28
+
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    accepted = audit_comparison(results, [task])
+    assert accepted["audit_valid"] is True
+    assert not _row_reason(accepted, "budget_used_invalid:total_tokens")
+
+    for timing, tokens in zip(
+        row["agent"]["request_timings"], (50, 50, 10), strict=True
+    ):
+        timing["input_tokens"] = tokens
+        timing["output_tokens"] = 0
+        timing["total_tokens"] = tokens
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    rejected = audit_comparison(results, [task])
+    assert rejected["audit_valid"] is False
+    assert _row_reason(rejected, "budget_used_invalid:total_tokens")
+
+
+def test_v25_budget_failure_allows_only_an_observed_forced_prefix(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    termination = {
+        "reason": "max_total_tokens",
+        "message": "token budget exhausted",
+        "stage": "solve",
+        "elapsed_seconds": 1.0,
+    }
+    timing = json.loads(json.dumps(row["agent"]["request_timings"][0]))
+    timing.update({"input_tokens": 98, "output_tokens": 2, "total_tokens": 100})
+    row.update(
+        {
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "token budget exhausted",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "budget_exhausted",
+        }
+    )
+    row["budget"]["used"].update({"model_calls": 1, "total_tokens": 100})
+    row["budget"]["termination"] = termination
+    row["agent"].update(
+        {
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 98, "output_tokens": 2, "total_tokens": 100},
+            "request_timings": [json.loads(json.dumps(timing))],
+            "tool_trace": [],
+            "terminal_submissions": 0,
+            "function_calls_total": 0,
+        }
+    )
+    row["agent"]["budget"] = row["budget"]
+    stage = row["agent"]["stages"][0]
+    stage["observed_forced_tool_prefix"] = ["code_interpreter"]
+    stage["observed_terminal_tool"] = "budget_exhausted"
+    stage["tool_name_trace"] = []
+    stage["tool_trace"] = []
+    stage["agent"] = {
+        "turns": 1,
+        "tool_calls": 0,
+        "usage": {"input_tokens": 98, "output_tokens": 2, "total_tokens": 100},
+        "request_timings": [json.loads(json.dumps(timing))],
+        "tool_trace": [],
+        "terminal_submissions": 0,
+        "function_calls_total": 0,
+        "budget": json.loads(json.dumps(row["budget"])),
+    }
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    accepted = audit_comparison(results, [task])
+    assert accepted["audit_valid"] is True
+
+    stage["observed_forced_tool_prefix"] = ["inspect_range"]
+    stage["observed_first_tool"] = "inspect_range"
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    rejected = audit_comparison(results, [task])
+    assert rejected["audit_valid"] is False
+    assert _row_reason(rejected, "agent_observed_prefix_mismatch:solve")
+
+
+def test_nonbudget_failure_still_requires_exact_forced_prefix(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row.update(
+        {
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "workbook unchanged",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "workbook_unchanged",
+        }
+    )
+    row["agent"]["stages"][0]["observed_forced_tool_prefix"] = [
+        "code_interpreter"
+    ]
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "agent_observed_prefix_mismatch:solve")
+
+
+@pytest.mark.parametrize(
+    ("outcome_kind", "failure_reason"),
+    [("scored", None), ("model_execution_failure", "workbook_unchanged")],
+)
+def test_nonbudget_outcome_rejects_budget_terminal(
+    tmp_path: Path,
+    outcome_kind: str,
+    failure_reason: str | None,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    if failure_reason is not None:
+        row.update(
+            {
+                "outcome_kind": outcome_kind,
+                "passed": False,
+                "error": "workbook unchanged",
+                "error_type": "AgentExecutionFailure",
+                "error_retryable": False,
+                "error_category": "model_execution_failure",
+                "model_failure_reason": failure_reason,
+            }
+        )
+    row["agent"]["stages"][0]["observed_terminal_tool"] = "budget_exhausted"
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "agent_observed_terminal_invalid:solve")
+
+
+@pytest.mark.parametrize("termination_reason", ["max_model_calls", "max_total_tokens"])
+def test_paper_budget_failure_allows_stage_prefix_and_zero_turn_final_stage(
+    tmp_path: Path,
+    termination_reason: str,
+) -> None:
+    results, task, _ = _paper_budget_fixture(
+        tmp_path,
+        failed_stage="reconcile",
+        termination_reason=termination_reason,
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["rows"][0]["model_failure_reason"] == "budget_exhausted"
+
+
+def test_paper_reconcile_budget_terminal_depends_on_failure_path(
+    tmp_path: Path,
+) -> None:
+    zero_results, zero_task, zero_row = _paper_budget_fixture(
+        tmp_path / "zero",
+        failed_stage="reconcile",
+        failure_turns=0,
+    )
+    positive_results, positive_task, positive_row = _paper_budget_fixture(
+        tmp_path / "positive",
+        failed_stage="reconcile",
+        failure_turns=1,
+    )
+
+    assert audit_comparison(zero_results, [zero_task])["audit_valid"] is True
+    assert audit_comparison(positive_results, [positive_task])["audit_valid"] is True
+
+    zero_row = json.loads(json.dumps(zero_row))
+    zero_row["agent"]["stages"][-1]["terminal_tool"] = None
+    (zero_results / "results.jsonl").write_text(
+        json.dumps(zero_row) + "\n", encoding="utf-8"
+    )
+    zero_rejected = audit_comparison(zero_results, [zero_task])
+    assert zero_rejected["audit_valid"] is False
+    assert _row_reason(zero_rejected, "agent_terminal_tool_mismatch:reconcile")
+
+    positive_row = json.loads(json.dumps(positive_row))
+    positive_row["agent"]["stages"][-1]["terminal_tool"] = "assistant_text"
+    (positive_results / "results.jsonl").write_text(
+        json.dumps(positive_row) + "\n", encoding="utf-8"
+    )
+    positive_rejected = audit_comparison(positive_results, [positive_task])
+    assert positive_rejected["audit_valid"] is False
+    assert _row_reason(positive_rejected, "agent_terminal_tool_mismatch:reconcile")
+
+
+def test_paper_zero_turn_budget_stage_requires_matching_termination(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _paper_budget_fixture(
+        tmp_path,
+        failed_stage="reconcile",
+    )
+    stage_budget = json.loads(json.dumps(row["agent"]["stages"][-1]["agent"]["budget"]))
+    stage_budget["termination"]["stage"] = "latex_verify"
+    row["agent"]["stages"][-1]["agent"]["budget"] = stage_budget
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "agent_stage_budget_mismatch:reconcile")
+
+
+def test_v24_contract_keeps_historical_failure_taxonomy_and_budget_rule(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V24_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V24_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V24_COMPARISON_CONFIGURATION_POLICIES)
+    manifest["allowed_observed_terminals"]["bare"]["solve"] = [
+        "submit_result",
+        "assistant_text",
+        "final_recovery_code_interpreter",
+    ]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row.update(
+        {
+            "comparison_protocol_version": V24_COMPARISON_PROTOCOL_VERSION,
+            "comparison_manifest_sha256": _sha256(manifest_path),
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "token budget exhausted",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "budget_exhausted",
+        }
+    )
+    row["budget"]["used"]["total_tokens"] = 110
+    row["budget"]["termination"] = {
+        "reason": "max_total_tokens",
+        "message": "token budget exhausted",
+        "stage": "solve",
+        "elapsed_seconds": 1.0,
+    }
+    row["agent"]["usage"]["total_tokens"] = 110
+    row["agent"]["budget"] = row["budget"]
+    row["agent"]["stages"][0]["agent"]["budget"] = row["budget"]
+    for timing, tokens in zip(row["agent"]["request_timings"], (40, 40, 30), strict=True):
+        timing["total_tokens"] = tokens
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "model_execution_failure_reason_invalid")
+    assert _row_reason(summary, "budget_used_invalid:total_tokens")
+    assert manifest["configuration"]["model_execution_failure_reasons"] != (
+        COMPARISON_CONFIGURATION_POLICIES["model_execution_failure_reasons"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_reason"),
+    [
+        ("aggregate_order", "agent_request_timings_mismatch"),
+        ("stage_timing", "agent_request_timings_mismatch"),
+    ],
+)
+def test_v25_audit_binds_aggregate_and_stage_request_timings(
+    tmp_path: Path,
+    target: str,
+    expected_reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    if target == "aggregate_order":
+        row["agent"]["request_timings"].reverse()
+    else:
+        row["agent"]["stages"][0]["agent"]["request_timings"][0]["turn"] = 99
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, expected_reason)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_reason"),
+    [
+        ("wrapper", "agent_stage_tool_trace_mismatch:solve"),
+        ("nested", "agent_stage_tool_trace_mismatch:solve"),
+        ("aggregate", "agent_tool_trace_mismatch"),
+        ("names", "agent_stage_tool_names_mismatch:solve"),
+        ("disallowed", "agent_stage_tool_not_allowed:solve"),
+        ("count", "agent_tool_count_mismatch"),
+    ],
+)
+def test_v25_audit_binds_tool_traces_and_counts(
+    tmp_path: Path,
+    target: str,
+    expected_reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    stage = row["agent"]["stages"][0]
+    if target == "wrapper":
+        stage["tool_trace"][0]["ok"] = False
+    elif target == "nested":
+        stage["agent"]["tool_trace"][0]["ok"] = False
+    elif target == "aggregate":
+        row["agent"]["tool_trace"][0]["ok"] = False
+    elif target == "names":
+        stage["tool_name_trace"] = ["delete_rows", "code_interpreter"]
+    elif target == "disallowed":
+        disallowed = {"name": "delete_rows", "ok": True}
+        stage["tool_trace"].append(disallowed)
+        stage["agent"]["tool_trace"].append(dict(disallowed))
+        stage["tool_name_trace"].append("delete_rows")
+        stage["agent"]["tool_calls"] += 1
+        stage["agent"]["function_calls_total"] += 1
+        row["agent"]["tool_trace"].append({"stage": "solve", **disallowed})
+        row["agent"]["tool_calls"] += 1
+        row["agent"]["function_calls_total"] += 1
+    else:
+        row["agent"]["tool_calls"] = 99
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, expected_reason)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_reason"),
+    [
+        ("aggregate_usage", "agent_stage_usage_mismatch"),
+        ("usage_arithmetic", "agent_stage_usage_mismatch"),
+        ("stage_usage", "agent_stage_timing_usage_mismatch:solve"),
+        ("stage_budget", "agent_stage_budget_mismatch:solve"),
+    ],
+)
+def test_v25_audit_reconciles_usage_and_stage_budgets(
+    tmp_path: Path,
+    target: str,
+    expected_reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    stage_agent = row["agent"]["stages"][0]["agent"]
+    if target == "aggregate_usage":
+        row["agent"]["usage"] = {
+            "input_tokens": -999,
+            "output_tokens": 1009,
+            "total_tokens": 10,
+        }
+    elif target == "usage_arithmetic":
+        row["agent"]["usage"] = {
+            "input_tokens": 8,
+            "output_tokens": 3,
+            "total_tokens": 99,
+        }
+    elif target == "stage_usage":
+        stage_agent["usage"]["input_tokens"] += 1
+        stage_agent["usage"]["output_tokens"] -= 1
+    else:
+        stage_agent["budget"]["used"]["model_calls"] = 2
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, expected_reason)
+
+
+def test_v24_audit_does_not_require_v25_exact_agent_evidence(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V24_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V24_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V24_COMPARISON_CONFIGURATION_POLICIES)
+    manifest["allowed_observed_terminals"]["bare"]["solve"] = [
+        "submit_result",
+        "assistant_text",
+        "final_recovery_code_interpreter",
+    ]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row = json.loads(json.dumps(row))
+    row["comparison_protocol_version"] = V24_COMPARISON_PROTOCOL_VERSION
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["agent"]["request_timings"].reverse()
+    row["agent"]["tool_calls"] = 99
+    row["agent"]["stages"][0]["agent"]["budget"]["used"]["model_calls"] = 2
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+
+
 @pytest.mark.parametrize(
     ("field", "value", "expected_reason"),
     [
@@ -509,7 +1198,7 @@ def test_audit_rejects_manifest_continuation_repository_source_mismatch(
     assert "continuation_source_invalid" in summary["reasons"]
 
 
-def test_audit_rejects_registered_v24_manifest_not_bound_to_current_git(
+def test_audit_rejects_registered_v25_manifest_not_bound_to_current_git(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:

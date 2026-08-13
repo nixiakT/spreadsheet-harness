@@ -2387,6 +2387,122 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
     assert FinalTurnClient.requests[1]["max_output_tokens"] == 1024
 
 
+def test_required_tool_termination_reserves_last_shared_budget_call_for_submit(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class BudgetTerminalClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> BudgetTerminalClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            return ResponseTurn(
+                "response-submit",
+                [{
+                    "type": "function_call",
+                    "call_id": "call-submit",
+                    "name": "submit_result",
+                    "arguments": json.dumps({"result": "submitted within budget"}),
+                }],
+                "",
+                {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", BudgetTerminalClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "budget-terminal-run")
+    budget = RunBudget(max_model_calls=2, max_total_tokens=100)
+    reservation = budget.begin_model_call(stage="prior")
+    budget.record_response(reservation, {"total_tokens": 2}, stage="prior")
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        SpreadsheetToolRegistry(session, enable_code=False),
+        max_turns=5,
+        budget=budget,
+        required_tool_termination=True,
+    ).run("inspect")
+
+    assert result.final_text == "submitted within budget"
+    assert result.turns == 1
+    assert BudgetTerminalClient.requests[0]["tool_choice"] == {
+        "type": "function",
+        "name": "submit_result",
+    }
+    assert [tool["name"] for tool in BudgetTerminalClient.requests[0]["tools"]] == [
+        "submit_result"
+    ]
+
+
+def test_reserved_terminal_route_rejects_wrong_tool(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class WrongTerminalToolClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> WrongTerminalToolClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "submit_result",
+            }
+            return ResponseTurn(
+                "response-wrong-tool",
+                [{
+                    "type": "function_call",
+                    "call_id": "call-wrong-tool",
+                    "name": "list_sheets",
+                    "arguments": "{}",
+                }],
+                "",
+                {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", WrongTerminalToolClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "wrong-terminal-tool")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    invocations = 0
+    original_invoke = tools.invoke
+
+    def counted_invoke(name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        nonlocal invocations
+        invocations += 1
+        return original_invoke(name, arguments)
+
+    monkeypatch.setattr(tools, "invoke", counted_invoke)
+    budget = RunBudget(max_model_calls=2, max_total_tokens=100)
+    prior = budget.begin_model_call(stage="prior")
+    budget.record_response(prior, {"total_tokens": 2}, stage="prior")
+
+    with pytest.raises(AgentRoutingError, match="submit_result"):
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            tools,
+            max_turns=5,
+            budget=budget,
+            required_tool_termination=True,
+        ).run("inspect")
+
+    assert invocations == 0
+
+
 def test_required_tool_termination_accepts_nonempty_text_as_terminal_fallback(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -2620,6 +2736,79 @@ def test_agent_required_tool_termination_rejects_multiple_calls_before_execution
             required_tool_termination=True,
         ).run("inspect")
     assert invocations == 0
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ('{"result":"truncated"', "returned invalid JSON"),
+        (json.dumps({"result": ""}), "requires a non-empty result"),
+    ],
+)
+def test_agent_classifies_invalid_terminal_submission_as_execution_failure(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+    arguments: str,
+    message: str,
+) -> None:
+    class InvalidTerminalClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> InvalidTerminalClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "submit_result",
+            }
+            return ResponseTurn(
+                "response-invalid-terminal",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": arguments,
+                    }
+                ],
+                "",
+                {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", InvalidTerminalClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "invalid-terminal-run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+
+    with pytest.raises(AgentExecutionFailure, match=message) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            tools,
+            max_turns=1,
+            required_tool_termination=True,
+        ).run("inspect")
+
+    failure = caught.value
+    assert failure.reason == "terminal_submission_invalid"
+    assert failure.agent_result.turns == 1
+    assert failure.agent_result.terminal_submissions == 1
+    assert failure.agent_result.observed_terminal_tool == "submit_result"
+    assert failure.agent_result.usage["total_tokens"] == 12
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    failed = [event for event in events if event["event"] == "agent.execution_failed"]
+    assert failed[0]["payload"]["reason"] == "terminal_submission_invalid"
 
 
 def test_responses_client_does_not_infer_safe_retry_from_message(
@@ -2938,6 +3127,94 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
     assert first.attempt_history[0]["endpoint"] == "/chat/completions"
     assert first.terminal_event == "chat.completion"
     assert first.request_payload_sha256 is not None
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "message"),
+    [
+        ("length", {"role": "assistant", "content": "truncated result"}),
+        ("content_filter", {"role": "assistant", "content": "partial result"}),
+        (
+            "stop",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-submit",
+                        "type": "function",
+                        "function": {
+                            "name": "submit_result",
+                            "arguments": '{"result":"done"}',
+                        },
+                    }
+                ],
+            },
+        ),
+        ("tool_calls", {"role": "assistant", "content": "no tool call"}),
+        (None, {"role": "assistant", "content": "missing finish reason"}),
+    ],
+)
+def test_chat_completions_client_rejects_incomplete_or_mismatched_finish_reason(
+    finish_reason: str | None,
+    message: dict[str, Any],
+) -> None:
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "test-model",
+        api_protocol="chat-completions",
+        max_retries=0,
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat-incomplete",
+                "choices": [
+                    {"message": message, "finish_reason": finish_reason}
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "total_tokens": 14,
+                },
+            },
+        )
+
+    client = ChatCompletionsClient(config)
+    client._client.close()
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+    streamed: list[str] = []
+    try:
+        with pytest.raises(ProviderError, match="finish_reason") as caught:
+            client.create(
+                {
+                    "model": config.model,
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "submit_result",
+                            "parameters": {"type": "object"},
+                        }
+                    ],
+                    "tool_choice": {"type": "function", "name": "submit_result"},
+                },
+                on_text=streamed.append,
+            )
+    finally:
+        client.close()
+
+    error = caught.value
+    assert error.retryable is False
+    assert error.phase == "response_body"
+    assert error.delivery_state == "terminal_seen"
+    assert error.safe_to_retry is False
+    assert error.attempts == 1
+    assert error.attempt_history[0]["outcome"] == "error"
+    assert error.attempt_history[0]["delivery_state"] == "terminal_seen"
+    assert streamed == []
 
 
 def test_responses_client_rejects_unknown_safe_retry_reason(monkeypatch: Any) -> None:

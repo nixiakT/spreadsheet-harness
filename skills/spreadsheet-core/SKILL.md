@@ -5,7 +5,14 @@ description: Safe inspect-edit-verify workflow for realistic spreadsheet tasks.
 
 # Spreadsheet core workflow
 
-Work on the smallest range that satisfies the instruction. Start with `list_sheets`, then inspect the stated range and nearby headers. Search before assuming where a label or formula lives.
+Work on the smallest range that satisfies the instruction. Use the supplied profile and preview to target the first inspection; call `list_sheets` only when sheet identity is still ambiguous. Inspect the stated range and nearby headers, and search before assuming where a label or formula lives.
+
+## Budget discipline
+
+- The run has a hard call and token budget. Inspect, edit, verify, and submit; do not keep exploring once the requested range is understood.
+- Keep diagnostic output bounded. Print representative rows, formulas, and formats rather than whole sheets or long cell-by-cell dumps.
+- Make the first saved edit by the second tool call whenever the target can be identified safely. If a script fails, fix the specific exception instead of restarting broad inspection.
+- After a successful save, verify only the changed range and its immediate boundary, then submit. Reserve the final model turn for `submit_result`, not another exploratory tool call.
 
 ## Preserve intent
 
@@ -24,5 +31,5 @@ LibreOffice is the declared calculation backend. Do not silently substitute an E
 ## Tool discipline
 
 - Spreadsheet mutation tools are transactional and create snapshots. If verification shows an unintended change, use `undo_last`.
-- The code interpreter is for analysis and bulk computations in the run workspace. It is not the preferred way to mutate the workbook because direct scripts may bypass transaction logging.
+- In the `ours` comparison arm, follow the arm instruction to use the managed code interpreter as the primary inspection and mutation path; `sheet_harness.save_workbook` records managed saves. Use native mutation tools for narrow gaps or when the arm instruction explicitly routes to them.
 - Never access paths outside the run workspace or embed credentials in code, cells, logs, or responses.

@@ -8,7 +8,7 @@ import pytest
 from spreadsheet_harness.agent import AgentResult, ResponseTurn, SpreadsheetAgent
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
-from spreadsheet_harness.errors import AgentBudgetError
+from spreadsheet_harness.errors import AgentBudgetError, AgentExecutionFailure
 from spreadsheet_harness.session import WorkbookSession
 
 
@@ -175,7 +175,7 @@ def test_agent_records_response_before_raising_token_budget(
     session = WorkbookSession.create(sample_workbook, tmp_path / "token-budget")
     budget = RunBudget(max_model_calls=2, max_total_tokens=10)
 
-    with pytest.raises(AgentBudgetError) as caught:
+    with pytest.raises(AgentExecutionFailure) as caught:
         SpreadsheetAgent(
             _config(),
             EmptyTools(session),  # type: ignore[arg-type]
@@ -183,12 +183,82 @@ def test_agent_records_response_before_raising_token_budget(
             stage="solve",
         ).run("solve")
 
-    assert caught.value.reason == "max_total_tokens"
+    assert caught.value.reason == "budget_exhausted"
+    assert caught.value.agent_result.turns == 1
+    assert caught.value.agent_result.usage["total_tokens"] == 11
+    assert caught.value.agent_result.request_timings[0]["total_tokens"] == 11
+    assert caught.value.agent_result.budget["termination"]["reason"] == (
+        "max_total_tokens"
+    )
     assert budget.to_dict()["used"]["model_calls"] == 1
     assert budget.to_dict()["used"]["total_tokens"] == 11
     trajectory = session.paths.trajectory.read_text(encoding="utf-8")
     assert "model.responded" in trajectory
     assert "agent.budget_exceeded" in trajectory
+
+
+def test_forced_prefix_token_overage_preserves_observed_prefix(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ForcedToolOverageClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> ForcedToolOverageClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **_: Any) -> ResponseTurn:
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "list_sheets",
+            }
+            return ResponseTurn(
+                "response-forced-overage",
+                [{
+                    "type": "function_call",
+                    "call_id": "call-list-sheets",
+                    "name": "list_sheets",
+                    "arguments": "{}",
+                }],
+                "",
+                {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", ForcedToolOverageClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "forced-overage")
+    tools = type(
+        "ListSheetsTools",
+        (),
+        {
+            "session": session,
+            "schemas": [{
+                "type": "function",
+                "name": "list_sheets",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            }],
+        },
+    )()
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            _config(),
+            tools,  # type: ignore[arg-type]
+            budget=RunBudget(max_model_calls=2, max_total_tokens=10),
+            stage="solve",
+            forced_tool_prefix=("list_sheets",),
+            required_tool_termination=True,
+        ).run("inspect")
+
+    result = caught.value.agent_result
+    assert result.observed_first_tool == "list_sheets"
+    assert result.observed_forced_tool_prefix == ["list_sheets"]
+    assert result.tool_calls == 0
+    assert result.usage["total_tokens"] == 11
 
 
 def test_agent_result_old_construction_remains_compatible() -> None:
