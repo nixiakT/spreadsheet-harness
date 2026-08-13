@@ -65,6 +65,43 @@ class ScriptedResponsesClient:
         )
 
 
+class ScriptedChatClient(ScriptedResponsesClient):
+    requests: list[dict[str, Any]] = []
+
+    def create(self, payload: dict[str, Any], **_: Any) -> ResponseTurn:
+        self.requests.append(payload)
+        self.turn += 1
+        if self.turn == 1:
+            return ResponseTurn(
+                "compat-chat-first",
+                [
+                    {
+                        "type": "function_call",
+                        "id": "fc-chat-echo",
+                        "call_id": "call-chat-echo",
+                        "name": "harness_compat_echo",
+                        "arguments": '{"value":"SPREADSHEET_HARNESS_CANARY_7B19"}',
+                    }
+                ],
+                "",
+                {"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
+            )
+        return ResponseTurn(
+            "compat-chat-second",
+            [
+                {
+                    "type": "function_call",
+                    "id": "fc-chat-submit",
+                    "call_id": "call-chat-submit",
+                    "name": "harness_compat_submit",
+                    "arguments": '{"result":"SPREADSHEET_HARNESS_TOOLS_OK"}',
+                }
+            ],
+            "",
+            {"input_tokens": 20, "output_tokens": 4, "total_tokens": 24},
+        )
+
+
 def _config(api_key: str = "not-a-real-key") -> ProviderConfig:
     return ProviderConfig(
         "https://example.test/v1",
@@ -117,10 +154,10 @@ def test_tool_compatibility_canary_forces_and_replays_function_call(
 
 
 def test_chat_tool_compatibility_canary_uses_chat_client(monkeypatch: Any) -> None:
-    ScriptedResponsesClient.requests = []
+    ScriptedChatClient.requests = []
     monkeypatch.setattr(
         "spreadsheet_harness.provider_compat.ChatCompletionsClient",
-        ScriptedResponsesClient,
+        ScriptedChatClient,
     )
     config = ProviderConfig(
         "https://example.test/v1",
@@ -135,22 +172,152 @@ def test_chat_tool_compatibility_canary_uses_chat_client(monkeypatch: Any) -> No
 
     assert report == {
         "ok": True,
-        "protocol": "chat_completions_tool_calls_v1",
+        "protocol": "chat_completions_tool_calls_v2",
         "endpoint": "/chat/completions",
         "forced_function_call": True,
         "call_id_replayed": True,
         "function_call_output_consumed": True,
-        "terminal_text": True,
+        "terminal_function_call": True,
         "requests": 2,
         "generation": {},
         "usage": {"input_tokens": 30, "output_tokens": 7, "total_tokens": 37},
     }
-    first, second = ScriptedResponsesClient.requests
+    first, second = ScriptedChatClient.requests
     assert first["tool_choice"] == {
         "type": "function",
         "name": "harness_compat_echo",
     }
-    assert second["tool_choice"] == "auto"
+    assert second["tools"] == [
+        {
+            "type": "function",
+            "name": "harness_compat_submit",
+            "description": "Submit the result of the compatibility check.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "result": {
+                        "type": "string",
+                        "enum": ["SPREADSHEET_HARNESS_TOOLS_OK"],
+                    }
+                },
+                "required": ["result"],
+                "additionalProperties": False,
+            },
+            "strict": False,
+        }
+    ]
+    assert second["tool_choice"] == {
+        "type": "function",
+        "name": "harness_compat_submit",
+    }
+    replay = next(
+        item for item in second["input"] if item.get("type") == "function_call_output"
+    )
+    assert replay["call_id"] == "call-chat-echo"
+
+
+def test_chat_tool_compatibility_canary_rejects_wrong_terminal_arguments(
+    monkeypatch: Any,
+) -> None:
+    class WrongTerminalArgumentsClient(ScriptedChatClient):
+        def create(self, payload: dict[str, Any], **kwargs: Any) -> ResponseTurn:
+            response = super().create(payload, **kwargs)
+            if self.turn == 2:
+                response.output[0]["arguments"] = '{"result":"wrong"}'
+            return response
+
+    WrongTerminalArgumentsClient.requests = []
+    monkeypatch.setattr(
+        "spreadsheet_harness.provider_compat.ChatCompletionsClient",
+        WrongTerminalArgumentsClient,
+    )
+
+    with pytest.raises(HarnessError, match="terminal function arguments"):
+        check_chat_completions_tool_compatibility(
+            ProviderConfig(
+                "https://example.test/v1",
+                "not-a-real-key",
+                "qwen36-35b-a3b",
+                api_protocol="chat-completions",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("terminal_output", "error_match"),
+    [
+        (
+            [{"type": "message", "role": "assistant", "content": []}],
+            "exactly one forced terminal function call; provider returned 0",
+        ),
+        (
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-submit-one",
+                    "name": "harness_compat_submit",
+                    "arguments": '{"result":"SPREADSHEET_HARNESS_TOOLS_OK"}',
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-submit-two",
+                    "name": "harness_compat_submit",
+                    "arguments": '{"result":"SPREADSHEET_HARNESS_TOOLS_OK"}',
+                },
+            ],
+            "exactly one forced terminal function call; provider returned 2",
+        ),
+        (
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-wrong-tool",
+                    "name": "harness_compat_echo",
+                    "arguments": '{"result":"SPREADSHEET_HARNESS_TOOLS_OK"}',
+                }
+            ],
+            "forced harness_compat_submit",
+        ),
+        (
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-malformed-arguments",
+                    "name": "harness_compat_submit",
+                    "arguments": "{not-json",
+                }
+            ],
+            "terminal function arguments were not valid JSON",
+        ),
+    ],
+)
+def test_chat_tool_compatibility_canary_rejects_invalid_terminal_calls(
+    monkeypatch: Any,
+    terminal_output: list[dict[str, Any]],
+    error_match: str,
+) -> None:
+    class InvalidTerminalCallClient(ScriptedChatClient):
+        def create(self, payload: dict[str, Any], **kwargs: Any) -> ResponseTurn:
+            response = super().create(payload, **kwargs)
+            if self.turn == 2:
+                response.output = terminal_output
+            return response
+
+    InvalidTerminalCallClient.requests = []
+    monkeypatch.setattr(
+        "spreadsheet_harness.provider_compat.ChatCompletionsClient",
+        InvalidTerminalCallClient,
+    )
+
+    with pytest.raises(HarnessError, match=error_match):
+        check_chat_completions_tool_compatibility(
+            ProviderConfig(
+                "https://example.test/v1",
+                "not-a-real-key",
+                "qwen36-35b-a3b",
+                api_protocol="chat-completions",
+            )
+        )
 
 
 def test_tool_compatibility_dispatches_by_protocol(monkeypatch: Any) -> None:

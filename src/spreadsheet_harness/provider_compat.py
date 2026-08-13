@@ -10,6 +10,7 @@ from .config import ProviderConfig
 from .errors import HarnessError, ProviderError
 
 _CANARY_TOOL_NAME = "harness_compat_echo"
+_CANARY_TERMINAL_TOOL_NAME = "harness_compat_submit"
 _CANARY_VALUE = "SPREADSHEET_HARNESS_CANARY_7B19"
 _CANARY_RESULT = "SPREADSHEET_HARNESS_TOOLS_OK"
 _CANARY_TOOL_SCHEMA: dict[str, Any] = {
@@ -20,6 +21,18 @@ _CANARY_TOOL_SCHEMA: dict[str, Any] = {
         "type": "object",
         "properties": {"value": {"type": "string", "enum": [_CANARY_VALUE]}},
         "required": ["value"],
+        "additionalProperties": False,
+    },
+    "strict": False,
+}
+_CANARY_TERMINAL_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "name": _CANARY_TERMINAL_TOOL_NAME,
+    "description": "Submit the result of the compatibility check.",
+    "parameters": {
+        "type": "object",
+        "properties": {"result": {"type": "string", "enum": [_CANARY_RESULT]}},
+        "required": ["result"],
         "additionalProperties": False,
     },
     "strict": False,
@@ -217,7 +230,8 @@ def check_chat_completions_tool_compatibility(config: ProviderConfig) -> dict[st
                 "model": config.model,
                 "instructions": (
                     "This is a protocol compatibility check. After receiving the function "
-                    f"output, reply exactly {_CANARY_RESULT}."
+                    "output, call the supplied terminal function exactly once with the only "
+                    "permitted result. Do not answer with prose."
                 ),
                 "input": [
                     *first_payload["input"],
@@ -231,14 +245,17 @@ def check_chat_completions_tool_compatibility(config: ProviderConfig) -> dict[st
                         ),
                     },
                 ],
-                "tools": [_CANARY_TOOL_SCHEMA],
-                "tool_choice": "auto",
+                "tools": [_CANARY_TERMINAL_TOOL_SCHEMA],
+                "tool_choice": {
+                    "type": "function",
+                    "name": _CANARY_TERMINAL_TOOL_NAME,
+                },
                 "parallel_tool_calls": False,
                 "reasoning": {"effort": config.reasoning_effort},
                 "max_output_tokens": 64,
             })
             second = client.create(second_payload)
-            follow_up_calls = _validated_function_calls(second.output)
+            terminal_calls = _validated_function_calls(second.output)
     except ProviderError as exc:
         detail = exc.public_dict(secrets=(config.api_key,))
         raise HarnessError(
@@ -247,25 +264,41 @@ def check_chat_completions_tool_compatibility(config: ProviderConfig) -> dict[st
             f"{detail['message']}"
         ) from exc
 
-    if follow_up_calls:
+    if len(terminal_calls) != 1:
         raise HarnessError(
-            "Chat Completions compatibility follow-up returned another function call "
-            "instead of terminal assistant text"
+            "Chat Completions compatibility follow-up required exactly one forced terminal "
+            f"function call; provider returned {len(terminal_calls)}"
         )
-    if second.text.strip() != _CANARY_RESULT:
+    terminal_call, _ = terminal_calls[0]
+    if terminal_call.get("name") != _CANARY_TERMINAL_TOOL_NAME:
         raise HarnessError(
-            "Chat Completions compatibility follow-up did not consume tool output and "
-            f"return the required terminal text; received {second.text[:200]!r}"
+            "Chat Completions compatibility follow-up forced harness_compat_submit but "
+            f"provider returned {terminal_call.get('name')!r}"
+        )
+    raw_terminal_arguments = terminal_call.get("arguments", "{}")
+    try:
+        terminal_arguments = (
+            json.loads(raw_terminal_arguments)
+            if isinstance(raw_terminal_arguments, str)
+            else raw_terminal_arguments
+        )
+    except json.JSONDecodeError as exc:
+        raise HarnessError(
+            "Chat Completions terminal function arguments were not valid JSON"
+        ) from exc
+    if terminal_arguments != {"result": _CANARY_RESULT}:
+        raise HarnessError(
+            "Chat Completions terminal function arguments did not match the forced schema"
         )
 
     return {
         "ok": True,
-        "protocol": "chat_completions_tool_calls_v1",
+        "protocol": "chat_completions_tool_calls_v2",
         "endpoint": "/chat/completions",
         "forced_function_call": True,
         "call_id_replayed": True,
         "function_call_output_consumed": True,
-        "terminal_text": True,
+        "terminal_function_call": True,
         "requests": 2,
         "generation": config.generation_dict(),
         "usage": {
