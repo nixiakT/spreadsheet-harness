@@ -1,0 +1,64 @@
+{
+  "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
+  "manifest_id": "qwen35-trace2skill-local-unattempted-pilot16-v2",
+  "dataset": {
+    "revision": "ab0b742b0fc95b946f212d80ac7771b5531272e4",
+    "archive_sha256": "10ef893dd29cb13ab97143ea787e68cdc9574a13873ab9a54e50b31dc03fc949",
+    "dataset_json_sha256": "bcecaa89a005bd4e3bbe98da150a86e8062c27f262e575d5e47bd9861b3525e7",
+    "raw_row_count": 400
+  },
+  "parent": {
+    "relative_path": "qwen35-trace2skill-local-unattempted-v2.json",
+    "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
+    "manifest_sha256": "fadaa03bb04290ad27eb4f2ff5d3f24ee7e2fed8888dad28b8a5f6b96333b4f1",
+    "task_count": 143,
+    "task_ids_sha256": "7b76ebca59be0e97964108b5e2d0552ea6a9c0f11eb51d15c10552b82efd3386"
+  },
+  "derivation": {
+    "operation": "ordered_explicit_subset",
+    "purpose": "exploratory_development_pilot",
+    "selection": "explicit_fixed_order_before_inference",
+    "freeze_revision": "7af635617e8f78de34cd3cdbff9fec7e373f8ba5",
+    "freeze_time_utc": "2026-08-13T15:50:24Z",
+    "state_rules": [
+      "Every pilot task enters development/quarantine when this manifest is frozen.",
+      "A failed, timed-out, or partial request does not authorize a replacement from reserve.",
+      "Observed pilot results may guide optimization only on quarantined development tasks."
+    ]
+  },
+  "selection": {
+    "ordering": "parent_manifest_order",
+    "task_count": 16,
+    "task_ids_sha256": "f25f8b75ac231f81e23e812097d3060d3e1f16597b0a5196cdeee9a833b91b82"
+  },
+  "reserve": {
+    "classification_label": "confirmatory_candidate_not_yet_selected",
+    "ordering": "parent_manifest_order_minus_pilot",
+    "task_count": 127,
+    "task_ids_sha256": "71c14c013bb98a1fe8d0219a5be4a784fc9aa13dcbce2419d2ec963c7457d6b7",
+    "limitations": [
+      "Reserve status is local and does not imply global novelty or training isolation.",
+      "A future confirmatory cohort requires a new frozen derivative manifest before inference."
+    ]
+  },
+  "task_ids": [
+    "33157",
+    "35747",
+    "37229",
+    "46121",
+    "53383",
+    "53449",
+    "54474",
+    "56419",
+    "56599",
+    "58723",
+    "55977",
+    "56563",
+    "57117",
+    "57262",
+    "57612",
+    "59511"
+  ],
+  "task_count": 16,
+  "task_ids_sha256": "f25f8b75ac231f81e23e812097d3060d3e1f16597b0a5196cdeee9a833b91b82"
+}

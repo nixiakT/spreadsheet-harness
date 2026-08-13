@@ -376,8 +376,8 @@ def test_split_manifest_rejects_offset_or_limit(monkeypatch: Any, tmp_path: Path
     monkeypatch.setattr(cli_module, "load_verified_tasks", lambda _: [])
     monkeypatch.setattr(
         cli_module,
-        "verify_trace2skill_heldout_manifest",
-        lambda *_: {"valid": True},
+        "load_and_verify_trace2skill_split_manifest",
+        lambda *_: {"valid": True, "task_ids": []},
     )
 
     for selector in (["--offset", "1"], ["--limit", "1"]):
@@ -386,6 +386,85 @@ def test_split_manifest_rejects_offset_or_limit(monkeypatch: Any, tmp_path: Path
         )
         with pytest.raises(HarnessError, match="derivative manifest"):
             cli_module.cmd_benchmark_compare(args)
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [["--task-id", "cell-1"], ["--task-id-file", "ids.txt"]],
+)
+def test_split_manifest_rejects_task_id_selectors(
+    monkeypatch: Any,
+    tmp_path: Path,
+    selector: list[str],
+) -> None:
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"task_ids": ["cell-1"]}), encoding="utf-8")
+    (tmp_path / "ids.txt").write_text("cell-1\n", encoding="utf-8")
+    parser = cli_module.build_parser()
+    tasks = _tasks(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "download_verified", lambda _: tmp_path / "dataset")
+    monkeypatch.setattr(cli_module, "load_verified_tasks", lambda _: tasks)
+    monkeypatch.setattr(
+        cli_module,
+        "load_and_verify_trace2skill_split_manifest",
+        lambda *_: {"valid": True, "task_ids": ["cell-1"]},
+    )
+    args = parser.parse_args(
+        ["benchmark", "compare", "--split-manifest", str(split), *selector]
+    )
+
+    with pytest.raises(HarnessError, match="derivative manifest"):
+        cli_module.cmd_benchmark_compare(args)
+
+
+def test_comparison_uses_verified_manifest_order_without_rereading(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    split = tmp_path / "split.json"
+    split.write_text("this is deliberately not JSON", encoding="utf-8")
+    tasks = _tasks(tmp_path)
+    parser = cli_module.build_parser()
+    monkeypatch.setattr(cli_module, "download_verified", lambda _: tmp_path / "dataset")
+    monkeypatch.setattr(cli_module, "load_verified_tasks", lambda _: tasks)
+    monkeypatch.setattr(
+        cli_module,
+        "load_and_verify_trace2skill_split_manifest",
+        lambda *_: {"valid": True, "task_ids": ["sheet-1", "cell-1"]},
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRunner:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def run(self, selected: list[SpreadsheetTask]) -> dict[str, Any]:
+            captured["task_ids"] = [task.task_id for task in selected]
+            return {
+                "missing_arm_tasks": 0,
+                "arms": {"bare": {"errors": 0}, "ours": {"errors": 0}},
+            }
+
+    monkeypatch.setattr(cli_module, "ComparisonBenchmarkRunner", FakeRunner)
+    monkeypatch.setattr(
+        cli_module,
+        "_provider",
+        lambda _: ProviderConfig("https://example.test/v1", "key", "model"),
+    )
+    args = parser.parse_args(
+        [
+            "benchmark",
+            "compare",
+            "--split-manifest",
+            str(split),
+            "--output",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    assert cli_module.cmd_benchmark_compare(args) == 0
+    assert captured["task_ids"] == ["sheet-1", "cell-1"]
 
 
 def test_comparison_rejects_unreachable_turn_ceiling(tmp_path: Path) -> None:

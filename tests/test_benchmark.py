@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -261,6 +263,299 @@ def test_trace2skill_manifest_build_and_read_only_verify_pinned_dataset(
         "445ceec8e033601a054babf7997e340cf21d1c1d2d54a4aa421a8ba29b189582"
     )
     assert (root / "dataset.json").read_bytes() == before
+
+
+DERIVATIVE_POOL_MANIFEST = Path(
+    "benchmarks/protocols/qwen35-trace2skill-local-unattempted-v2.json"
+)
+DERIVATIVE_PILOT_MANIFEST = Path(
+    "benchmarks/protocols/qwen35-trace2skill-local-unattempted-pilot16-v2.json"
+)
+
+
+def _ordered_ids_sha256(task_ids: list[str]) -> str:
+    return benchmark_module._ordered_task_ids_sha256(task_ids)
+
+
+def _load_derivative_manifest(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_derivative_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def _require_pinned_derivative_manifests() -> Path:
+    dataset = Path("benchmarks/data/spreadsheetbench_verified_400")
+    if not dataset.is_dir():
+        pytest.skip("Pinned SpreadsheetBench dataset is not available")
+    if not DERIVATIVE_POOL_MANIFEST.is_file() or not DERIVATIVE_PILOT_MANIFEST.is_file():
+        pytest.skip("Frozen Trace2Skill derivative manifests are not available")
+    return dataset
+
+
+def _copy_derivative_manifest_tree(destination: Path) -> dict[str, Path]:
+    destination.mkdir()
+    sources = {
+        "v1": Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
+        "pool": DERIVATIVE_POOL_MANIFEST,
+        "pilot": DERIVATIVE_PILOT_MANIFEST,
+    }
+    copies: dict[str, Path] = {}
+    for name, source in sources.items():
+        target = destination / source.name
+        shutil.copy2(source, target)
+        copies[name] = target
+    return copies
+
+
+def _file_state(path: Path) -> tuple[bytes, int, int, int]:
+    metadata = path.stat()
+    return (
+        path.read_bytes(),
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
+    dataset = _require_pinned_derivative_manifests()
+    watched = [
+        dataset / "dataset.json",
+        Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
+        DERIVATIVE_POOL_MANIFEST,
+        DERIVATIVE_PILOT_MANIFEST,
+    ]
+    before = {path: _file_state(path) for path in watched}
+
+    pool = benchmark_module.verify_trace2skill_derivative_manifest(
+        dataset, DERIVATIVE_POOL_MANIFEST
+    )
+    pilot = benchmark_module.verify_trace2skill_derivative_manifest(
+        dataset, DERIVATIVE_PILOT_MANIFEST
+    )
+
+    assert pool["valid"] is True
+    assert pool["manifest_id"] == "qwen35-trace2skill-local-unattempted-v2"
+    assert pool["usable_tasks"] == 143
+    assert pool["task_ids_sha256"] == (
+        "7b76ebca59be0e97964108b5e2d0552ea6a9c0f11eb51d15c10552b82efd3386"
+    )
+    assert pilot["valid"] is True
+    assert pilot["manifest_id"] == "qwen35-trace2skill-local-unattempted-pilot16-v2"
+    assert pilot["usable_tasks"] == 16
+    assert pilot["task_ids_sha256"] == (
+        "f25f8b75ac231f81e23e812097d3060d3e1f16597b0a5196cdeee9a833b91b82"
+    )
+    assert {path: _file_state(path) for path in watched} == before
+
+
+@pytest.mark.parametrize("manifest_path", [DERIVATIVE_POOL_MANIFEST, DERIVATIVE_PILOT_MANIFEST])
+def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys(
+    manifest_path: Path,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    invalid_utf8 = tmp_path / manifest_path.name
+    invalid_utf8.write_bytes(b'{"schema_version":"bad","manifest_id":"\xff"}\n')
+
+    with pytest.raises(ValueError, match="UTF-8"):
+        benchmark_module.verify_trace2skill_derivative_manifest(dataset, invalid_utf8)
+
+    frozen = manifest_path.read_text(encoding="utf-8")
+    duplicate = tmp_path / f"duplicate-{manifest_path.name}"
+    duplicate.write_text(
+        frozen.replace(
+            '"schema_version":',
+            '"schema_version": "attacker-controlled",\n  "schema_version":',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="[Dd]uplicate"):
+        benchmark_module.verify_trace2skill_derivative_manifest(dataset, duplicate)
+
+
+@pytest.mark.parametrize("manifest_name,parent_name", [("pool", "v1"), ("pilot", "pool")])
+def test_trace2skill_derivative_manifest_binds_parent_file_sha256(
+    manifest_name: str,
+    parent_name: str,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    copies[parent_name].write_bytes(copies[parent_name].read_bytes() + b"\n")
+
+    with pytest.raises(ValueError, match="parent manifest checksum mismatch"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies[manifest_name]
+        )
+
+
+@pytest.mark.parametrize("manifest_name", ["pool", "pilot"])
+@pytest.mark.parametrize("parent_path", ["../parent.json", "/tmp/parent.json"])
+def test_trace2skill_derivative_manifest_rejects_non_sibling_parent_path(
+    manifest_name: str,
+    parent_path: str,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    frozen = _load_derivative_manifest(copies[manifest_name])
+    frozen["parent"]["relative_path"] = parent_path
+    _write_derivative_manifest(copies[manifest_name], frozen)
+
+    with pytest.raises(ValueError, match="parent path"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies[manifest_name]
+        )
+
+
+@pytest.mark.parametrize("manifest_name", ["pool", "pilot"])
+def test_trace2skill_derivative_manifest_rejects_tampered_parent_hash_field(
+    manifest_name: str,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    frozen = _load_derivative_manifest(copies[manifest_name])
+    frozen["parent"]["manifest_sha256"] = "0" * 64
+    _write_derivative_manifest(copies[manifest_name], frozen)
+
+    with pytest.raises(ValueError, match="parent"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies[manifest_name]
+        )
+
+
+def test_trace2skill_local_unattempted_pool_is_parent_ordered_exposure_difference() -> None:
+    _require_pinned_derivative_manifests()
+    parent = _load_derivative_manifest(
+        Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json")
+    )
+    pool = _load_derivative_manifest(DERIVATIVE_POOL_MANIFEST)
+    evidence = pool["derivation"]["evidence"]
+    attempted = evidence["attempted_or_run"]["task_ids"]
+    protocol_listed = evidence["protocol_listed"]["task_ids"]
+    exposure_set = set(attempted) | set(protocol_listed)
+    expected_union = [task_id for task_id in parent["task_ids"] if task_id in exposure_set]
+    expected_pool = [task_id for task_id in parent["task_ids"] if task_id not in exposure_set]
+
+    assert len(attempted) == len(set(attempted)) == 51
+    assert len(protocol_listed) == len(set(protocol_listed)) == 4
+    assert set(attempted).isdisjoint(protocol_listed)
+    assert evidence["union"]["task_ids"] == expected_union
+    assert evidence["union"]["task_count"] == 55
+    assert evidence["union"]["task_ids_sha256"] == _ordered_ids_sha256(expected_union)
+    assert pool["task_ids"] == expected_pool
+    assert pool["task_count"] == 143
+    assert pool["task_ids_sha256"] == _ordered_ids_sha256(expected_pool)
+
+
+@pytest.mark.parametrize("target", ["attempted", "protocol_listed", "union", "pool"])
+def test_trace2skill_local_unattempted_pool_rejects_self_consistent_reordering(
+    target: str,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    frozen = _load_derivative_manifest(copies["pool"])
+    if target == "attempted":
+        section = frozen["derivation"]["evidence"]["attempted_or_run"]
+    elif target == "protocol_listed":
+        section = frozen["derivation"]["evidence"]["protocol_listed"]
+    elif target == "union":
+        section = frozen["derivation"]["evidence"]["union"]
+    else:
+        section = frozen
+    section["task_ids"][0], section["task_ids"][1] = (
+        section["task_ids"][1],
+        section["task_ids"][0],
+    )
+    section["task_ids_sha256"] = _ordered_ids_sha256(section["task_ids"])
+    _write_derivative_manifest(copies["pool"], frozen)
+
+    with pytest.raises(ValueError, match="does not match its anchors"):
+        benchmark_module.verify_trace2skill_derivative_manifest(dataset, copies["pool"])
+
+
+def test_trace2skill_local_unattempted_pool_rejects_self_consistent_exposure_membership_change(
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    parent = _load_derivative_manifest(copies["v1"])
+    frozen = _load_derivative_manifest(copies["pool"])
+    evidence = frozen["derivation"]["evidence"]
+    listed = evidence["protocol_listed"]
+    replacement = frozen["task_ids"][0]
+    listed["task_ids"][0] = replacement
+    listed["task_ids_sha256"] = _ordered_ids_sha256(listed["task_ids"])
+    exposure = set(evidence["attempted_or_run"]["task_ids"]) | set(listed["task_ids"])
+    union = [task_id for task_id in parent["task_ids"] if task_id in exposure]
+    pool = [task_id for task_id in parent["task_ids"] if task_id not in exposure]
+    evidence["union"]["task_ids"] = union
+    evidence["union"]["task_count"] = len(union)
+    evidence["union"]["task_ids_sha256"] = _ordered_ids_sha256(union)
+    frozen["task_ids"] = pool
+    frozen["task_count"] = len(pool)
+    frozen["task_ids_sha256"] = _ordered_ids_sha256(pool)
+    _write_derivative_manifest(copies["pool"], frozen)
+
+    with pytest.raises(ValueError, match="does not match its anchors"):
+        benchmark_module.verify_trace2skill_derivative_manifest(dataset, copies["pool"])
+
+
+def test_trace2skill_pilot_is_fixed_pool_subset_with_parent_ordered_reserve() -> None:
+    _require_pinned_derivative_manifests()
+    pool = _load_derivative_manifest(DERIVATIVE_POOL_MANIFEST)
+    pilot = _load_derivative_manifest(DERIVATIVE_PILOT_MANIFEST)
+    pilot_set = set(pilot["task_ids"])
+    expected_pilot = [task_id for task_id in pool["task_ids"] if task_id in pilot_set]
+    expected_reserve = [task_id for task_id in pool["task_ids"] if task_id not in pilot_set]
+
+    assert len(pilot_set) == 16
+    assert pilot["task_ids"] == expected_pilot
+    assert pilot["selection"]["task_count"] == len(expected_pilot)
+    assert pilot["selection"]["task_ids_sha256"] == _ordered_ids_sha256(expected_pilot)
+    assert pilot["reserve"]["task_count"] == len(expected_reserve) == 127
+    assert pilot["reserve"]["task_ids_sha256"] == _ordered_ids_sha256(expected_reserve)
+    assert pilot_set.isdisjoint(expected_reserve)
+    assert pilot_set | set(expected_reserve) == set(pool["task_ids"])
+
+
+@pytest.mark.parametrize("target", ["membership", "order", "reserve"])
+def test_trace2skill_pilot_rejects_self_consistent_selection_or_reserve_tampering(
+    target: str,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    pool = _load_derivative_manifest(copies["pool"])
+    frozen = _load_derivative_manifest(copies["pilot"])
+    if target == "membership":
+        replacement = next(task_id for task_id in pool["task_ids"] if task_id not in frozen["task_ids"])
+        frozen["task_ids"][0] = replacement
+        frozen["task_ids_sha256"] = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["selection"]["task_ids_sha256"] = frozen["task_ids_sha256"]
+        reserve = [task_id for task_id in pool["task_ids"] if task_id not in set(frozen["task_ids"])]
+        frozen["reserve"]["task_count"] = len(reserve)
+        frozen["reserve"]["task_ids_sha256"] = _ordered_ids_sha256(reserve)
+    elif target == "order":
+        frozen["task_ids"][0], frozen["task_ids"][1] = (
+            frozen["task_ids"][1],
+            frozen["task_ids"][0],
+        )
+        frozen["task_ids_sha256"] = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["selection"]["task_ids_sha256"] = frozen["task_ids_sha256"]
+    else:
+        frozen["reserve"]["task_count"] -= 1
+        frozen["reserve"]["task_ids_sha256"] = "0" * 64
+    _write_derivative_manifest(copies["pilot"], frozen)
+
+    with pytest.raises(ValueError, match="does not match its anchors"):
+        benchmark_module.verify_trace2skill_derivative_manifest(dataset, copies["pilot"])
 
 
 def test_summarize_results(tmp_path: Path) -> None:

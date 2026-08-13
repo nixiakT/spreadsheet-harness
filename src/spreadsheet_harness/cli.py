@@ -25,10 +25,10 @@ from .benchmark import (
     VerifiedBenchmarkRunner,
     _atomic_write_json,
     download_verified,
+    load_and_verify_trace2skill_split_manifest,
     load_verified_tasks,
     summarize_results,
     trace2skill_heldout_manifest,
-    verify_trace2skill_heldout_manifest,
 )
 from .comparison import AVAILABLE_COMPARISON_ARMS, COMPARISON_ARMS, ComparisonBenchmarkRunner
 from .config import API_PROTOCOLS, REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
@@ -302,7 +302,7 @@ def cmd_benchmark_split(args: argparse.Namespace) -> int:
             }
         )
         return 0
-    report = verify_trace2skill_heldout_manifest(root, args.verify)
+    report = load_and_verify_trace2skill_split_manifest(root, args.verify)
     _json_print(report)
     return 0
 
@@ -356,25 +356,32 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
     requested_ids = list(args.task_id or [])
     frozen_ids: list[str] = []
     if args.split_manifest:
-        if args.offset != 0 or args.limit is not None:
+        if (
+            args.offset != 0
+            or args.limit is not None
+            or requested_ids
+            or args.task_id_file
+        ):
             raise HarnessError(
                 "--split-manifest selects a frozen task set; use a derivative manifest "
-                "instead of --offset or --limit"
+                "instead of additional task selectors"
             )
         split_path = Path(args.split_manifest).expanduser().resolve()
-        verify_trace2skill_heldout_manifest(root, split_path)
-        frozen = json.loads(split_path.read_text(encoding="utf-8"))
-        frozen_ids = [str(task_id) for task_id in frozen["task_ids"]]
+        split_report = load_and_verify_trace2skill_split_manifest(root, split_path)
+        frozen_ids = [str(task_id) for task_id in split_report["task_ids"]]
     if args.task_id_file:
         requested_ids.extend(
             line.strip()
             for line in Path(args.task_id_file).read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         )
-    if frozen_ids and requested_ids:
-        raise HarnessError("--split-manifest cannot be combined with task ID selectors")
     if frozen_ids:
         tasks_by_id = {task.task_id: task for task in tasks}
+        missing = [task_id for task_id in frozen_ids if task_id not in tasks_by_id]
+        if missing:
+            raise HarnessError(
+                "Verified split references unavailable task IDs: " + ", ".join(missing)
+            )
         tasks = [tasks_by_id[task_id] for task_id in frozen_ids]
     elif requested_ids:
         if len(set(requested_ids)) != len(requested_ids):
@@ -586,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.set_defaults(handler=cmd_benchmark_download)
 
     split = benchmark_commands.add_parser(
-        "split", help="Generate or verify a frozen Trace2Skill held-out split manifest"
+        "split", help="Generate or verify a frozen Trace2Skill split manifest"
     )
     split.add_argument("--dataset", type=Path, help="Extracted dataset root")
     split.add_argument("--cache", type=Path, default=Path("benchmarks/data"))
@@ -642,7 +649,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument(
         "--split-manifest",
         type=Path,
-        help="Verify and select the frozen Trace2Skill held-out task IDs in manifest order",
+        help="Verify and select frozen Trace2Skill task IDs in manifest order",
     )
     compare.add_argument(
         "--task-id-file",
