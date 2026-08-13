@@ -1,0 +1,754 @@
+{
+  "schema_version": "spreadsheetbench-local-exposure-evidence-v1",
+  "snapshot_id": "qwen35-trace2skill-local-exposure-20260813",
+  "claim_level": "committed_local_attestation",
+  "raw_source_artifacts_available_in_fresh_clone": false,
+  "observation": {
+    "cutoff_utc": "2026-08-13T15:50:24Z",
+    "source_repository_commit": "7af635617e8f78de34cd3cdbff9fec7e373f8ba5",
+    "source_repository_tree": "0d948c47476d422eb21f241e39f64a1c802e01d8"
+  },
+  "parent": {
+    "relative_path": "qwen35-trace2skill-heldout-v1.json",
+    "sha256": "e64a44f8f1a73816f215f99a38a276f2eda732a84c837f96c4079835fa8b627c",
+    "task_count": 198,
+    "task_ids_sha256": "445ceec8e033601a054babf7997e340cf21d1c1d2d54a4aa421a8ba29b189582"
+  },
+  "scan_policy": {
+    "version": "substantive-local-exposure-v1",
+    "ordered_ids_hash_algorithm": "sha256(UTF8(concatenate each ID followed by newline))",
+    "inventory_aggregate_algorithm": "sha256(ASCII(json.dumps(sources,sort_keys=True,separators=(comma,colon),ensure_ascii=True)))",
+    "ignored_results": {
+      "include": "benchmarks/results/*/results.jsonl",
+      "parser": "parse each nonblank line as one UTF-8 JSON object; use only top-level task_id; intersect parent IDs; source paths lexicographic; matched task IDs in parent order"
+    },
+    "tracked_protocols": {
+      "candidate_include": "benchmarks/protocols/*.txt",
+      "parser": "one literal task ID per line; intersect parent IDs; subtract attempted IDs; source paths lexicographic; matched IDs in parent order"
+    },
+    "administrative_exclusions": [
+      "parent and derivative full-split manifests",
+      "comparison manifests that enumerate a full selected cohort without a task-specific protocol list"
+    ]
+  },
+  "ignored_result_sources": {
+    "source_count": 17,
+    "total_byte_count": 8046977,
+    "total_jsonl_record_count": 140,
+    "total_matched_parent_record_count": 140,
+    "aggregate_sha256": "6a8e72842ad0a7103562f91136a449c1be801f1bb2fd36613fd0d9dd8460f89c",
+    "sources": [
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-canary3-watchdog-seed41-20260813T014520Z/results.jsonl",
+        "sha256": "b7eff8403db8b95a038c37e4f2f4c4c486e4f49be5574df82b9342cdf13e55ce",
+        "byte_count": 186687,
+        "jsonl_record_count": 3,
+        "matched_parent_record_count": 3,
+        "matched_parent_task_ids": [
+          "52807",
+          "54196"
+        ],
+        "matched_parent_task_count": 2,
+        "matched_parent_task_ids_sha256": "1a927b37777fd7c3900b364f684f74212feaeb5f10b78b3231e18ba3aebeae78"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-heldout-v1-seed41-20260812T125727Z/results.jsonl",
+        "sha256": "e4207be29f3ef0f7660199244f9766de5f8667ba7663c2431d8909663d3fb909",
+        "byte_count": 788121,
+        "jsonl_record_count": 15,
+        "matched_parent_record_count": 15,
+        "matched_parent_task_ids": [
+          "52807",
+          "52917",
+          "53167",
+          "54144",
+          "54196",
+          "54242",
+          "54590",
+          "54675"
+        ],
+        "matched_parent_task_count": 8,
+        "matched_parent_task_ids_sha256": "2a8b4ce8ab7f36c4369f0b54252819cec6bd009ff3dd4a85c87bdf77fbeb0a65"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-heldout-v1-seed41-clean-20260812T143001Z/results.jsonl",
+        "sha256": "438f6e54e0e96446a83aff3f5cdd867f12a75f128670db9b48fb99d000c125fd",
+        "byte_count": 6188992,
+        "jsonl_record_count": 101,
+        "matched_parent_record_count": 101,
+        "matched_parent_task_ids": [
+          "52807",
+          "52917",
+          "53167",
+          "54144",
+          "54196",
+          "54242",
+          "54590",
+          "54675",
+          "1563",
+          "1818",
+          "1925",
+          "2768",
+          "3002",
+          "3413",
+          "3911",
+          "4714",
+          "5835",
+          "6239",
+          "6698",
+          "7665",
+          "7902",
+          "8942",
+          "9111",
+          "9391",
+          "9448",
+          "9569",
+          "9726",
+          "10452",
+          "10747",
+          "11276",
+          "11842",
+          "12864",
+          "13284",
+          "14240",
+          "15387",
+          "15671",
+          "16511",
+          "17111",
+          "18645",
+          "18935",
+          "31011",
+          "31628",
+          "31746",
+          "31915",
+          "32023",
+          "32093",
+          "32255",
+          "32293",
+          "32337",
+          "32438",
+          "32562"
+        ],
+        "matched_parent_task_count": 51,
+        "matched_parent_task_ids_sha256": "87101f52ad49e0badd47fdc73976b56cc3a29e665641e2600a69d96398a5eb2d"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-pilot16-codeours-seed41-20260813T012803Z/results.jsonl",
+        "sha256": "0af4bece3418ea3ed34a2d572eadb21c7c0f4785d5b3f3101f4ad5b705adff35",
+        "byte_count": 141797,
+        "jsonl_record_count": 2,
+        "matched_parent_record_count": 2,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-pilot16-v10-seed41-20260813T025838Z/results.jsonl",
+        "sha256": "c9a01d698ba0d31d72c032c2ddb220a9aac95fbc45967b0d7dfb19021ef49fa9",
+        "byte_count": 64812,
+        "jsonl_record_count": 1,
+        "matched_parent_record_count": 1,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-pilot16-v10b-seed41-20260813T031411Z/results.jsonl",
+        "sha256": "848d1c2cde2644b83b8afb31385ee7f94d9162bf2e2dc9a370436141bbb2c473",
+        "byte_count": 64764,
+        "jsonl_record_count": 1,
+        "matched_parent_record_count": 1,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-regression-52807-v17-ours-seed41-20260813T094226Z/results.jsonl",
+        "sha256": "ae279cd08f8433481e8980ac08f1cde92c84796df0b8c67b3599a83d1d8cdb96",
+        "byte_count": 49072,
+        "jsonl_record_count": 1,
+        "matched_parent_record_count": 1,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-regression-52807-v18-ours-seed41-20260813T110605Z/results.jsonl",
+        "sha256": "57e8233a65afbbe0b443c119d79e9d4e97aab536f8f18966968711d26113bfce",
+        "byte_count": 1538,
+        "jsonl_record_count": 1,
+        "matched_parent_record_count": 1,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-regression-52807-v19-ours-seed41-20260813T114544Z/results.jsonl",
+        "sha256": "820fa45eb581b189695d725ecdb66a2569dec212c148ba8bfdecd0bf5efb35e6",
+        "byte_count": 44488,
+        "jsonl_record_count": 1,
+        "matched_parent_record_count": 1,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-regression-54196-seed41-20260812T142012Z/results.jsonl",
+        "sha256": "b1978c0fb5628b7f19677010a0426e182cc954f93bd9a5f899a7ffd82957e1d0",
+        "byte_count": 126378,
+        "jsonl_record_count": 2,
+        "matched_parent_record_count": 2,
+        "matched_parent_task_ids": [
+          "54196"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "0ee574874d0d1d2dd0cf3e174b6f3010ab8f36addc3e861674f9b3d4b4c2a6c2"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-smoke1-v11-seed41-20260813T035219Z/results.jsonl",
+        "sha256": "66dff06176fd0d36893cd26943f6e2d58bb596ef77df1aae4c0ba91e0d76b73f",
+        "byte_count": 28513,
+        "jsonl_record_count": 2,
+        "matched_parent_record_count": 2,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-smoke1-v11d-seed41-20260813T041711Z/results.jsonl",
+        "sha256": "948477e7f3693b18ed3ab746691577153c157c6deeea6981b27283a4a9a3fa43",
+        "byte_count": 37057,
+        "jsonl_record_count": 2,
+        "matched_parent_record_count": 2,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-smoke1-v12b-seed41-20260813T044909Z/results.jsonl",
+        "sha256": "b8c11956327916ffccb1f9e3f95b41f54c193add4956862268abda4663b4db02",
+        "byte_count": 92742,
+        "jsonl_record_count": 2,
+        "matched_parent_record_count": 2,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-smoke1-v13-seed41-20260813T053419Z/results.jsonl",
+        "sha256": "e15c083bbb5d19bd48786a441765734a885d40ba984352b7172507d07d58003c",
+        "byte_count": 85540,
+        "jsonl_record_count": 2,
+        "matched_parent_record_count": 2,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-smoke1-v14-seed41-20260813T061206Z/results.jsonl",
+        "sha256": "f4d8b2b81e85592ab50667df0b628f03ddd8697cfa13f54ce7cd56cdf76aa3bb",
+        "byte_count": 48899,
+        "jsonl_record_count": 2,
+        "matched_parent_record_count": 2,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-smoke1-v15-ours-seed41-20260813T073115Z/results.jsonl",
+        "sha256": "2d4ed471991fa016be63a69c62089b742aa8c636209295c6b62e0f5a435634ce",
+        "byte_count": 47767,
+        "jsonl_record_count": 1,
+        "matched_parent_record_count": 1,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      },
+      {
+        "relative_path": "benchmarks/results/litellm-qwen36-chat-smoke1-v16-ours-seed41-20260813T075612Z/results.jsonl",
+        "sha256": "059a64a87880762458e382c24900435540b293b4d633ce9c575acacc38e3dec4",
+        "byte_count": 49810,
+        "jsonl_record_count": 1,
+        "matched_parent_record_count": 1,
+        "matched_parent_task_ids": [
+          "52807"
+        ],
+        "matched_parent_task_count": 1,
+        "matched_parent_task_ids_sha256": "2b748cc0750eb6f0897b4feef30e22165f0332a387313d5265b70a5c174664a5"
+      }
+    ]
+  },
+  "tracked_protocol_candidate_inventory": {
+    "candidate_file_count": 10,
+    "total_byte_count": 1256,
+    "aggregate_sha256": "67bd3f777afbbcf81559a77c3ffed43307b1a1e40c5a7c47585416996d7be689",
+    "sources": [
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-canary-v1.txt",
+        "sha256": "3e606b226d0008068b89fc94cd18eef4ca00603911d5b722622d42d0d660eb86",
+        "byte_count": 38,
+        "line_count": 6
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-canary-v2.txt",
+        "sha256": "3e606b226d0008068b89fc94cd18eef4ca00603911d5b722622d42d0d660eb86",
+        "byte_count": 38,
+        "line_count": 6
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-canary-v3.txt",
+        "sha256": "3e606b226d0008068b89fc94cd18eef4ca00603911d5b722622d42d0d660eb86",
+        "byte_count": 38,
+        "line_count": 6
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-canary-v4.txt",
+        "sha256": "3e606b226d0008068b89fc94cd18eef4ca00603911d5b722622d42d0d660eb86",
+        "byte_count": 38,
+        "line_count": 6
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-limited30-v5.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-limited30-v6.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v1.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v2.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v3.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v4.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30
+      }
+    ]
+  },
+  "tracked_protocol_matching_sources": {
+    "source_count": 6,
+    "total_byte_count": 1104,
+    "total_line_count": 180,
+    "aggregate_sha256": "3ad1ae62cedf885f23b47c1e4f77b1f5d4c8976986dac159fe1df030dd6eb1a5",
+    "sources": [
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-limited30-v5.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30,
+        "git_blob_sha1": "b0832ea774a8b0c95fe295315cb8b5709bfcf131",
+        "matched_task_ids": [
+          "53994",
+          "58949",
+          "56915",
+          "58032"
+        ],
+        "matched_task_count": 4,
+        "matched_task_ids_sha256": "7a67543e3c648ae2de672f3fddd4326e0dc5a925109eda2780a5638d491cb39d"
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-limited30-v6.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30,
+        "git_blob_sha1": "b0832ea774a8b0c95fe295315cb8b5709bfcf131",
+        "matched_task_ids": [
+          "53994",
+          "58949",
+          "56915",
+          "58032"
+        ],
+        "matched_task_count": 4,
+        "matched_task_ids_sha256": "7a67543e3c648ae2de672f3fddd4326e0dc5a925109eda2780a5638d491cb39d"
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v1.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30,
+        "git_blob_sha1": "b0832ea774a8b0c95fe295315cb8b5709bfcf131",
+        "matched_task_ids": [
+          "53994",
+          "58949",
+          "56915",
+          "58032"
+        ],
+        "matched_task_count": 4,
+        "matched_task_ids_sha256": "7a67543e3c648ae2de672f3fddd4326e0dc5a925109eda2780a5638d491cb39d"
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v2.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30,
+        "git_blob_sha1": "b0832ea774a8b0c95fe295315cb8b5709bfcf131",
+        "matched_task_ids": [
+          "53994",
+          "58949",
+          "56915",
+          "58032"
+        ],
+        "matched_task_count": 4,
+        "matched_task_ids_sha256": "7a67543e3c648ae2de672f3fddd4326e0dc5a925109eda2780a5638d491cb39d"
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v3.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30,
+        "git_blob_sha1": "b0832ea774a8b0c95fe295315cb8b5709bfcf131",
+        "matched_task_ids": [
+          "53994",
+          "58949",
+          "56915",
+          "58032"
+        ],
+        "matched_task_count": 4,
+        "matched_task_ids_sha256": "7a67543e3c648ae2de672f3fddd4326e0dc5a925109eda2780a5638d491cb39d"
+      },
+      {
+        "relative_path": "benchmarks/protocols/luna-low-three-arm-pilot-v4.txt",
+        "sha256": "9f5e3f0f57d2840d4f531f03ee2febea94c10aadd6842354b18dd168430588d6",
+        "byte_count": 184,
+        "line_count": 30,
+        "git_blob_sha1": "b0832ea774a8b0c95fe295315cb8b5709bfcf131",
+        "matched_task_ids": [
+          "53994",
+          "58949",
+          "56915",
+          "58032"
+        ],
+        "matched_task_count": 4,
+        "matched_task_ids_sha256": "7a67543e3c648ae2de672f3fddd4326e0dc5a925109eda2780a5638d491cb39d"
+      }
+    ]
+  },
+  "derived": {
+    "attempted_or_run": {
+      "task_count": 51,
+      "task_ids": [
+        "52807",
+        "52917",
+        "53167",
+        "54144",
+        "54196",
+        "54242",
+        "54590",
+        "54675",
+        "1563",
+        "1818",
+        "1925",
+        "2768",
+        "3002",
+        "3413",
+        "3911",
+        "4714",
+        "5835",
+        "6239",
+        "6698",
+        "7665",
+        "7902",
+        "8942",
+        "9111",
+        "9391",
+        "9448",
+        "9569",
+        "9726",
+        "10452",
+        "10747",
+        "11276",
+        "11842",
+        "12864",
+        "13284",
+        "14240",
+        "15387",
+        "15671",
+        "16511",
+        "17111",
+        "18645",
+        "18935",
+        "31011",
+        "31628",
+        "31746",
+        "31915",
+        "32023",
+        "32093",
+        "32255",
+        "32293",
+        "32337",
+        "32438",
+        "32562"
+      ],
+      "task_ids_sha256": "87101f52ad49e0badd47fdc73976b56cc3a29e665641e2600a69d96398a5eb2d"
+    },
+    "protocol_listed_not_attempted": {
+      "task_count": 4,
+      "task_ids": [
+        "53994",
+        "58949",
+        "56915",
+        "58032"
+      ],
+      "task_ids_sha256": "7a67543e3c648ae2de672f3fddd4326e0dc5a925109eda2780a5638d491cb39d"
+    },
+    "exposed_union_parent_order": {
+      "task_count": 55,
+      "task_ids": [
+        "52807",
+        "52917",
+        "53167",
+        "54144",
+        "54196",
+        "54242",
+        "54590",
+        "54675",
+        "1563",
+        "1818",
+        "1925",
+        "2768",
+        "3002",
+        "3413",
+        "3911",
+        "4714",
+        "5835",
+        "6239",
+        "6698",
+        "7665",
+        "7902",
+        "8942",
+        "9111",
+        "9391",
+        "9448",
+        "9569",
+        "9726",
+        "10452",
+        "10747",
+        "11276",
+        "11842",
+        "12864",
+        "13284",
+        "14240",
+        "15387",
+        "15671",
+        "16511",
+        "17111",
+        "18645",
+        "18935",
+        "31011",
+        "31628",
+        "31746",
+        "31915",
+        "32023",
+        "32093",
+        "32255",
+        "32293",
+        "32337",
+        "32438",
+        "32562",
+        "53994",
+        "58949",
+        "56915",
+        "58032"
+      ],
+      "task_ids_sha256": "716101fcb8f87cf80b3c2e3d170ed43e2c9e2c0891068728a026044e26767ff3"
+    },
+    "local_pool_parent_difference": {
+      "task_count": 143,
+      "task_ids": [
+        "32612",
+        "32789",
+        "32902",
+        "33157",
+        "34210",
+        "35739",
+        "35742",
+        "35747",
+        "36097",
+        "36191",
+        "36764",
+        "37086",
+        "37229",
+        "37378",
+        "37462",
+        "37554",
+        "36277",
+        "37456",
+        "39190",
+        "40757",
+        "40892",
+        "40959",
+        "41265",
+        "41348",
+        "41420",
+        "41589",
+        "41978",
+        "42181",
+        "42216",
+        "42354",
+        "42515",
+        "42930",
+        "43436",
+        "43589",
+        "44266",
+        "44296",
+        "44628",
+        "45063",
+        "45372",
+        "45738",
+        "45944",
+        "46121",
+        "46897",
+        "48527",
+        "49857",
+        "49945",
+        "50051",
+        "50250",
+        "50486",
+        "50521",
+        "50631",
+        "50683",
+        "50811",
+        "50971",
+        "51249",
+        "51354",
+        "51556",
+        "51680",
+        "52050",
+        "52220",
+        "52233",
+        "52305",
+        "52532",
+        "52541",
+        "52964",
+        "53117",
+        "53161",
+        "53383",
+        "53449",
+        "53647",
+        "54085",
+        "54274",
+        "54474",
+        "54513",
+        "54638",
+        "54667",
+        "54717",
+        "54925",
+        "55049",
+        "55060",
+        "55085",
+        "55427",
+        "55817",
+        "55965",
+        "55979",
+        "56378",
+        "56419",
+        "56599",
+        "56920",
+        "56921",
+        "57033",
+        "57113",
+        "57232",
+        "57445",
+        "57590",
+        "57743",
+        "58147",
+        "58484",
+        "58701",
+        "58723",
+        "59196",
+        "59595",
+        "42902",
+        "43213",
+        "43657",
+        "44017",
+        "44913",
+        "45707",
+        "45937",
+        "46646",
+        "47827",
+        "55260",
+        "55421",
+        "55468",
+        "55708",
+        "55976",
+        "55977",
+        "56427",
+        "56563",
+        "56786",
+        "56953",
+        "57117",
+        "57262",
+        "57354",
+        "57558",
+        "57612",
+        "57693",
+        "57989",
+        "58109",
+        "58499",
+        "58687",
+        "58904",
+        "58942",
+        "59129",
+        "59160",
+        "59224",
+        "59358",
+        "59511",
+        "59639",
+        "59734",
+        "59794",
+        "59884",
+        "59902"
+      ],
+      "task_ids_sha256": "7b76ebca59be0e97964108b5e2d0552ea6a9c0f11eb51d15c10552b82efd3386"
+    }
+  },
+  "limitations": [
+    "Ignored result bytes are inventoried historical observations, not tracked verifier inputs.",
+    "Fresh clones can verify this snapshot and tracked protocol sources, but cannot independently reproduce ignored-result observations.",
+    "No globally unseen, training-clean, untouched, held-out, or confirmatory claim is made."
+  ]
+}

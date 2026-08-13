@@ -54,6 +54,7 @@ from .benchmark import (
     _valid_jsonl_rows,
     compare_workbooks,
     comparison_evidence,
+    verify_trace2skill_split_provenance,
 )
 from .budget import RunBudget
 from .code_interpreter import STRICT_ISOLATION_POLICY, ensure_strict_code_isolation
@@ -86,8 +87,8 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v21"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 10
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v22"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 11
 COMPARISON_CONFIGURATION_POLICIES = {
     "code_workbook_formula_gate": (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -736,6 +737,7 @@ class ComparisonBenchmarkRunner:
         recalculate: bool = True,
         arm_order_seed: int = 20260811,
         circuit_breaker_threshold: int = 3,
+        split_provenance: dict[str, Any] | None = None,
     ) -> None:
         if not arms or len(set(arms)) != len(arms) or any(
             arm not in AVAILABLE_COMPARISON_ARMS for arm in arms
@@ -763,6 +765,11 @@ class ComparisonBenchmarkRunner:
         self.recalculate = recalculate
         self.arm_order_seed = arm_order_seed
         self.circuit_breaker_threshold = circuit_breaker_threshold
+        self.split_provenance = (
+            json.loads(json.dumps(split_provenance))
+            if split_provenance is not None
+            else None
+        )
         self.relay_pacer = RelayPacer(config.request_interval_seconds)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.results_path = self.output_dir / "results.jsonl"
@@ -786,6 +793,19 @@ class ComparisonBenchmarkRunner:
             os.close(descriptor)
 
     def _manifest(self, tasks: list[SpreadsheetTask]) -> dict[str, Any]:
+        execution_task_ids = "".join(f"{task.task_id}\n" for task in tasks)
+        dataset_manifest_sha256 = _dataset_manifest_sha256(tasks)
+        if self.split_provenance is not None and (
+            not verify_trace2skill_split_provenance(self.split_provenance)
+            or self.split_provenance["task_count"] != len(tasks)
+            or self.split_provenance["task_ids_sha256"]
+            != _text_sha256(execution_task_ids)
+            or self.split_provenance["dataset_json_sha256"]
+            != dataset_manifest_sha256
+        ):
+            raise HarnessError(
+                "Comparison tasks or dataset do not match frozen split provenance"
+            )
         skills = [
             {"name": skill.name, "sha256": skill.sha256}
             for skill in self.skill_registry.discover()
@@ -794,7 +814,6 @@ class ComparisonBenchmarkRunner:
             [task.task_id for task in tasks], self.arm_order_seed, self.arms
         )
         canonical_task_ids = "".join(f"{task_id}\n" for task_id in sorted(arm_orders))
-        execution_task_ids = "".join(f"{task.task_id}\n" for task in tasks)
         profile_evidence = (
             {
                 task.task_id: build_deterministic_profile(task.input_path)["profile_sha256"]
@@ -810,13 +829,14 @@ class ComparisonBenchmarkRunner:
             "not_paper_reproduction": True,
             "dataset_revision": f"KAKA22/SpreadsheetBench@{VERIFIED_REVISION}",
             "dataset_archive_sha256": VERIFIED_SHA256,
-            "dataset_manifest_sha256": _dataset_manifest_sha256(tasks),
+            "dataset_manifest_sha256": dataset_manifest_sha256,
             "protocol": "agent_per_workbook",
             "scorer": "cleanroom-corrected-value-v1",
             "task_count": len(tasks),
             "task_ids": [task.task_id for task in tasks],
             "task_id_set_sha256": _text_sha256(canonical_task_ids),
             "task_execution_order_sha256": _text_sha256(execution_task_ids),
+            "split_provenance": self.split_provenance,
             "tasks": [
                 {
                     "task_id": task.task_id,
@@ -1030,6 +1050,7 @@ class ComparisonBenchmarkRunner:
             "arm": arm,
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "comparison_manifest_sha256": comparison_manifest_sha256,
+            "split_provenance": self.split_provenance,
             "instruction_type": task.instruction_type,
             "model": self.config.model,
             "api_protocol": self.config.api_protocol,
@@ -1262,6 +1283,11 @@ class ComparisonBenchmarkRunner:
                     raise HarnessError(
                         "Refusing to resume comparison with a result row not bound to the "
                         f"current manifest: {task_id}::{arm}"
+                    )
+                if row.get("split_provenance") != self.split_provenance:
+                    raise HarnessError(
+                        "Refusing to resume comparison with split provenance that differs "
+                        f"from the current manifest: {task_id}::{arm}"
                     )
             latest = self._latest()
             arm_orders = _balanced_arm_orders(

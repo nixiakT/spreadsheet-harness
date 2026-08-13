@@ -52,18 +52,28 @@ is removed in parent order. The remaining 143 are labeled only
 administrative enumeration is deliberately not substantive selection. This
 label never means globally unseen, training-uncontaminated, or untouched.
 
+The exposure calculation is backed by
+`qwen35-trace2skill-local-exposure-evidence-v1.json`. It records the source
+revision/tree, exact scan policy, hashes and counts for 17 ignored result
+journals, a complete 10-file tracked protocol candidate inventory, the 6
+matching tracked sources, and every derived ordered ID list. It is a committed
+local attestation: a fresh clone can verify the snapshot and tracked protocol
+files, but cannot independently recover the ignored raw result artifacts.
+
 The immutable manifests are:
 
 - `qwen35-trace2skill-heldout-v1.json`: 198-task pinned parent.
-- `qwen35-trace2skill-local-unattempted-v2.json`: audited 143-task local pool.
+- `qwen35-trace2skill-local-unattempted-v2.json`: attested 143-task local pool.
 - `qwen35-trace2skill-local-unattempted-pilot16-v2.json`: fixed 16-task pilot.
 
 The pilot order was fixed before any request against these 16 IDs. Freezing the
 pilot moves all 16 into development/quarantine immediately. Any timeout,
 provider failure, or partial response still consumes that selected task and
 does not permit substitution from the remaining 127 tasks. Once results are
-observed, optimization may use only quarantined development tasks. A later
-confirmatory cohort needs a new derivative manifest frozen before inference.
+observed, optimization may use only quarantined development tasks. The 127 are
+only a locally attested, not-yet-selected reserve; they are not globally unseen
+or guaranteed unprocessed. Any later confirmatory claim needs a separately
+justified cohort and a new derivative manifest frozen before inference.
 
 Verify and run in manifest order:
 
@@ -81,8 +91,10 @@ sheet-harness benchmark compare \
 
 The verifier pins sibling parent paths and bytes, rejects malformed or duplicate
 JSON keys, rebuilds every recognized manifest from code-side anchors, and
-returns the already-verified task order to the runner. A split manifest cannot
-be combined with task IDs, a task-ID file, offset, or limit.
+returns the already-verified task order to the runner. The comparison manifest,
+result rows, and fresh audit bind the verified split schema, manifest hash,
+task count/order hash, and dataset hash. A split manifest cannot be combined
+with task IDs, a task-ID file, offset, or limit.
 
 ## Frozen online configuration
 

@@ -29,6 +29,7 @@ from .benchmark import (
     load_verified_tasks,
     summarize_results,
     trace2skill_heldout_manifest,
+    trace2skill_split_provenance,
 )
 from .comparison import AVAILABLE_COMPARISON_ARMS, COMPARISON_ARMS, ComparisonBenchmarkRunner
 from .config import API_PROTOCOLS, REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
@@ -355,6 +356,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
     tasks = load_verified_tasks(root)
     requested_ids = list(args.task_id or [])
     frozen_ids: list[str] = []
+    split_provenance: dict[str, Any] | None = None
     if args.split_manifest:
         if (
             args.offset != 0
@@ -369,6 +371,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         split_path = Path(args.split_manifest).expanduser().resolve()
         split_report = load_and_verify_trace2skill_split_manifest(root, split_path)
         frozen_ids = [str(task_id) for task_id in split_report["task_ids"]]
+        split_provenance = trace2skill_split_provenance(split_report)
     if args.task_id_file:
         requested_ids.extend(
             line.strip()
@@ -414,6 +417,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         recalculate=not args.no_recalculate,
         arm_order_seed=args.arm_order_seed,
         circuit_breaker_threshold=args.circuit_breaker,
+        split_provenance=split_provenance,
     )
     summary = runner.run(tasks)
     _json_print(summary)

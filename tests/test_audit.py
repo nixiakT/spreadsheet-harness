@@ -211,6 +211,83 @@ def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
     assert _tree_hashes(tmp_path) == before
 
 
+def test_audit_rejects_split_provenance_tampering(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    task_ids = manifest["task_ids"]
+    provenance = {
+        "manifest_id": "qwen35-trace2skill-local-unattempted-pilot16-v2",
+        "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
+        "manifest_sha256": (
+            "f29d6e5627161b355c24acfbda6c5dcc250d12b5f4933d3c3fb0c50a8bac39b3"
+        ),
+        "task_count": len(task_ids),
+        "task_ids_sha256": _text_sha256(
+            "".join(f"{task_id}\n" for task_id in task_ids)
+        ),
+        "dataset_json_sha256": manifest["dataset_manifest_sha256"],
+    }
+    manifest["split_provenance"] = provenance
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["split_provenance"] = {**provenance, "manifest_sha256": "2" * 64}
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "row_manifest_mismatch:split_provenance")
+
+
+def test_audit_rejects_split_provenance_task_order_mismatch(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["split_provenance"] = {
+        "manifest_id": "pilot-v2",
+        "schema_version": "derivative-v2",
+        "manifest_sha256": "1" * 64,
+        "task_count": 1,
+        "task_ids_sha256": "2" * 64,
+        "dataset_json_sha256": manifest["dataset_manifest_sha256"],
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["split_provenance"] = manifest["split_provenance"]
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "comparison_manifest_split_provenance_invalid" in summary["reasons"]
+
+
+def test_audit_rejects_malformed_split_provenance_without_raising(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["split_provenance"] = {
+        "manifest_id": [],
+        "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
+        "manifest_sha256": "1" * 64,
+        "task_count": 1,
+        "task_ids_sha256": _text_sha256("task-1\n"),
+        "dataset_json_sha256": manifest["dataset_manifest_sha256"],
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["split_provenance"] = manifest["split_provenance"]
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "comparison_manifest_split_provenance_invalid" in summary["reasons"]
+
+
 @pytest.mark.parametrize(
     ("target", "field", "value", "expected_reason"),
     [

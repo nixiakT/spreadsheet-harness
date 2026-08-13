@@ -14,7 +14,12 @@ from typing import Any
 from openpyxl import load_workbook
 
 from .arms import COMPARISON_FORCED_TOOL_PREFIX_POLICY, comparison_stage_turn_caps
-from .benchmark import SpreadsheetTask, _source_fingerprint, compare_workbooks
+from .benchmark import (
+    SpreadsheetTask,
+    _source_fingerprint,
+    compare_workbooks,
+    verify_trace2skill_split_provenance,
+)
 from .comparison import (
     COMPARISON_CONFIGURATION_POLICIES,
     COMPARISON_MANIFEST_SCHEMA_VERSION,
@@ -275,6 +280,46 @@ def _audit_manifest_contract(manifest: dict[str, Any], reasons: list[str]) -> No
     runtime = manifest.get("runtime")
     if not isinstance(runtime, dict) or not runtime.get("python"):
         _add_reason(reasons, "comparison_manifest_runtime_invalid")
+    split_provenance = manifest.get("split_provenance")
+    if split_provenance is not None:
+        task_ids = manifest.get("task_ids")
+        required_split_fields = {
+            "manifest_id",
+            "schema_version",
+            "manifest_sha256",
+            "task_count",
+            "task_ids_sha256",
+            "dataset_json_sha256",
+        }
+        if (
+            not isinstance(split_provenance, dict)
+            or set(split_provenance) != required_split_fields
+            or not isinstance(task_ids, list)
+            or split_provenance.get("task_count") != len(task_ids)
+            or split_provenance.get("task_ids_sha256")
+            != _text_sha256("".join(f"{task_id}\n" for task_id in task_ids))
+            or split_provenance.get("dataset_json_sha256")
+            != manifest.get("dataset_manifest_sha256")
+            or any(
+                not isinstance(split_provenance.get(field), str)
+                or not split_provenance[field]
+                for field in ("schema_version", "manifest_sha256", "task_ids_sha256")
+            )
+            or any(
+                len(str(split_provenance.get(field))) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in str(split_provenance.get(field))
+                )
+                for field in (
+                    "manifest_sha256",
+                    "task_ids_sha256",
+                    "dataset_json_sha256",
+                )
+            )
+            or not verify_trace2skill_split_provenance(split_provenance)
+        ):
+            _add_reason(reasons, "comparison_manifest_split_provenance_invalid")
     for field in (
         "stage_turn_caps",
         "forced_tool_prefix_routing",
@@ -325,6 +370,8 @@ def _audit_row_contract(
         return
     if row.get("comparison_manifest_sha256") != manifest_sha256:
         _add_reason(reasons, "manifest_sha256_binding_mismatch")
+    if row.get("split_provenance") != manifest.get("split_provenance"):
+        _add_reason(reasons, "row_manifest_mismatch:split_provenance")
     expected_fields = {
         "model": configuration.get("model"),
         "api_protocol": configuration.get("api_protocol"),
@@ -715,6 +762,7 @@ def audit_comparison(
         "results_dir": str(root),
         "manifest_sha256": manifest_sha256,
         "results_sha256": results_sha256,
+        "split_provenance": manifest.get("split_provenance"),
         "task_count": len(unique_tasks),
         "arms": list(selected_arms),
         "expected_rows": len(expected_keys),

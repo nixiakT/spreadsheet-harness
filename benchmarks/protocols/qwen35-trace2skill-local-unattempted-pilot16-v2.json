@@ -10,7 +10,7 @@
   "parent": {
     "relative_path": "qwen35-trace2skill-local-unattempted-v2.json",
     "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
-    "manifest_sha256": "fadaa03bb04290ad27eb4f2ff5d3f24ee7e2fed8888dad28b8a5f6b96333b4f1",
+    "manifest_sha256": "aa12a17a65e8e60cc7678257e63d5a58f5760935ee3df1d27135b982b4de09cd",
     "task_count": 143,
     "task_ids_sha256": "7b76ebca59be0e97964108b5e2d0552ea6a9c0f11eb51d15c10552b82efd3386"
   },
@@ -18,7 +18,8 @@
     "operation": "ordered_explicit_subset",
     "purpose": "exploratory_development_pilot",
     "selection": "explicit_fixed_order_before_inference",
-    "freeze_revision": "7af635617e8f78de34cd3cdbff9fec7e373f8ba5",
+    "selection_based_on_repository_revision": "7af635617e8f78de34cd3cdbff9fec7e373f8ba5",
+    "first_committed_in_revision": "ef45aed8bcf5cccfe3e13b63c9df457926fd76d1",
     "freeze_time_utc": "2026-08-13T15:50:24Z",
     "state_rules": [
       "Every pilot task enters development/quarantine when this manifest is frozen.",
@@ -32,13 +33,14 @@
     "task_ids_sha256": "f25f8b75ac231f81e23e812097d3060d3e1f16597b0a5196cdeee9a833b91b82"
   },
   "reserve": {
-    "classification_label": "confirmatory_candidate_not_yet_selected",
+    "classification_label": "locally_attested_not_yet_selected_reserve",
     "ordering": "parent_manifest_order_minus_pilot",
     "task_count": 127,
     "task_ids_sha256": "71c14c013bb98a1fe8d0219a5be4a784fc9aa13dcbce2419d2ec963c7457d6b7",
     "limitations": [
       "Reserve status is local and does not imply global novelty or training isolation.",
-      "A future confirmatory cohort requires a new frozen derivative manifest before inference."
+      "Reserve status does not prove that tasks were never enumerated or preprocessed.",
+      "Any later confirmatory claim requires separate justification and a new frozen manifest."
     ]
   },
   "task_ids": [

@@ -106,8 +106,8 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 10
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v21"
+    assert manifest["schema_version"] == 11
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v22"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -364,6 +364,68 @@ def test_comparison_manifest_records_and_locks_generation_controls(tmp_path: Pat
         second._prepare_manifest(tasks)
 
 
+def test_comparison_manifest_and_rows_bind_split_provenance(tmp_path: Path) -> None:
+    provenance = {
+        "manifest_id": "qwen35-trace2skill-local-unattempted-pilot16-v2",
+        "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
+        "manifest_sha256": (
+            "f29d6e5627161b355c24acfbda6c5dcc250d12b5f4933d3c3fb0c50a8bac39b3"
+        ),
+        "task_count": 2,
+        "task_ids_sha256": hashlib.sha256(b"cell-1\nsheet-1\n").hexdigest(),
+        "dataset_json_sha256": "3" * 64,
+    }
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "key", "model"),
+        tmp_path / "split-binding",
+        skill_registry=SkillRegistry([]),
+        split_provenance=provenance,
+    )
+
+    tasks = _tasks(tmp_path)
+    monkeypatch_provenance = provenance.copy()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "spreadsheet_harness.comparison.verify_trace2skill_split_provenance",
+            lambda value: value == monkeypatch_provenance,
+        )
+        monkeypatch.setattr(
+            "spreadsheet_harness.comparison._dataset_manifest_sha256",
+            lambda _: "3" * 64,
+        )
+        manifest = runner._manifest(tasks)
+
+    assert manifest["split_provenance"] == provenance
+    provenance["manifest_id"] = "mutated-after-construction"
+    assert manifest["split_provenance"]["manifest_id"] == (
+        "qwen35-trace2skill-local-unattempted-pilot16-v2"
+    )
+
+
+def test_comparison_manifest_rejects_invalid_split_provenance_before_write(
+    tmp_path: Path,
+) -> None:
+    tasks = _tasks(tmp_path)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "key", "model"),
+        tmp_path / "invalid-split-preflight",
+        skill_registry=SkillRegistry([]),
+        split_provenance={
+            "manifest_id": "attacker-split",
+            "schema_version": "attacker-v1",
+            "manifest_sha256": "1" * 64,
+            "task_count": 2,
+            "task_ids_sha256": hashlib.sha256(b"cell-1\nsheet-1\n").hexdigest(),
+            "dataset_json_sha256": "3" * 64,
+        },
+    )
+
+    with pytest.raises(HarnessError, match="frozen split provenance"):
+        runner._prepare_manifest(tasks)
+
+    assert not runner.manifest_path.exists()
+
+
 def test_split_manifest_rejects_offset_or_limit(monkeypatch: Any, tmp_path: Path) -> None:
     split = tmp_path / "split.json"
     split.write_text(json.dumps({"task_ids": []}), encoding="utf-8")
@@ -431,13 +493,34 @@ def test_comparison_uses_verified_manifest_order_without_rereading(
     monkeypatch.setattr(
         cli_module,
         "load_and_verify_trace2skill_split_manifest",
-        lambda *_: {"valid": True, "task_ids": ["sheet-1", "cell-1"]},
+        lambda *_: {
+            "valid": True,
+            "manifest_id": "test-split",
+            "schema_version": "test-split-v1",
+            "manifest_sha256": "1" * 64,
+            "usable_tasks": 2,
+            "task_ids": ["sheet-1", "cell-1"],
+            "task_ids_sha256": "2" * 64,
+            "dataset_json_sha256": "3" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "trace2skill_split_provenance",
+        lambda report: {
+            "manifest_id": report["manifest_id"],
+            "schema_version": report["schema_version"],
+            "manifest_sha256": report["manifest_sha256"],
+            "task_count": report["usable_tasks"],
+            "task_ids_sha256": report["task_ids_sha256"],
+            "dataset_json_sha256": report["dataset_json_sha256"],
+        },
     )
     captured: dict[str, Any] = {}
 
     class FakeRunner:
-        def __init__(self, *_: Any, **__: Any) -> None:
-            pass
+        def __init__(self, *_: Any, **kwargs: Any) -> None:
+            captured["split_provenance"] = kwargs["split_provenance"]
 
         def run(self, selected: list[SpreadsheetTask]) -> dict[str, Any]:
             captured["task_ids"] = [task.task_id for task in selected]
@@ -465,6 +548,14 @@ def test_comparison_uses_verified_manifest_order_without_rereading(
 
     assert cli_module.cmd_benchmark_compare(args) == 0
     assert captured["task_ids"] == ["sheet-1", "cell-1"]
+    assert captured["split_provenance"] == {
+        "manifest_id": "test-split",
+        "schema_version": "test-split-v1",
+        "manifest_sha256": "1" * 64,
+        "task_count": 2,
+        "task_ids_sha256": "2" * 64,
+        "dataset_json_sha256": "3" * 64,
+    }
 
 
 def test_comparison_rejects_unreachable_turn_ceiling(tmp_path: Path) -> None:
@@ -876,6 +967,50 @@ def test_comparison_runner_refuses_protocol_mismatched_resume(
     )
 
     with pytest.raises(HarnessError, match="different or missing protocol"):
+        runner.run(tasks)
+
+
+def test_comparison_runner_refuses_split_provenance_mismatched_resume(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    tasks = _tasks(tmp_path)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "split-mismatched-resume",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+    )
+    runner._prepare_manifest(tasks)
+    manifest_sha256 = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
+    runner.results_path.write_text(
+        json.dumps(
+            {
+                "task_id": tasks[0].task_id,
+                "arm": "bare",
+                "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+                "comparison_manifest_sha256": manifest_sha256,
+                "split_provenance": {"attacker": True},
+                "status": "completed",
+                "passed": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_one",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("mismatched split provenance must stop sampling")
+        ),
+    )
+
+    with pytest.raises(HarnessError, match="split provenance"):
         runner.run(tasks)
 
 

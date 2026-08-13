@@ -54,6 +54,7 @@ TRACE2SKILL_HELDOUT_TASK_IDS_SHA256 = (
     "445ceec8e033601a054babf7997e340cf21d1c1d2d54a4aa421a8ba29b189582"
 )
 TRACE2SKILL_SPLIT_SCHEMA_VERSION = "spreadsheetbench-trace2skill-heldout-v1"
+TRACE2SKILL_HELDOUT_MANIFEST_ID = "qwen35-trace2skill-heldout-v1"
 TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION = (
     "spreadsheetbench-trace2skill-derivative-v2"
 )
@@ -68,7 +69,7 @@ TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME = (
     f"{TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID}.json"
 )
 TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256 = (
-    "fadaa03bb04290ad27eb4f2ff5d3f24ee7e2fed8888dad28b8a5f6b96333b4f1"
+    "aa12a17a65e8e60cc7678257e63d5a58f5760935ee3df1d27135b982b4de09cd"
 )
 TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT = 143
 TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256 = (
@@ -88,6 +89,9 @@ TRACE2SKILL_LOCAL_EXPOSURE_TASK_IDS_SHA256 = (
 )
 TRACE2SKILL_PILOT_MANIFEST_ID = "qwen35-trace2skill-local-unattempted-pilot16-v2"
 TRACE2SKILL_PILOT_MANIFEST_FILENAME = f"{TRACE2SKILL_PILOT_MANIFEST_ID}.json"
+TRACE2SKILL_PILOT_MANIFEST_SHA256 = (
+    "e21c4fa091ce3c1dd23e797d98ee1bcae45eb54e1c8b2be6c3da47545241c327"
+)
 TRACE2SKILL_PILOT_TASK_IDS = (
     "33157",
     "35747",
@@ -115,6 +119,18 @@ TRACE2SKILL_RESERVE_TASK_IDS_SHA256 = (
 )
 TRACE2SKILL_LOCAL_SCAN_REVISION = "7af635617e8f78de34cd3cdbff9fec7e373f8ba5"
 TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC = "2026-08-13T15:50:24Z"
+TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_FILENAME = (
+    "qwen35-trace2skill-local-exposure-evidence-v1.json"
+)
+TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SCHEMA_VERSION = (
+    "spreadsheetbench-local-exposure-evidence-v1"
+)
+TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SHA256 = (
+    "063dd66299cfb34a59d634d396f2d8df31b0980b29de315a33c467fb3569521e"
+)
+TRACE2SKILL_PILOT_FIRST_COMMITTED_REVISION = (
+    "ef45aed8bcf5cccfe3e13b63c9df457926fd76d1"
+)
 BENCHMARK_MANIFEST_SCHEMA_VERSION = 2
 BENCHMARK_PROTOCOL_VERSION = "agent_per_workbook_v2"
 _PROCESS_PACERS: dict[str, RelayPacer] = {}
@@ -546,6 +562,8 @@ def _verify_trace2skill_heldout_document(
     frozen: dict[str, Any],
     manifest_hash: str,
 ) -> dict[str, Any]:
+    if manifest_hash != TRACE2SKILL_PARENT_MANIFEST_SHA256:
+        raise ValueError("Frozen held-out manifest checksum does not match its code anchor")
     expected = trace2skill_heldout_manifest(dataset_root)
     if frozen != expected:
         mismatches = _manifest_mismatch_fields(frozen, expected)
@@ -557,6 +575,7 @@ def _verify_trace2skill_heldout_document(
         "valid": True,
         "manifest": str(path),
         "manifest_sha256": manifest_hash,
+        "manifest_id": TRACE2SKILL_HELDOUT_MANIFEST_ID,
         "schema_version": expected["schema_version"],
         "usable_tasks": expected["selection"]["usable_tasks"],
         "task_ids": list(expected["task_ids"]),
@@ -614,6 +633,13 @@ def trace2skill_local_unattempted_manifest(dataset_root: str | Path) -> dict[str
             "repository_revision_scanned": TRACE2SKILL_LOCAL_SCAN_REVISION,
             "artifact_scan_cutoff_utc": TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC,
             "scan_policy_version": "substantive-local-exposure-v1",
+            "evidence_snapshot": {
+                "relative_path": TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_FILENAME,
+                "schema_version": TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SCHEMA_VERSION,
+                "sha256": TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SHA256,
+                "claim_level": "committed_local_attestation",
+                "raw_source_artifacts_available_in_fresh_clone": False,
+            },
             "limitations": [
                 "Administrative enumeration in full-split manifests is not treated as substantive selection.",
                 "This label does not mean globally unseen or training-uncontaminated.",
@@ -682,7 +708,8 @@ def trace2skill_local_unattempted_pilot_manifest(
             "operation": "ordered_explicit_subset",
             "purpose": "exploratory_development_pilot",
             "selection": "explicit_fixed_order_before_inference",
-            "freeze_revision": TRACE2SKILL_LOCAL_SCAN_REVISION,
+            "selection_based_on_repository_revision": TRACE2SKILL_LOCAL_SCAN_REVISION,
+            "first_committed_in_revision": TRACE2SKILL_PILOT_FIRST_COMMITTED_REVISION,
             "freeze_time_utc": TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC,
             "state_rules": [
                 "Every pilot task enters development/quarantine when this manifest is frozen.",
@@ -696,13 +723,14 @@ def trace2skill_local_unattempted_pilot_manifest(
             "task_ids_sha256": _ordered_task_ids_sha256(pilot_ids),
         },
         "reserve": {
-            "classification_label": "confirmatory_candidate_not_yet_selected",
+            "classification_label": "locally_attested_not_yet_selected_reserve",
             "ordering": "parent_manifest_order_minus_pilot",
             "task_count": len(reserve_ids),
             "task_ids_sha256": _ordered_task_ids_sha256(reserve_ids),
             "limitations": [
                 "Reserve status is local and does not imply global novelty or training isolation.",
-                "A future confirmatory cohort requires a new frozen derivative manifest before inference.",
+                "Reserve status does not prove that tasks were never enumerated or preprocessed.",
+                "Any later confirmatory claim requires separate justification and a new frozen manifest.",
             ],
         },
         "task_ids": pilot_ids,
@@ -711,15 +739,133 @@ def trace2skill_local_unattempted_pilot_manifest(
     }
 
 
-def _resolve_derivative_parent(path: Path, expected_filename: str) -> Path:
-    parent = path.parent / expected_filename
+def _resolve_derivative_sibling(
+    path: Path, expected_filename: str, *, artifact_label: str
+) -> Path:
+    sibling = path.parent / expected_filename
     resolved_directory = path.parent.resolve(strict=True)
-    resolved_parent = parent.resolve(strict=True)
-    if resolved_parent.parent != resolved_directory or resolved_parent.name != expected_filename:
-        raise ValueError("Derivative split parent must be a sibling regular file")
-    if not resolved_parent.is_file():
-        raise ValueError("Derivative split parent must be a regular file")
-    return resolved_parent
+    if sibling.is_symlink():
+        raise ValueError(f"Derivative split {artifact_label} must be a sibling regular file")
+    try:
+        resolved_sibling = sibling.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(
+            f"Derivative split {artifact_label} must be a sibling regular file"
+        ) from exc
+    if (
+        resolved_sibling.parent != resolved_directory
+        or resolved_sibling.name != expected_filename
+        or not resolved_sibling.is_file()
+    ):
+        raise ValueError(f"Derivative split {artifact_label} must be a sibling regular file")
+    return resolved_sibling
+
+
+def _resolve_derivative_parent(path: Path, expected_filename: str) -> Path:
+    return _resolve_derivative_sibling(
+        path, expected_filename, artifact_label="parent"
+    )
+
+
+def _read_local_exposure_evidence(path: Path) -> tuple[dict[str, Any], str]:
+    raw = path.read_bytes()
+    evidence_hash = hashlib.sha256(raw).hexdigest()
+    if evidence_hash != TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SHA256:
+        raise ValueError("Frozen local exposure evidence checksum does not match its code anchor")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Frozen local exposure evidence is not valid UTF-8") from exc
+    try:
+        evidence = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Invalid frozen local exposure evidence JSON") from exc
+    if not isinstance(evidence, dict):
+        raise ValueError("Frozen local exposure evidence must be a JSON object")
+    return evidence, evidence_hash
+
+
+def _verify_local_exposure_evidence(path: Path, pool: dict[str, Any]) -> None:
+    derivation = pool.get("derivation")
+    if not isinstance(derivation, dict):
+        raise ValueError("Local pool derivation must be a JSON object")
+    reference = derivation.get("evidence_snapshot")
+    if not isinstance(reference, dict):
+        raise ValueError("Local pool evidence snapshot reference must be a JSON object")
+    relative_path = reference.get("relative_path")
+    if (
+        relative_path != TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_FILENAME
+        or Path(str(relative_path)).is_absolute()
+    ):
+        raise ValueError("Local exposure evidence path does not match its frozen sibling")
+    evidence_path = _resolve_derivative_sibling(
+        path,
+        TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_FILENAME,
+        artifact_label="local exposure evidence",
+    )
+    evidence, evidence_hash = _read_local_exposure_evidence(evidence_path)
+    if (
+        reference.get("schema_version")
+        != TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SCHEMA_VERSION
+        or reference.get("sha256") != evidence_hash
+        or reference.get("claim_level") != "committed_local_attestation"
+        or reference.get("raw_source_artifacts_available_in_fresh_clone") is not False
+    ):
+        raise ValueError("Local exposure evidence reference does not match its anchors")
+
+    observation = evidence.get("observation")
+    parent = evidence.get("parent")
+    scan_policy = evidence.get("scan_policy")
+    if (
+        evidence.get("schema_version")
+        != TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SCHEMA_VERSION
+        or evidence.get("claim_level") != "committed_local_attestation"
+        or evidence.get("raw_source_artifacts_available_in_fresh_clone") is not False
+        or not isinstance(observation, dict)
+        or observation.get("cutoff_utc") != TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC
+        or observation.get("source_repository_commit")
+        != TRACE2SKILL_LOCAL_SCAN_REVISION
+        or not isinstance(parent, dict)
+        or parent.get("relative_path") != TRACE2SKILL_PARENT_MANIFEST_FILENAME
+        or parent.get("sha256") != TRACE2SKILL_PARENT_MANIFEST_SHA256
+        or parent.get("task_count") != TRACE2SKILL_HELDOUT_TASK_COUNT
+        or parent.get("task_ids_sha256") != TRACE2SKILL_HELDOUT_TASK_IDS_SHA256
+        or not isinstance(scan_policy, dict)
+        or scan_policy.get("version") != "substantive-local-exposure-v1"
+    ):
+        raise ValueError("Frozen local exposure evidence metadata does not match its anchors")
+
+    pool_evidence = derivation.get("evidence")
+    derived = evidence.get("derived")
+    if not isinstance(pool_evidence, dict) or not isinstance(derived, dict):
+        raise ValueError("Frozen local exposure evidence derivation must be a JSON object")
+    expected_sections = {
+        "attempted_or_run": pool_evidence.get("attempted_or_run"),
+        "protocol_listed_not_attempted": pool_evidence.get("protocol_listed"),
+        "exposed_union_parent_order": pool_evidence.get("union"),
+        "local_pool_parent_difference": pool,
+    }
+    for section_name, expected_section in expected_sections.items():
+        section = derived.get(section_name)
+        if not isinstance(section, dict) or not isinstance(expected_section, dict):
+            raise ValueError(
+                f"Frozen local exposure evidence section is invalid: {section_name}"
+            )
+        task_ids = section.get("task_ids")
+        if (
+            not isinstance(task_ids, list)
+            or not all(isinstance(task_id, str) for task_id in task_ids)
+            or section.get("task_count") != len(task_ids)
+            or section.get("task_ids_sha256") != _ordered_task_ids_sha256(task_ids)
+            or task_ids != expected_section.get("task_ids")
+            or section.get("task_count") != expected_section.get("task_count")
+            or section.get("task_ids_sha256")
+            != expected_section.get("task_ids_sha256")
+        ):
+            raise ValueError(
+                "Frozen local exposure evidence does not match the pool derivation: "
+                f"{section_name}"
+            )
 
 
 def _verify_trace2skill_derivative_document(
@@ -766,6 +912,18 @@ def _verify_trace2skill_derivative_document(
             "Frozen Trace2Skill derivative manifest does not match its anchors; fields: "
             + ", ".join(mismatches)
         )
+    if manifest_id == TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID:
+        _verify_local_exposure_evidence(path, frozen)
+    if (
+        manifest_id == TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID
+        and manifest_hash != TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
+    ):
+        raise ValueError("Frozen local pool manifest checksum does not match its code anchor")
+    if (
+        manifest_id == TRACE2SKILL_PILOT_MANIFEST_ID
+        and manifest_hash != TRACE2SKILL_PILOT_MANIFEST_SHA256
+    ):
+        raise ValueError("Frozen pilot manifest checksum does not match its code anchor")
     return {
         "valid": True,
         "manifest": str(path),
@@ -808,6 +966,90 @@ def load_and_verify_trace2skill_split_manifest(
             dataset_root, path, frozen, manifest_hash
         )
     raise ValueError(f"Unsupported split manifest schema_version: {schema!r}")
+
+
+def _trace2skill_split_provenance_anchors() -> dict[str, dict[str, Any]]:
+    return {
+        TRACE2SKILL_HELDOUT_MANIFEST_ID: {
+            "schema_version": TRACE2SKILL_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_PARENT_MANIFEST_SHA256,
+            "task_count": TRACE2SKILL_HELDOUT_TASK_COUNT,
+            "task_ids_sha256": TRACE2SKILL_HELDOUT_TASK_IDS_SHA256,
+            "dataset_json_sha256": VERIFIED_DATASET_JSON_SHA256,
+        },
+        TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID: {
+            "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256,
+            "task_count": TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT,
+            "task_ids_sha256": TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256,
+            "dataset_json_sha256": VERIFIED_DATASET_JSON_SHA256,
+        },
+        TRACE2SKILL_PILOT_MANIFEST_ID: {
+            "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_PILOT_MANIFEST_SHA256,
+            "task_count": len(TRACE2SKILL_PILOT_TASK_IDS),
+            "task_ids_sha256": TRACE2SKILL_PILOT_TASK_IDS_SHA256,
+            "dataset_json_sha256": VERIFIED_DATASET_JSON_SHA256,
+        },
+    }
+
+
+def verify_trace2skill_split_provenance(provenance: Any) -> bool:
+    """Validate comparison provenance against immutable known split anchors."""
+
+    if not isinstance(provenance, dict):
+        return False
+    required = {
+        "manifest_id",
+        "schema_version",
+        "manifest_sha256",
+        "task_count",
+        "task_ids_sha256",
+        "dataset_json_sha256",
+    }
+    if set(provenance) != required:
+        return False
+    anchors = _trace2skill_split_provenance_anchors()
+    manifest_id = provenance.get("manifest_id")
+    if not isinstance(manifest_id, str) or not isinstance(
+        provenance.get("task_count"), int
+    ) or isinstance(provenance.get("task_count"), bool):
+        return False
+    if any(
+        not isinstance(provenance.get(field), str)
+        for field in (
+            "schema_version",
+            "manifest_sha256",
+            "task_ids_sha256",
+            "dataset_json_sha256",
+        )
+    ):
+        return False
+    expected = anchors.get(manifest_id)
+    return expected is not None and all(
+        provenance.get(field) == value for field, value in expected.items()
+    )
+
+
+def trace2skill_split_provenance(report: Any) -> dict[str, Any]:
+    """Extract and revalidate canonical provenance from a verified split report."""
+
+    if not isinstance(report, dict) or report.get("valid") is not True:
+        raise ValueError("Split provenance requires a successful verifier report")
+    try:
+        provenance = {
+            "manifest_id": report["manifest_id"],
+            "schema_version": report["schema_version"],
+            "manifest_sha256": report["manifest_sha256"],
+            "task_count": report["usable_tasks"],
+            "task_ids_sha256": report["task_ids_sha256"],
+            "dataset_json_sha256": report["dataset_json_sha256"],
+        }
+    except KeyError as exc:
+        raise ValueError("Verified split report is missing provenance fields") from exc
+    if not verify_trace2skill_split_provenance(provenance):
+        raise ValueError("Verified split report does not match a known provenance anchor")
+    return provenance
 
 
 def _transform_official(value: Any) -> Any:

@@ -246,7 +246,10 @@ def test_trace2skill_manifest_build_and_read_only_verify_pinned_dataset(
         pytest.skip("Pinned SpreadsheetBench dataset is not available")
     manifest = trace2skill_heldout_manifest(root)
     path = tmp_path / "heldout-manifest.json"
-    path.write_text(json.dumps(manifest), encoding="utf-8")
+    path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
     before = (root / "dataset.json").read_bytes()
     report = verify_trace2skill_heldout_manifest(root, path)
 
@@ -270,6 +273,9 @@ DERIVATIVE_POOL_MANIFEST = Path(
 )
 DERIVATIVE_PILOT_MANIFEST = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-unattempted-pilot16-v2.json"
+)
+LOCAL_EXPOSURE_EVIDENCE = Path(
+    "benchmarks/protocols/qwen35-trace2skill-local-exposure-evidence-v1.json"
 )
 
 
@@ -300,6 +306,7 @@ def _copy_derivative_manifest_tree(destination: Path) -> dict[str, Path]:
         "v1": Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
         "pool": DERIVATIVE_POOL_MANIFEST,
         "pilot": DERIVATIVE_PILOT_MANIFEST,
+        "evidence": LOCAL_EXPOSURE_EVIDENCE,
     }
     copies: dict[str, Path] = {}
     for name, source in sources.items():
@@ -326,6 +333,7 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
         DERIVATIVE_POOL_MANIFEST,
         DERIVATIVE_PILOT_MANIFEST,
+        LOCAL_EXPOSURE_EVIDENCE,
     ]
     before = {path: _file_state(path) for path in watched}
 
@@ -349,6 +357,36 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         "f25f8b75ac231f81e23e812097d3060d3e1f16597b0a5196cdeee9a833b91b82"
     )
     assert {path: _file_state(path) for path in watched} == before
+
+
+@pytest.mark.parametrize(
+    "manifest_path",
+    [
+        Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
+        DERIVATIVE_POOL_MANIFEST,
+        DERIVATIVE_PILOT_MANIFEST,
+    ],
+)
+def test_trace2skill_verified_reports_produce_canonical_provenance(
+    manifest_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    report = benchmark_module.load_and_verify_trace2skill_split_manifest(
+        dataset, manifest_path
+    )
+
+    provenance = benchmark_module.trace2skill_split_provenance(report)
+
+    assert provenance["manifest_id"] == manifest_path.stem
+    assert provenance["task_count"] == len(report["task_ids"])
+    assert benchmark_module.verify_trace2skill_split_provenance(provenance) is True
+    assert benchmark_module.verify_trace2skill_split_provenance(
+        {**provenance, "manifest_sha256": "0" * 64}
+    ) is False
+    for field in provenance:
+        assert benchmark_module.verify_trace2skill_split_provenance(
+            {**provenance, field: []}
+        ) is False
 
 
 @pytest.mark.parametrize("manifest_path", [DERIVATIVE_POOL_MANIFEST, DERIVATIVE_PILOT_MANIFEST])
@@ -377,6 +415,24 @@ def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys
         benchmark_module.verify_trace2skill_derivative_manifest(dataset, duplicate)
 
 
+@pytest.mark.parametrize(
+    "manifest_name",
+    ["v1", "pool", "pilot"],
+)
+def test_trace2skill_split_manifest_rejects_noncanonical_bytes(
+    manifest_name: str,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    copies[manifest_name].write_bytes(copies[manifest_name].read_bytes() + b"\n")
+
+    with pytest.raises(ValueError, match="checksum"):
+        benchmark_module.load_and_verify_trace2skill_split_manifest(
+            dataset, copies[manifest_name]
+        )
+
+
 @pytest.mark.parametrize("manifest_name,parent_name", [("pool", "v1"), ("pilot", "pool")])
 def test_trace2skill_derivative_manifest_binds_parent_file_sha256(
     manifest_name: str,
@@ -387,9 +443,36 @@ def test_trace2skill_derivative_manifest_binds_parent_file_sha256(
     copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
     copies[parent_name].write_bytes(copies[parent_name].read_bytes() + b"\n")
 
-    with pytest.raises(ValueError, match="parent manifest checksum mismatch"):
+    with pytest.raises(ValueError, match="checksum"):
         benchmark_module.verify_trace2skill_derivative_manifest(
             dataset, copies[manifest_name]
+        )
+
+
+@pytest.mark.parametrize("failure_mode", ["missing", "tampered", "symlink"])
+def test_trace2skill_local_pool_requires_exact_regular_evidence_sibling(
+    failure_mode: str,
+    tmp_path: Path,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    evidence = copies["evidence"]
+    if failure_mode == "missing":
+        evidence.unlink()
+    elif failure_mode == "tampered":
+        evidence.write_bytes(evidence.read_bytes() + b"\n")
+    else:
+        outside = tmp_path / "outside-evidence.json"
+        shutil.copy2(evidence, outside)
+        evidence.unlink()
+        try:
+            evidence.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(ValueError, match="evidence"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies["pool"]
         )
 
 

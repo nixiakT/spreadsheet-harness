@@ -21,6 +21,13 @@
     "repository_revision_scanned": "7af635617e8f78de34cd3cdbff9fec7e373f8ba5",
     "artifact_scan_cutoff_utc": "2026-08-13T15:50:24Z",
     "scan_policy_version": "substantive-local-exposure-v1",
+    "evidence_snapshot": {
+      "relative_path": "qwen35-trace2skill-local-exposure-evidence-v1.json",
+      "schema_version": "spreadsheetbench-local-exposure-evidence-v1",
+      "sha256": "063dd66299cfb34a59d634d396f2d8df31b0980b29de315a33c467fb3569521e",
+      "claim_level": "committed_local_attestation",
+      "raw_source_artifacts_available_in_fresh_clone": false
+    },
     "limitations": [
       "Administrative enumeration in full-split manifests is not treated as substantive selection.",
       "This label does not mean globally unseen or training-uncontaminated.",
