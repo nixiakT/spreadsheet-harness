@@ -122,12 +122,12 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
             "reconcile": [],
             "solve": ["code_interpreter", "code_interpreter"],
         },
-        "ours": {"solve": ["code_interpreter", "code_interpreter"]},
+        "ours": {"solve": ["list_sheets", "inspect_range"]},
     }
     assert manifest["post_prefix_routing"] == {
-        "tool_choice": "required",
+        "tool_choice": "auto",
         "terminal_tool": "submit_result",
-        "applies_to": "comparison stages with workbook tools",
+        "applies_to": "comparison stages with workbook tools after forced prefix",
         "direct_text_stages": ["paper.reconcile"],
     }
     assert manifest["forced_prefix_wire_policy"] == {

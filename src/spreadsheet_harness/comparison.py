@@ -79,7 +79,7 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v10"
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v11"
 
 
 def _run_key(task_id: str, arm: str) -> str:
@@ -760,9 +760,9 @@ class ComparisonBenchmarkRunner:
                 for arm in self.arms
             },
             "post_prefix_routing": {
-                "tool_choice": "required",
+                "tool_choice": "auto",
                 "terminal_tool": TERMINAL_TOOL_NAME,
-                "applies_to": "comparison stages with workbook tools",
+                "applies_to": "comparison stages with workbook tools after forced prefix",
                 "direct_text_stages": ["paper.reconcile"],
             },
             "forced_prefix_wire_policy": {

@@ -2074,12 +2074,13 @@ class SpreadsheetAgent:
             )
         if self.required_tool_termination:
             instructions += (
-                "\nEvery response in this stage must call exactly one available function. "
-                f"When the stage is complete, call {TERMINAL_TOOL_NAME} with the complete final "
-                "response in its result field. Do not call another function in the same response "
-                f"as {TERMINAL_TOOL_NAME}. On the final allowed turn, only "
-                f"{TERMINAL_TOOL_NAME} will be available, so complete and verify the workbook "
-                "before then."
+                "\nSome early responses may be explicitly routed to one required function. "
+                "After those routed calls, call another tool only when it is needed for a "
+                "specific inspection, edit, or verification gap. When the stage is complete, "
+                f"call {TERMINAL_TOOL_NAME} or return a concise final text response. Do not call "
+                f"another function in the same response as {TERMINAL_TOOL_NAME}. On the final "
+                f"allowed turn, only {TERMINAL_TOOL_NAME} will be available, so complete and "
+                "verify the workbook before then."
             )
         if self.require_workbook_change:
             instructions += (
@@ -2189,9 +2190,7 @@ class SpreadsheetAgent:
                 "tool_names": [tool["name"] for tool in tool_schemas],
                 "first_tool_choice": self.first_tool_choice,
                 "forced_tool_prefix": list(self.forced_tool_prefix),
-                "post_prefix_tool_choice": (
-                    "required" if self.required_tool_termination else "auto"
-                ),
+                "post_prefix_tool_choice": "auto",
                 "terminal_tool": (
                     TERMINAL_TOOL_NAME if self.required_tool_termination else None
                 ),
@@ -2253,7 +2252,7 @@ class SpreadsheetAgent:
                             "name": TERMINAL_TOOL_NAME,
                         }
                     elif self.required_tool_termination:
-                        tool_choice = "required"
+                        tool_choice = "auto"
                     payload.update(
                         {
                             "tools": request_tool_schemas,
@@ -2597,7 +2596,7 @@ class SpreadsheetAgent:
                         observed_first_tool=observed_first_tool,
                         forced_tool_prefix=list(self.forced_tool_prefix),
                         observed_forced_tool_prefix=observed_forced_tool_prefix,
-                        post_prefix_tool_choice="required",
+                        post_prefix_tool_choice="auto",
                         terminal_tool=TERMINAL_TOOL_NAME,
                         observed_terminal_tool=TERMINAL_TOOL_NAME,
                         terminal_submissions=1,
@@ -2625,11 +2624,10 @@ class SpreadsheetAgent:
                                             {
                                                 "type": "input_text",
                                                 "text": (
-                                                    "Your previous response did not call a "
-                                                    "function. This stage requires exactly one "
-                                                    "available function call. Continue by calling "
-                                                    "one available tool, or finish by calling "
-                                                    f"{TERMINAL_TOOL_NAME}."
+                                                    "Your previous response was empty. Continue "
+                                                    "by calling one available tool if work remains, "
+                                                    f"or finish by calling {TERMINAL_TOOL_NAME} / "
+                                                    "returning a concise final answer."
                                                 ),
                                             }
                                         ],
@@ -2644,7 +2642,7 @@ class SpreadsheetAgent:
                                     {
                                         "stage": self.stage,
                                         "turn": turn_number,
-                                        "required_tool_choice": True,
+                                        "required_tool_choice": False,
                                         "observed_tools": [],
                                     },
                                 )
@@ -2654,7 +2652,7 @@ class SpreadsheetAgent:
                                 {
                                     "stage": self.stage,
                                     "turn": turn_number,
-                                    "required_tool_choice": True,
+                                    "required_tool_choice": False,
                                     "observed_tools": [],
                                 },
                             )
@@ -2718,7 +2716,7 @@ class SpreadsheetAgent:
                             observed_first_tool=observed_first_tool,
                             forced_tool_prefix=list(self.forced_tool_prefix),
                             observed_forced_tool_prefix=observed_forced_tool_prefix,
-                            post_prefix_tool_choice="required",
+                            post_prefix_tool_choice="auto",
                             terminal_tool=TERMINAL_TOOL_NAME,
                             observed_terminal_tool=ASSISTANT_TEXT_TERMINAL,
                         )

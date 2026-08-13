@@ -746,7 +746,9 @@ runpy.run_path(
                 ),
                 "helper_module": _RUNTIME_HELPER_NAME,
                 "message": (
-                    "Workbook changed; reopen SHEET_WORKBOOK and verify the target range."
+                    "Workbook changed. If your script already reopened or inspected the exact "
+                    "target range and stdout shows the expected state, finish now; otherwise run "
+                    "one narrow verification or correction."
                     if before_sha256 is not None
                     and after_sha256 is not None
                     and before_sha256 != after_sha256

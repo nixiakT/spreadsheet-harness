@@ -638,7 +638,7 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
 
     assert [request["tool_choice"] for request in RequiredClient.requests] == [
         {"type": "function", "name": "list_sheets"},
-        "required",
+        "auto",
     ]
     assert [tool["name"] for tool in RequiredClient.requests[0]["tools"]] == [
         "list_sheets"
@@ -653,7 +653,7 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
     assert result.usage["total_tokens"] == 15
     assert result.budget is not None
     assert result.budget["used"]["model_calls"] == 2
-    assert result.post_prefix_tool_choice == "required"
+    assert result.post_prefix_tool_choice == "auto"
     assert result.terminal_tool == "submit_result"
     assert result.observed_terminal_tool == "submit_result"
     events = [
@@ -876,7 +876,7 @@ def test_required_tool_termination_reprompts_empty_response_before_final_turn(
     assert len(EmptyThenSubmitClient.requests) == 2
     second_input = EmptyThenSubmitClient.requests[1]["input"]
     assert any(
-        "previous response did not call a function"
+        "previous response was empty"
         in content.get("text", "")
         for item in second_input
         for content in item.get("content", [])
