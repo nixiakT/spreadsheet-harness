@@ -189,7 +189,7 @@ wb.close()
 
     assert result["ok"] is True, result
     assert result["workbook_changed"] is True
-    assert result["helper_module"] == "sheet_harness_runtime.py"
+    assert result["helper_module"] == "sheet_harness.py"
     assert "Sales" in result["stdout"]
 
 
@@ -244,6 +244,36 @@ wb.close()
     assert result["ok"] is True, result
     assert "DataTable" in result["stdout"]
     assert "A1:B2" in result["stdout"]
+
+
+def test_code_interpreter_helper_accepts_path_and_cell_dtype_alias(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "path-helper-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import os
+from openpyxl import load_workbook
+
+path = os.environ["SHEET_WORKBOOK"]
+print(sheet_harness.workbook_overview(path)[0]["name"])
+wb = load_workbook(path)
+cell = wb["Sales"]["D2"]
+print(cell.dtype)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert "Sales" in result["stdout"]
+    assert "formula" in result["stdout"]
 
 
 def test_tool_registry_propagates_required_isolation_failure(

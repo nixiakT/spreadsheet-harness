@@ -28,7 +28,7 @@ _PROBE_SENTINEL = "SHEET_STRICT_ISOLATION_OK"
 _MAX_SANDBOX_PROCESSES = 64
 _PROBE_LOCK = threading.Lock()
 _PROBE_SUCCESSES: set[tuple[str, ...]] = set()
-_RUNTIME_HELPER_NAME = "sheet_harness_runtime.py"
+_RUNTIME_HELPER_NAME = "sheet_harness.py"
 _COMPRESSED_PLACEHOLDER_MARKERS = ("[compressed]", "[truncated]")
 
 
@@ -63,6 +63,12 @@ def _sheet_harness_install_openpyxl_compat():
             Worksheet._tableparts = property(
                 lambda self: list(getattr(self, "tables", {}).values())
             )
+
+        from openpyxl.cell.cell import Cell
+        if not hasattr(Cell, "dtype"):
+            Cell.dtype = property(
+                lambda self: "formula" if getattr(self, "data_type", None) == "f" else self.data_type
+            )
     except Exception as exc:
         import sys
         print(
@@ -89,7 +95,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook as _openpyxl_load_workbook
-from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.utils import range_boundaries
 
 
 def workbook_path() -> Path:
@@ -125,6 +131,18 @@ def table_map(worksheet: Any) -> dict[str, Any]:
     return result
 
 
+def _is_workbook_like(value: Any) -> bool:
+    return hasattr(value, "worksheets") and hasattr(value, "sheetnames")
+
+
+def _load_if_path(value: Any, *, data_only: bool = False) -> tuple[Any, bool]:
+    if value is None:
+        return load_workbook(data_only=data_only), True
+    if isinstance(value, str | Path):
+        return load_workbook(value, data_only=data_only), True
+    return value, False
+
+
 def table_refs(worksheet: Any) -> dict[str, str]:
     return {
         name: str(getattr(table, "ref", table))
@@ -132,34 +150,44 @@ def table_refs(worksheet: Any) -> dict[str, str]:
     }
 
 
-def defined_name_refs(workbook: Any) -> dict[str, str]:
+def defined_name_refs(workbook: Any | None = None) -> dict[str, str]:
+    workbook, should_close = _load_if_path(workbook)
     names = getattr(workbook, "defined_names", {})
-    if isinstance(names, dict):
-        return {
-            str(name): str(getattr(value, "attr_text", value))
-            for name, value in dict.items(names)
-        }
-    return {
-        str(getattr(value, "name", index)): str(getattr(value, "attr_text", value))
-        for index, value in enumerate(getattr(names, "definedName", []) or [])
-    }
-
-
-def workbook_overview(workbook: Any) -> list[dict[str, Any]]:
-    overview: list[dict[str, Any]] = []
-    for index, worksheet in enumerate(workbook.worksheets):
-        overview.append(
-            {
-                "index": index,
-                "name": worksheet.title,
-                "dimension": worksheet.calculate_dimension(),
-                "max_row": worksheet.max_row,
-                "max_column": worksheet.max_column,
-                "tables": table_refs(worksheet),
-                "merged_ranges": [str(item) for item in worksheet.merged_cells.ranges],
+    try:
+        if isinstance(names, dict):
+            return {
+                str(name): str(getattr(value, "attr_text", value))
+                for name, value in dict.items(names)
             }
-        )
-    return overview
+        return {
+            str(getattr(value, "name", index)): str(getattr(value, "attr_text", value))
+            for index, value in enumerate(getattr(names, "definedName", []) or [])
+        }
+    finally:
+        if should_close:
+            workbook.close()
+
+
+def workbook_overview(workbook: Any | None = None) -> list[dict[str, Any]]:
+    workbook, should_close = _load_if_path(workbook)
+    overview: list[dict[str, Any]] = []
+    try:
+        for index, worksheet in enumerate(workbook.worksheets):
+            overview.append(
+                {
+                    "index": index,
+                    "name": worksheet.title,
+                    "dimension": worksheet.calculate_dimension(),
+                    "max_row": worksheet.max_row,
+                    "max_column": worksheet.max_column,
+                    "tables": table_refs(worksheet),
+                    "merged_ranges": [str(item) for item in worksheet.merged_cells.ranges],
+                }
+            )
+        return overview
+    finally:
+        if should_close:
+            workbook.close()
 
 
 def copy_cell_format(source: Any, target: Any) -> None:
