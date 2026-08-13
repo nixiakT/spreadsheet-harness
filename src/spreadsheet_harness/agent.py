@@ -75,6 +75,7 @@ _HISTORY_RESULT_MAX_CHARS = 1_600
 _RAW_TOOL_OUTPUT_MAX_CHARS = 64_000
 _RAW_TOOL_TURN_MAX_CHARS = 64_000
 _IMAGE_TURN_MAX_BYTES = 20 * 1024 * 1024
+_WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 4
 OVERLOAD_RETRY_MIN_SECONDS = 15.0
 CONNECT_RETRY_MIN_SECONDS = 30.0
 RETRY_BACKOFF_MAX_SECONDS = 60.0
@@ -2006,6 +2007,17 @@ def _provider_client(
     raise HarnessError(f"Unsupported API protocol {config.api_protocol!r}")
 
 
+def _safe_file_sha256(path: Any) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 class SpreadsheetAgent:
     def __init__(
         self,
@@ -2022,6 +2034,7 @@ class SpreadsheetAgent:
         first_tool_choice: str | None = None,
         forced_tool_prefix: tuple[str, ...] | None = None,
         required_tool_termination: bool = False,
+        require_workbook_change: bool = False,
         pacer: RelayPacer | None = None,
     ) -> None:
         self.config = config
@@ -2044,6 +2057,7 @@ class SpreadsheetAgent:
             self.forced_tool_prefix[0] if self.forced_tool_prefix else None
         )
         self.required_tool_termination = required_tool_termination
+        self.require_workbook_change = require_workbook_change
         self.pacer = pacer
         if len(self.forced_tool_prefix) >= self.max_turns:
             raise ValueError(
@@ -2066,6 +2080,12 @@ class SpreadsheetAgent:
                 f"as {TERMINAL_TOOL_NAME}. On the final allowed turn, only "
                 f"{TERMINAL_TOOL_NAME} will be available, so complete and verify the workbook "
                 "before then."
+            )
+        if self.require_workbook_change:
+            instructions += (
+                "\nThis is an editing stage: the managed workbook file must actually change "
+                f"before {TERMINAL_TOOL_NAME} is accepted. Do not submit a plan, explanation, "
+                "or offer to apply the edit later."
             )
         return instructions, manifest
 
@@ -2098,6 +2118,26 @@ class SpreadsheetAgent:
 
         system, skill_manifest = self._instructions()
         session = self.tools.session
+        initial_workbook_sha256 = (
+            _safe_file_sha256(session.workbook_path)
+            if self.require_workbook_change
+            else None
+        )
+        workbook_changed = False
+        last_workbook_change_reminder_turn = 0
+
+        def refresh_workbook_changed() -> bool:
+            nonlocal workbook_changed
+            if not self.require_workbook_change:
+                return True
+            current = _safe_file_sha256(session.workbook_path)
+            workbook_changed = (
+                current is not None
+                and initial_workbook_sha256 is not None
+                and current != initial_workbook_sha256
+            )
+            return workbook_changed
+
         tool_schemas = list(self.tools.schemas)
         no_argument_tools = _no_argument_tools(tool_schemas)
         tool_names = {str(tool.get("name", "")) for tool in tool_schemas}
@@ -2494,6 +2534,54 @@ class SpreadsheetAgent:
                         raise AgentRoutingError(
                             f"Terminal tool {TERMINAL_TOOL_NAME!r} requires a non-empty result"
                         )
+                    if self.require_workbook_change and not refresh_workbook_changed():
+                        if turn_number < self.max_turns:
+                            recent_items = list(turn.output)
+                            recent_items.append(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": (
+                                                "The managed workbook file has not changed yet, "
+                                                "so this editing stage is not complete. Do not "
+                                                "submit a plan or ask for confirmation. Continue "
+                                                "by calling code_interpreter to make the smallest "
+                                                "correct edit, save SHEET_WORKBOOK, reopen it, "
+                                                "and verify the changed range."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            )
+                            recent_summaries = []
+                            recent_raw_tool_output_chars = 0
+                            recent_image_bytes = 0
+                            recent_image_count = 0
+                            session.recorder.record(
+                                "agent.unchanged_workbook_terminal_reprompted",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "terminal_tool": TERMINAL_TOOL_NAME,
+                                    "initial_workbook_sha256": initial_workbook_sha256,
+                                },
+                            )
+                            continue
+                        session.recorder.record(
+                            "agent.routing_failed",
+                            {
+                                "stage": self.stage,
+                                "turn": turn_number,
+                                "terminal_tool": TERMINAL_TOOL_NAME,
+                                "reason": "workbook_unchanged",
+                                "initial_workbook_sha256": initial_workbook_sha256,
+                            },
+                        )
+                        raise AgentRoutingError(
+                            "Editing stage submitted before changing the managed workbook"
+                        )
                     result = AgentResult(
                         final_text=final_text,
                         turns=turn_number,
@@ -2573,6 +2661,43 @@ class SpreadsheetAgent:
                             raise AgentRoutingError(
                                 "Required-tool stage returned no function call; "
                                 f"finish with {TERMINAL_TOOL_NAME!r}"
+                            )
+                        if self.require_workbook_change and not refresh_workbook_changed():
+                            if turn_number < self.max_turns:
+                                recent_items = list(turn.output)
+                                recent_items.append(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "input_text",
+                                                "text": (
+                                                    "The managed workbook file has not changed "
+                                                    "yet. This editing stage requires a saved "
+                                                    "workbook edit, not just a text answer. "
+                                                    "Continue by calling code_interpreter to edit "
+                                                    "and save SHEET_WORKBOOK, then verify."
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                )
+                                recent_summaries = []
+                                recent_raw_tool_output_chars = 0
+                                recent_image_bytes = 0
+                                recent_image_count = 0
+                                session.recorder.record(
+                                    "agent.unchanged_workbook_text_reprompted",
+                                    {
+                                        "stage": self.stage,
+                                        "turn": turn_number,
+                                        "observed_terminal_tool": ASSISTANT_TEXT_TERMINAL,
+                                        "initial_workbook_sha256": initial_workbook_sha256,
+                                    },
+                                )
+                                continue
+                            raise AgentRoutingError(
+                                "Editing stage returned text before changing the managed workbook"
                             )
                         result = AgentResult(
                             final_text=final_text,
@@ -2789,6 +2914,42 @@ class SpreadsheetAgent:
                         )
                     )
                 next_recent_items.extend(pending_image_items)
+                changed_after_tools = refresh_workbook_changed()
+                if (
+                    self.require_workbook_change
+                    and not changed_after_tools
+                    and turn_number >= _WORKBOOK_CHANGE_REMINDER_AFTER_TURNS
+                    and turn_number <= self.max_turns - 2
+                    and turn_number - last_workbook_change_reminder_turn >= 2
+                ):
+                    last_workbook_change_reminder_turn = turn_number
+                    next_recent_items.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "Progress check: the managed workbook file has not "
+                                        "changed after the recent tool calls. This benchmark "
+                                        "requires a saved workbook edit. On your next "
+                                        "code_interpreter call, stop inspecting unless absolutely "
+                                        "necessary; write the concrete edit to SHEET_WORKBOOK, "
+                                        "save it, reopen it, and verify the exact target range."
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    session.recorder.record(
+                        "agent.unchanged_workbook_progress_reminded",
+                        {
+                            "stage": self.stage,
+                            "turn": turn_number,
+                            "tool_calls": calls,
+                            "initial_workbook_sha256": initial_workbook_sha256,
+                        },
+                    )
                 recent_items = next_recent_items
                 recent_summaries = next_recent_summaries
                 recent_raw_tool_output_chars = next_tool_output_chars

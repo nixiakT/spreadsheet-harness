@@ -329,6 +329,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         "code_interpreter",
     )
     assert bare_call["required_tool_termination"] is True
+    assert bare_call["require_workbook_change"] is False
     assert [call["required_tool_termination"] for call in paper_calls] == [
         True,
         True,
@@ -337,6 +338,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         True,
     ]
     assert ours_call["required_tool_termination"] is True
+    assert ours_call["require_workbook_change"] is True
     assert _preview(bare_call["prompt"]) == _preview(paper_calls[-1]["prompt"])
     assert _preview(bare_call["prompt"]) == _preview(ours_call["prompt"])
     preview_lines = _preview(bare_call["prompt"]).splitlines()

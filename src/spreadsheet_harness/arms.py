@@ -621,6 +621,7 @@ def _run_stage(
     required_successful_tools: frozenset[str] | None = None,
     require_evidence: bool = False,
     forced_tool_prefix: tuple[str, ...] = (),
+    require_workbook_change: bool = False,
     pacer: RelayPacer | None = None,
 ) -> _CompletedStage:
     task_envelope = f"<user_task>\n{user_task}\n</user_task>"
@@ -656,6 +657,7 @@ def _run_stage(
         stage=name,
         forced_tool_prefix=forced_tool_prefix,
         required_tool_termination=allowed_tools is None or bool(allowed_tools),
+        require_workbook_change=require_workbook_change,
         pacer=pacer,
     )
     workbook_before = _workbook_sha256(session, stage=name) if read_only else None
@@ -979,6 +981,7 @@ def run_arm(
                 user_task=instruction,
                 preview=preview,
                 forced_tool_prefix=COMPARISON_FORCED_TOOL_PREFIX_POLICY[arm]["solve"],
+                require_workbook_change=arm == "ours",
                 pacer=pacer,
             )
         ]

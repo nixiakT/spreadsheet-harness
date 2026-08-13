@@ -110,6 +110,69 @@ def test_agent_executes_and_replays_tool_call(
     assert "not-a-real-key" not in trajectory
 
 
+def test_agent_rejects_unchanged_workbook_submit(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class UnchangedSubmitClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> UnchangedSubmitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(
+            self, payload: dict[str, Any], on_text: Any = None, **_: Any
+        ) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "resp-1",
+                    [
+                        {
+                            "type": "function_call",
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+            return ResponseTurn(
+                "resp-2",
+                [
+                    {
+                        "type": "function_call",
+                        "id": "fc-2",
+                        "call_id": "call-2",
+                        "name": "submit_result",
+                        "arguments": json.dumps({"result": "done"}),
+                    }
+                ],
+                "",
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", UnchangedSubmitClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    with pytest.raises(AgentRoutingError, match="before changing"):
+        SpreadsheetAgent(
+            config,
+            tools,
+            forced_tool_prefix=("list_sheets",),
+            required_tool_termination=True,
+            require_workbook_change=True,
+            max_turns=2,
+        ).run("Edit the workbook")
+
+
 def test_agent_sanitizes_no_arg_tool_arguments_before_replay(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
