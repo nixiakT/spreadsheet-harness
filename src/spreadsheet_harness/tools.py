@@ -19,6 +19,7 @@ _LATEX_MAX_CELL_CHARS = 512
 _STYLE_MAX_GROUPS = 64
 _STYLE_MAX_SAMPLE_CELLS = 24
 _STYLE_MAX_TEXT_CHARS = 160
+_INSPECT_DEFAULT_INCLUDE_STYLES = False
 
 
 def _bounded_text(value: Any, limit: int) -> str | None:
@@ -224,12 +225,19 @@ class SpreadsheetToolRegistry:
             ),
             self._schema(
                 "inspect_range",
-                "Read formulas, cached values, styles, merges and tables in a bounded range. Inspect before editing.",
+                (
+                    "Read formulas, cached values, merges and tables in a bounded range. "
+                    "Set include_styles=true only for formatting/layout tasks because style "
+                    "details are verbose."
+                ),
                 _object_schema(
                     {
                         "sheet": sheet,
                         "range_ref": a1,
-                        "include_styles": {"type": "boolean", "default": True},
+                        "include_styles": {
+                            "type": "boolean",
+                            "default": _INSPECT_DEFAULT_INCLUDE_STYLES,
+                        },
                     },
                     ["sheet", "range_ref"],
                 ),
@@ -437,7 +445,11 @@ class SpreadsheetToolRegistry:
     def _inspect_range(self, args: dict[str, Any]) -> ToolOutcome:
         return ToolOutcome(
             self.session.inspect_range(
-                args["sheet"], args["range_ref"], include_styles=args.get("include_styles", True)
+                args["sheet"],
+                args["range_ref"],
+                include_styles=args.get(
+                    "include_styles", _INSPECT_DEFAULT_INCLUDE_STYLES
+                ),
             )
         )
 

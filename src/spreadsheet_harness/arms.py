@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -906,6 +907,52 @@ def _profile_solver_prompt(instruction: str, preview: str, profile: str) -> str:
     )
 
 
+def _compact_ours_profile(profile_data: dict[str, Any]) -> str:
+    """Render task-independent profile fields that are not already in the preview."""
+
+    compact = {
+        "schema_version": profile_data.get("schema_version"),
+        "profile_sha256": profile_data.get("profile_sha256"),
+        "source": profile_data.get("source"),
+        "sheets": [],
+        "truncation": profile_data.get("truncation", {}),
+    }
+    for sheet in profile_data.get("sheets", []):
+        regions = [
+            {
+                "range": region.get("range"),
+                "header_rows": region.get("header_rows"),
+                "data_start_row": region.get("data_start_row"),
+                "row_count": region.get("row_count"),
+                "column_count": region.get("column_count"),
+                "type_counts": region.get("type_counts"),
+                "unit_hints": region.get("unit_hints"),
+                "sample_cells": (region.get("provenance") or {}).get("sample_cells", []),
+            }
+            for region in sheet.get("regions", [])
+        ]
+        compact["sheets"].append(
+            {
+                "name": sheet.get("name"),
+                "state": sheet.get("state"),
+                "used_region": sheet.get("used_region"),
+                "counts": sheet.get("counts"),
+                "regions": regions,
+                "formula_clusters": sheet.get("formula_clusters", []),
+                "merges": sheet.get("merges", []),
+                "tables": sheet.get("tables", []),
+                "truncation": sheet.get("truncation", {}),
+            }
+        )
+    rendered = json.dumps(
+        compact,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return rendered.replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 def _ours_solver_prompt(instruction: str, preview: str, profile: str) -> str:
     return "\n".join(
         [
@@ -1028,7 +1075,7 @@ def run_arm(
                     _remaining_seconds(started, max_elapsed_seconds) or 120.0,
                 ),
             )
-            profile = render_deterministic_profile(profile_data)
+            profile = _compact_ours_profile(profile_data)
             session.recorder.record(
                 "preprocess.profile",
                 {

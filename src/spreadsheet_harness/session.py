@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -28,6 +29,14 @@ from .trajectory import TrajectoryRecorder
 
 SUPPORTED_EDIT_FORMATS = {".xlsx", ".xlsm"}
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _json_value(value: Any) -> Any:
@@ -212,6 +221,7 @@ class WorkbookSession:
         callback: Callable[[Any], Any],
     ) -> Any:
         with self._write_lock:
+            before_sha256 = _sha256(self.workbook_path)
             self._snapshot_counter += 1
             snapshot = (
                 self.paths.snapshots
@@ -238,6 +248,20 @@ class WorkbookSession:
                 workbook.close()
                 workbook = None
                 self._validate(temporary)
+                after_sha256 = _sha256(temporary)
+                if isinstance(result, dict):
+                    result = {
+                        **result,
+                        "workbook_sha256_before": before_sha256,
+                        "workbook_sha256_after": after_sha256,
+                        "workbook_changed": before_sha256 != after_sha256,
+                        "message": (
+                            "Workbook changed. If the target range has been verified, finish now; "
+                            "otherwise run one narrow verification or correction."
+                            if before_sha256 != after_sha256
+                            else "Workbook did not change; revise the mutation before submitting."
+                        ),
+                    }
                 temporary.replace(self.workbook_path)
                 self.recorder.record(
                     "workbook.mutation.committed",

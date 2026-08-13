@@ -72,10 +72,10 @@ _GLOBAL_FATAL_MARKERS = (
 _HISTORY_SUMMARY_MAX_CHARS = 16_000
 _HISTORY_ARGUMENT_MAX_CHARS = 600
 _HISTORY_RESULT_MAX_CHARS = 1_600
-_RAW_TOOL_OUTPUT_MAX_CHARS = 64_000
-_RAW_TOOL_TURN_MAX_CHARS = 64_000
+_RAW_TOOL_OUTPUT_MAX_CHARS = 24_000
+_RAW_TOOL_TURN_MAX_CHARS = 24_000
 _IMAGE_TURN_MAX_BYTES = 20 * 1024 * 1024
-_WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 4
+_WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 3
 OVERLOAD_RETRY_MIN_SECONDS = 15.0
 CONNECT_RETRY_MIN_SECONDS = 30.0
 RETRY_BACKOFF_MAX_SECONDS = 60.0
@@ -2930,10 +2930,11 @@ class SpreadsheetAgent:
                                     "text": (
                                         "Progress check: the managed workbook file has not "
                                         "changed after the recent tool calls. This benchmark "
-                                        "requires a saved workbook edit. On your next "
-                                        "code_interpreter call, stop inspecting unless absolutely "
-                                        "necessary; write the concrete edit to SHEET_WORKBOOK, "
-                                        "save it, reopen it, and verify the exact target range."
+                                        "requires a saved workbook edit. On your next call, use "
+                                        "a mutation tool or code_interpreter unless a specific "
+                                        "missing fact makes editing impossible. For formulas, "
+                                        "write one source formula, fill/translate it across the "
+                                        "target range, then inspect only that range."
                                     ),
                                 }
                             ],
