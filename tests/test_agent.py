@@ -667,6 +667,71 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
     assert "submit_result" in requested[1]["payload"]["available_tool_names"]
 
 
+def test_forced_code_interpreter_keeps_full_output_token_budget(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class CodePrefixClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> CodePrefixClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-code",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-code",
+                            "name": "code_interpreter",
+                            "arguments": json.dumps({"code": "print('ok')"}),
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": json.dumps({"result": "done"}),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", CodePrefixClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "code-prefix-run")
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=True, allowed_tools={"code_interpreter"}
+    )
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    SpreadsheetAgent(
+        config,
+        tools,
+        forced_tool_prefix=("code_interpreter",),
+        required_tool_termination=True,
+        max_output_tokens=4096,
+    ).run("inspect")
+
+    assert CodePrefixClient.requests[0]["max_output_tokens"] == 4096
+    assert CodePrefixClient.requests[1]["max_output_tokens"] == 4096
+
+
 def test_required_tool_termination_forces_submit_only_on_final_turn(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:

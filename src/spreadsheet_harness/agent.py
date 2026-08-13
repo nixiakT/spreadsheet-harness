@@ -76,7 +76,7 @@ _RAW_TOOL_OUTPUT_MAX_CHARS = 24_000
 _RAW_TOOL_TURN_MAX_CHARS = 24_000
 _IMAGE_TURN_MAX_BYTES = 20 * 1024 * 1024
 _WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 3
-_FORCED_TOOL_MAX_OUTPUT_TOKENS = 512
+_LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS = 512
 _FINAL_TOOL_MAX_OUTPUT_TOKENS = 1_024
 OVERLOAD_RETRY_MIN_SECONDS = 15.0
 CONNECT_RETRY_MIN_SECONDS = 30.0
@@ -2244,10 +2244,11 @@ class SpreadsheetAgent:
                             "type": "function",
                             "name": forced_tool,
                         }
-                        request_max_output_tokens = min(
-                            request_max_output_tokens,
-                            _FORCED_TOOL_MAX_OUTPUT_TOKENS,
-                        )
+                        if forced_tool != "code_interpreter":
+                            request_max_output_tokens = min(
+                                request_max_output_tokens,
+                                _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
+                            )
                     elif self.required_tool_termination and turn_number == self.max_turns:
                         request_tool_schemas = [
                             schema
