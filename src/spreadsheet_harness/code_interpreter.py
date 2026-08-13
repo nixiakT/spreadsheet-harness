@@ -236,6 +236,24 @@ def _formula_sample_coordinates(
     return list(dict.fromkeys(candidates))
 
 
+def _normalize_fill_target_range(
+    source_cell: str,
+    target_range: str,
+) -> tuple[str, bool]:
+    source = source_cell.replace("$", "")
+    target = target_range.replace("$", "")
+    if ":" in target:
+        return target_range, False
+    try:
+        range_boundaries(target)
+        range_boundaries(source)
+    except (TypeError, ValueError):
+        return target_range, False
+    if target.upper() == source.upper():
+        return target_range, False
+    return f"{source}:{target}", True
+
+
 def _fill_formula_warnings(
     source_formula: str,
     source_cell: str,
@@ -260,8 +278,10 @@ def _fill_formula_warnings(
         if start is None or end is None:
             continue
         issues: list[str] = []
-        if fills_horizontally and start["column_absolute"] != end["column_absolute"]:
-            issues.append("mixed column anchors")
+        if fills_horizontally and not (
+            start["column_absolute"] and end["column_absolute"]
+        ):
+            issues.append("column endpoints are not both absolute")
         if fills_vertically and start["row_absolute"] != end["row_absolute"]:
             issues.append("mixed row anchors")
         if not issues:
@@ -288,10 +308,10 @@ def _fill_formula_warnings(
                 "issues": issues,
                 "examples": translated_examples,
                 "message": (
-                    "This range changes during fill_formula because one endpoint is "
-                    "absolute and the other is relative. If the range should stay fixed "
-                    "across the fill direction, lock both endpoints, e.g. use $E6:$G6 "
-                    "instead of $E6:G6, then refill and verify cached values."
+                    "This range changes during fill_formula. If the range should stay "
+                    "fixed across the fill direction, lock both endpoints, e.g. use "
+                    "$E6:$G6 instead of E6:G6 or $E6:G6, then refill and verify cached "
+                    "values."
                 ),
             }
         )
@@ -308,7 +328,10 @@ def fill_formula(
     formula = worksheet[source_cell].value
     if not isinstance(formula, str) or not formula.startswith("="):
         raise ValueError(f"{source_cell} does not contain a formula")
-    bounds = range_boundaries(target_range.replace("$", ""))
+    normalized_target_range, expanded_from_endpoint = _normalize_fill_target_range(
+        source_cell, target_range
+    )
+    bounds = range_boundaries(normalized_target_range.replace("$", ""))
     min_col, min_row, max_col, max_row = bounds
     count = 0
     samples: list[dict[str, Any]] = []
@@ -330,7 +353,9 @@ def fill_formula(
     return {
         "ok": True,
         "worksheet": getattr(worksheet, "title", None),
-        "range": target_range,
+        "range": normalized_target_range,
+        "requested_range": target_range,
+        "target_range_expanded_from_endpoint": expanded_from_endpoint,
         "cells_filled": count,
         "source_formula": formula,
         "sample_formulas": samples,

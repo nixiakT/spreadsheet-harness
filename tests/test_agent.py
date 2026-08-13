@@ -870,6 +870,128 @@ def test_agent_forces_code_recovery_after_stalled_edit(
     assert continued[0]["payload"]["turn"] == 4
 
 
+def test_agent_allows_final_turn_code_recovery_for_incomplete_edit(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    code_schema = {
+        "type": "function",
+        "name": "code_interpreter",
+        "description": "run code",
+        "parameters": {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    }
+
+    class FinalRecoveryTools:
+        schemas = [code_schema]
+
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            assert name == "code_interpreter"
+            code = str(arguments.get("code", ""))
+            if "sheet_harness.save_workbook" in code:
+                workbook = load_workbook(self.session.workbook_path)
+                cell = "A2" if workbook.active["A1"].value == "edited" else "A1"
+                workbook.active[cell] = "edited"
+                workbook.save(self.session.workbook_path)
+                workbook.close()
+                return ToolOutcome({"ok": True, "workbook_changed": True})
+            return ToolOutcome(
+                {
+                    "ok": True,
+                    "stdout": "H7 is empty - needs formula",
+                    "workbook_changed": False,
+                }
+            )
+
+    def code_turn(turn: int, code: str) -> ResponseTurn:
+        return ResponseTurn(
+            f"response-{turn}",
+            [
+                {
+                    "type": "function_call",
+                    "call_id": f"call-{turn}",
+                    "name": "code_interpreter",
+                    "arguments": json.dumps({"code": code}),
+                }
+            ],
+            "",
+            {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
+
+    class FinalRecoveryClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> FinalRecoveryClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return code_turn(
+                    self.turn,
+                    "import sheet_harness\n"
+                    "wb = sheet_harness.load_workbook()\n"
+                    "wb.active['A1'] = 'edited'\n"
+                    "sheet_harness.save_workbook(wb)\n",
+                )
+            if self.turn in {2, 3}:
+                return code_turn(self.turn, "print('verify: H7 is empty - needs formula')")
+            assert self.turn == 4
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "code_interpreter",
+            }
+            assert [tool["name"] for tool in payload["tools"]] == ["code_interpreter"]
+            return code_turn(
+                self.turn,
+                "import sheet_harness\n"
+                "wb = sheet_harness.load_workbook()\n"
+                "wb.active['A2'] = 'edited'\n"
+                "sheet_harness.save_workbook(wb)\n",
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", FinalRecoveryClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "final-recovery-run")
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    result = SpreadsheetAgent(
+        config,
+        FinalRecoveryTools(session),  # type: ignore[arg-type]
+        forced_tool_prefix=("code_interpreter",),
+        required_tool_termination=True,
+        require_workbook_change=True,
+        force_code_on_stalled_edit=True,
+        max_turns=4,
+    ).run("Edit the workbook")
+
+    assert result.observed_terminal_tool == "final_recovery_code_interpreter"
+    assert result.turns == 4
+    assert result.final_text.startswith("Workbook edited and saved")
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    forced = [
+        event
+        for event in events
+        if event["event"] == "agent.recent_tool_failure_recovery_forced"
+    ]
+    assert forced[0]["payload"]["turn_found_incomplete_edit"] is True
+
+
 def test_required_tool_termination_forces_submit_only_on_final_turn(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:

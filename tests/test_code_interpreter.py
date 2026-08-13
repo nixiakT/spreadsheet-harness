@@ -259,6 +259,37 @@ wb.close()
     assert "'translated_range': '$E6:H6'" in result["stdout"]
 
 
+def test_code_interpreter_helper_expands_endpoint_and_warns_on_relative_drift(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "fill-helper-endpoint-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+ws["H6"] = "=SUM(E6:G6)"
+print(sheet_harness.fill_formula(ws, "H6", "J6"))
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert result["workbook_changed"] is True
+    assert "'range': 'H6:J6'" in result["stdout"]
+    assert "'target_range_expanded_from_endpoint': True" in result["stdout"]
+    assert "'translated_range': 'F6:H6'" in result["stdout"]
+
+
 def test_code_interpreter_rejects_compressed_code_placeholder(
     sample_workbook: Path,
     tmp_path: Path,

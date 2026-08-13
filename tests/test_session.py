@@ -91,6 +91,45 @@ def test_fill_formula_reports_sample_formulas_and_drifting_ranges(
     assert "$E6:$G6" in result["warnings"][0]["message"]
 
 
+def test_fill_formula_warns_on_relative_horizontal_range_drift(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+
+    session.write_range("Sales", "H6", [["=SUM(E6:G6)"]])
+    result = session.fill_formula("Sales", "H6", "H6:J6")
+
+    assert result["sample_formulas"] == [
+        {"cell": "H6", "formula": "=SUM(E6:G6)"},
+        {"cell": "I6", "formula": "=SUM(F6:H6)"},
+        {"cell": "J6", "formula": "=SUM(G6:I6)"},
+    ]
+    assert result["warnings"][0]["source_range"] == "E6:G6"
+    assert result["warnings"][0]["examples"][0] == {
+        "cell": "I6",
+        "translated_range": "F6:H6",
+    }
+
+
+def test_fill_formula_expands_single_target_cell_to_source_to_endpoint(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+
+    session.write_range("Sales", "H6", [["=SUM($E6:$G6)"]])
+    result = session.fill_formula("Sales", "H6", "J6")
+
+    assert result["range"] == "H6:J6"
+    assert result["requested_range"] == "J6"
+    assert result["target_range_expanded_from_endpoint"] is True
+    assert result["cells_filled"] == 3
+    assert session.inspect_range("Sales", "H6:J6")["matrix"][0] == [
+        "=SUM($E6:$G6)",
+        "=SUM($E6:$G6)",
+        "=SUM($E6:$G6)",
+    ]
+
+
 def test_fill_formula_does_not_warn_when_range_endpoints_are_anchored(
     sample_workbook: Path, tmp_path: Path
 ) -> None:

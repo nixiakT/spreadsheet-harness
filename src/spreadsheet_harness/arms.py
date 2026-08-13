@@ -201,6 +201,7 @@ _CODE_INTERPRETER_RUNTIME_GUIDE = """The code_interpreter preloads a helper modu
   `sheet_harness.defined_name_refs(wb)` for structure.
 - `sheet_harness.copy_cell_format(source, target)` when extending adjacent cells.
 - `sheet_harness.fill_formula(ws, "H6", "H6:P9")` for Excel-style relative formula fill.
+  A single-cell target such as `"P6"` is treated as the endpoint `"H6:P6"`.
   Print/check its returned `warnings` and `sample_formulas`; if a fixed range drifts during
   a horizontal/vertical fill, lock both endpoints and refill before saving.
 Avoid version-fragile openpyxl internals such as `defined_names.definedName`,

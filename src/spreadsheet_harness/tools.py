@@ -282,7 +282,8 @@ class SpreadsheetToolRegistry:
                 (
                     "Translate one source formula into every cell of a target range, preserving "
                     "relative references. Returns sample translated formulas and warnings for "
-                    "ranges that may drift during fill."
+                    "ranges that may drift during fill. If target_range is a single cell "
+                    "different from source_cell, it is treated as the endpoint of source_cell:target_range."
                 ),
                 _object_schema(
                     {"sheet": sheet, "source_cell": {"type": "string"}, "target_range": a1},

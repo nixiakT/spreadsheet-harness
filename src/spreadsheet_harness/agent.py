@@ -136,6 +136,7 @@ _SAFE_RESPONSE_HEADERS = frozenset(
 )
 TERMINAL_TOOL_NAME = "submit_result"
 ASSISTANT_TEXT_TERMINAL = "assistant_text"
+FINAL_RECOVERY_TERMINAL = "final_recovery_code_interpreter"
 _TERMINAL_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
     "name": TERMINAL_TOOL_NAME,
@@ -2038,6 +2039,27 @@ def _code_appears_to_edit_workbook(code: str) -> bool:
     return any(marker.lower().replace(" ", "") in normalized for marker in _CODE_EDIT_WRITE_MARKERS)
 
 
+def _code_output_suggests_incomplete_edit(outcome_data: dict[str, Any]) -> bool:
+    text = "\n".join(
+        str(outcome_data.get(key, ""))
+        for key in ("stdout", "stderr", "error")
+        if outcome_data.get(key)
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "did not persist",
+            "not filled",
+            "still empty",
+            "still none",
+            "needs formula",
+            "needs to be filled",
+            "missing formula",
+            "missing value",
+        )
+    )
+
+
 class SpreadsheetAgent:
     def __init__(
         self,
@@ -2799,6 +2821,9 @@ class SpreadsheetAgent:
                 pending_tool_results: list[tuple[str, str, Any, dict[str, Any]]] = []
                 pending_image_items: list[dict[str, Any]] = []
                 next_image_bytes = 0
+                turn_had_failed_tool = False
+                turn_changed_workbook = False
+                turn_found_incomplete_edit = False
                 for function_call, call_id in function_calls:
                     ensure_within_deadline()
                     calls += 1
@@ -2843,6 +2868,19 @@ class SpreadsheetAgent:
                             outcome = self.tools.invoke(name, arguments)
                             outcome_data = outcome.data
                         summary_arguments = arguments
+                    if outcome_data.get("ok") is False:
+                        turn_had_failed_tool = True
+                    if outcome_data.get("workbook_changed") is True:
+                        turn_changed_workbook = True
+                    if (
+                        name == "code_interpreter"
+                        and outcome_data.get("workbook_changed") is False
+                        and turn_number >= self.max_turns - 3
+                    ):
+                        turn_found_incomplete_edit = (
+                            turn_found_incomplete_edit
+                            or _code_output_suggests_incomplete_edit(outcome_data)
+                        )
                     next_recent_items.append(
                         _replayed_function_call(
                             function_call,
@@ -2980,8 +3018,50 @@ class SpreadsheetAgent:
                     self.force_code_on_stalled_edit
                     and "code_interpreter" in tool_names
                     and turn_number >= _WORKBOOK_CHANGE_RECOVERY_AFTER_TURNS
-                    and turn_number < self.max_turns - 1
+                    and turn_number < self.max_turns
                 )
+                if (
+                    self.required_tool_termination
+                    and self.force_code_on_stalled_edit
+                    and turn_number == self.max_turns
+                    and turn_changed_workbook
+                    and changed_after_tools
+                ):
+                    result = AgentResult(
+                        final_text=(
+                            "Workbook edited and saved during the final recovery "
+                            "code_interpreter call."
+                        ),
+                        turns=turn_number,
+                        tool_calls=calls,
+                        usage=total_usage,
+                        response_id=last_id,
+                        request_timings=request_timings,
+                        context_policy=dict(CONTEXT_POLICY),
+                        budget=(
+                            self.budget.to_dict() if self.budget is not None else None
+                        ),
+                        stage=self.stage,
+                        tool_trace=tool_trace,
+                        first_tool_choice=self.first_tool_choice,
+                        observed_first_tool=observed_first_tool,
+                        forced_tool_prefix=list(self.forced_tool_prefix),
+                        observed_forced_tool_prefix=observed_forced_tool_prefix,
+                        post_prefix_tool_choice="auto",
+                        terminal_tool=TERMINAL_TOOL_NAME,
+                        observed_terminal_tool=FINAL_RECOVERY_TERMINAL,
+                    )
+                    session.recorder.record(
+                        "agent.final_recovery_completed",
+                        {
+                            "stage": self.stage,
+                            "turn": turn_number,
+                            "terminal_tool": TERMINAL_TOOL_NAME,
+                            "observed_terminal_tool": FINAL_RECOVERY_TERMINAL,
+                        },
+                    )
+                    session.recorder.record("agent.completed", result.to_dict())
+                    return result
                 if (
                     self.require_workbook_change
                     and was_stalled_edit_recovery_active
@@ -3013,6 +3093,41 @@ class SpreadsheetAgent:
                             "turn": turn_number,
                             "tool_calls": calls,
                             "initial_workbook_sha256": initial_workbook_sha256,
+                        },
+                    )
+                if (
+                    self.require_workbook_change
+                    and not stalled_edit_recovery_active
+                    and can_recover_with_code
+                    and (turn_had_failed_tool or turn_found_incomplete_edit)
+                ):
+                    stalled_edit_recovery_active = True
+                    next_recent_items.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "The latest tool call failed or did not save workbook "
+                                        "changes near the end of the run. The next response is "
+                                        "restricted to code_interpreter. Send one complete script "
+                                        "that directly performs the smallest correction, saves "
+                                        "SHEET_WORKBOOK, reopens it, and prints a compact "
+                                        "verification of the target range."
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    session.recorder.record(
+                        "agent.recent_tool_failure_recovery_forced",
+                        {
+                            "stage": self.stage,
+                            "turn": turn_number,
+                            "tool_calls": calls,
+                            "turn_had_failed_tool": turn_had_failed_tool,
+                            "turn_found_incomplete_edit": turn_found_incomplete_edit,
                         },
                     )
                 if (
