@@ -76,9 +76,21 @@ _RAW_TOOL_OUTPUT_MAX_CHARS = 24_000
 _RAW_TOOL_TURN_MAX_CHARS = 24_000
 _IMAGE_TURN_MAX_BYTES = 20 * 1024 * 1024
 _WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 3
-_WORKBOOK_CHANGE_RECOVERY_AFTER_TURNS = 3
 _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS = 512
 _FINAL_TOOL_MAX_OUTPUT_TOKENS = 1_024
+_DIRECT_WORKBOOK_MUTATION_TOOLS = frozenset(
+    {
+        "clear_range",
+        "delete_columns",
+        "delete_rows",
+        "fill_formula",
+        "format_range",
+        "manage_sheet",
+        "recalculate_and_read",
+        "undo_last",
+        "write_range",
+    }
+)
 _CODE_EDIT_WRITE_MARKERS = (
     ".save(",
     ".value =",
@@ -2060,6 +2072,24 @@ def _code_output_suggests_incomplete_edit(outcome_data: dict[str, Any]) -> bool:
     )
 
 
+def _failed_tool_requires_edit_recovery(
+    name: str,
+    arguments: dict[str, Any] | None,
+    outcome_data: dict[str, Any],
+) -> bool:
+    if outcome_data.get("workbook_rolled_back") is True:
+        return True
+    if outcome_data.get("ok") is not False:
+        return False
+    if name in _DIRECT_WORKBOOK_MUTATION_TOOLS:
+        return True
+    return bool(
+        name == "code_interpreter"
+        and arguments is not None
+        and _code_appears_to_edit_workbook(str(arguments.get("code", "")))
+    )
+
+
 class SpreadsheetAgent:
     def __init__(
         self,
@@ -2595,6 +2625,42 @@ class SpreadsheetAgent:
                         raise AgentRoutingError(
                             f"Terminal tool {TERMINAL_TOOL_NAME!r} requires a non-empty result"
                         )
+                    if stalled_edit_recovery_active:
+                        if turn_number < self.max_turns:
+                            recent_items = list(turn.output)
+                            recent_items.append(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": (
+                                                "The latest workbook tool failed or rolled back, "
+                                                "so submission is blocked until a successful "
+                                                "correction. Continue with one complete "
+                                                "code_interpreter edit that saves SHEET_WORKBOOK "
+                                                "and verifies the corrected range."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            )
+                            recent_summaries = []
+                            recent_raw_tool_output_chars = 0
+                            recent_image_bytes = 0
+                            recent_image_count = 0
+                            session.recorder.record(
+                                "agent.failed_edit_terminal_reprompted",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "terminal_tool": TERMINAL_TOOL_NAME,
+                                },
+                            )
+                            continue
+                        raise AgentRoutingError(
+                            "Editing stage submitted after a failed or rolled-back workbook tool"
+                        )
                     if self.require_workbook_change and not refresh_workbook_changed():
                         if turn_number < self.max_turns:
                             recent_items = list(turn.output)
@@ -2759,6 +2825,38 @@ class SpreadsheetAgent:
                             raise AgentRoutingError(
                                 "Editing stage returned text before changing the managed workbook"
                             )
+                        if stalled_edit_recovery_active:
+                            if turn_number < self.max_turns:
+                                recent_items = list(turn.output)
+                                recent_items.append(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "input_text",
+                                                "text": (
+                                                    "The latest workbook tool failed or rolled "
+                                                    "back, so a text answer cannot finish this "
+                                                    "editing stage. Correct the workbook with "
+                                                    "code_interpreter, save it, and verify the "
+                                                    "corrected range."
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                )
+                                recent_summaries = []
+                                recent_raw_tool_output_chars = 0
+                                recent_image_bytes = 0
+                                recent_image_count = 0
+                                session.recorder.record(
+                                    "agent.failed_edit_text_reprompted",
+                                    {"stage": self.stage, "turn": turn_number},
+                                )
+                                continue
+                            raise AgentRoutingError(
+                                "Editing stage returned text after a failed workbook tool"
+                            )
                         result = AgentResult(
                             final_text=final_text,
                             turns=turn_number,
@@ -2821,8 +2919,13 @@ class SpreadsheetAgent:
                 pending_tool_results: list[tuple[str, str, Any, dict[str, Any]]] = []
                 pending_image_items: list[dict[str, Any]] = []
                 next_image_bytes = 0
-                turn_had_failed_tool = False
-                turn_changed_workbook = False
+                turn_workbook_sha256_before = (
+                    _safe_file_sha256(session.workbook_path)
+                    if self.require_workbook_change
+                    else None
+                )
+                turn_had_failed_edit = False
+                turn_successful_code_change = False
                 turn_found_incomplete_edit = False
                 for function_call, call_id in function_calls:
                     ensure_within_deadline()
@@ -2868,12 +2971,18 @@ class SpreadsheetAgent:
                             outcome = self.tools.invoke(name, arguments)
                             outcome_data = outcome.data
                         summary_arguments = arguments
-                    if outcome_data.get("ok") is False:
-                        turn_had_failed_tool = True
+                    if _failed_tool_requires_edit_recovery(
+                        name,
+                        parsed_arguments,
+                        outcome_data,
+                    ):
+                        turn_had_failed_edit = True
                     if outcome_data.get("workbook_changed") is True:
-                        turn_changed_workbook = True
+                        if name == "code_interpreter" and outcome_data.get("ok") is True:
+                            turn_successful_code_change = True
                     if (
                         name == "code_interpreter"
+                        and outcome_data.get("ok") is True
                         and outcome_data.get("workbook_changed") is False
                         and turn_number >= self.max_turns - 3
                     ):
@@ -3012,20 +3121,46 @@ class SpreadsheetAgent:
                     )
                 next_recent_items.extend(pending_image_items)
                 was_stalled_edit_recovery_active = stalled_edit_recovery_active
-                changed_after_tools = refresh_workbook_changed()
-                stalled_edit_recovery_active = False
+                if self.require_workbook_change:
+                    turn_workbook_sha256_after = _safe_file_sha256(session.workbook_path)
+                    turn_actual_workbook_change = bool(
+                        turn_workbook_sha256_before is not None
+                        and turn_workbook_sha256_after is not None
+                        and turn_workbook_sha256_before != turn_workbook_sha256_after
+                    )
+                    workbook_changed = bool(
+                        initial_workbook_sha256 is not None
+                        and turn_workbook_sha256_after is not None
+                        and initial_workbook_sha256 != turn_workbook_sha256_after
+                    )
+                    changed_after_tools = workbook_changed
+                else:
+                    turn_workbook_sha256_after = None
+                    turn_actual_workbook_change = False
+                    changed_after_tools = True
                 can_recover_with_code = (
                     self.force_code_on_stalled_edit
                     and "code_interpreter" in tool_names
-                    and turn_number >= _WORKBOOK_CHANGE_RECOVERY_AFTER_TURNS
                     and turn_number < self.max_turns
+                )
+                recovery_succeeded = (
+                    turn_successful_code_change
+                    and turn_actual_workbook_change
+                    and changed_after_tools
+                    and not turn_had_failed_edit
+                    and not turn_found_incomplete_edit
+                )
+                stalled_edit_recovery_active = bool(
+                    self.require_workbook_change
+                    and was_stalled_edit_recovery_active
+                    and not recovery_succeeded
                 )
                 if (
                     self.required_tool_termination
                     and self.force_code_on_stalled_edit
                     and turn_number == self.max_turns
-                    and turn_changed_workbook
-                    and changed_after_tools
+                    and was_stalled_edit_recovery_active
+                    and recovery_succeeded
                 ):
                     result = AgentResult(
                         final_text=(
@@ -3064,11 +3199,9 @@ class SpreadsheetAgent:
                     return result
                 if (
                     self.require_workbook_change
-                    and was_stalled_edit_recovery_active
-                    and not changed_after_tools
+                    and stalled_edit_recovery_active
                     and can_recover_with_code
                 ):
-                    stalled_edit_recovery_active = True
                     next_recent_items.append(
                         {
                             "role": "user",
@@ -3099,7 +3232,7 @@ class SpreadsheetAgent:
                     self.require_workbook_change
                     and not stalled_edit_recovery_active
                     and can_recover_with_code
-                    and (turn_had_failed_tool or turn_found_incomplete_edit)
+                    and (turn_had_failed_edit or turn_found_incomplete_edit)
                 ):
                     stalled_edit_recovery_active = True
                     next_recent_items.append(
@@ -3126,9 +3259,32 @@ class SpreadsheetAgent:
                             "stage": self.stage,
                             "turn": turn_number,
                             "tool_calls": calls,
-                            "turn_had_failed_tool": turn_had_failed_tool,
+                            "turn_had_failed_edit": turn_had_failed_edit,
                             "turn_found_incomplete_edit": turn_found_incomplete_edit,
                         },
+                    )
+                if (
+                    self.require_workbook_change
+                    and self.force_code_on_stalled_edit
+                    and "code_interpreter" in tool_names
+                    and turn_number == self.max_turns
+                    and (
+                        was_stalled_edit_recovery_active
+                        or turn_had_failed_edit
+                        or turn_found_incomplete_edit
+                    )
+                ):
+                    session.recorder.record(
+                        "agent.routing_failed",
+                        {
+                            "stage": self.stage,
+                            "turn": turn_number,
+                            "reason": "failed_workbook_tool_on_final_turn",
+                        },
+                    )
+                    raise AgentRoutingError(
+                        "Final workbook tool failed or rolled back; no successful correction "
+                        "remained before the turn limit"
                     )
                 if (
                     self.require_workbook_change

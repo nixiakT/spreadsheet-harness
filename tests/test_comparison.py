@@ -106,9 +106,13 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
 
     assert manifest["task_count"] == 2
     assert manifest["schema_version"] == 10
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v19"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
+    )
+    assert manifest["configuration"]["failed_edit_recovery_policy"] == (
+        "force-successful-code-edit-before-terminal-v1"
     )
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
