@@ -216,11 +216,15 @@ from openpyxl import load_workbook
 
 wb = sheet_harness.load_workbook()
 ws = wb["Sales"]
-print(sheet_harness.workbook_overview(wb)[0]["name"])
+overview = sheet_harness.workbook_overview(wb)
+assert isinstance(overview, list)
+assert all(isinstance(item, dict) for item in overview)
+print(overview[0]["name"])
 print(sheet_harness.table_refs(ws))
 print(sheet_harness.defined_name_refs(wb))
 ws["E1"] = "helper wrote"
-sheet_harness.save_workbook(wb)
+saved_path = sheet_harness.save_workbook(wb)
+assert saved_path == sheet_harness.workbook_path()
 wb.close()
 """
     )
@@ -229,6 +233,89 @@ wb.close()
     assert result["workbook_changed"] is True
     assert result["helper_module"] == "sheet_harness.py"
     assert "Sales" in result["stdout"]
+
+
+def test_code_interpreter_openpyxl_compat_shim_exposes_read_only_formula_and_merge_aliases(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "compat-alias-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+assert ws.merged_ranges is ws.merged_cells.ranges
+assert sorted(str(item) for item in ws.merged_ranges) == ["A5:B5"]
+assert ws["D2"].formula == "=B2*C2"
+assert ws["A2"].formula is None
+
+for owner, attribute, replacement in (
+    (ws, "merged_ranges", ()),
+    (ws["D2"], "formula", "=1+1"),
+):
+    try:
+        setattr(owner, attribute, replacement)
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError(f"{attribute} compatibility alias must be read-only")
+
+print("compat aliases ok")
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert result["workbook_changed"] is False
+    assert "compat aliases ok" in result["stdout"]
+
+
+def test_code_interpreter_reports_failed_managed_save_attempt(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "failed-save-signal-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+wb = sheet_harness.load_workbook()
+wb.save = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("save failed"))
+sheet_harness.save_workbook(wb)
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert result["managed_mutation_attempted"] is True
+
+
+def test_code_interpreter_failed_inspection_has_no_mutation_signal(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "failed-inspection-signal-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run("raise RuntimeError('inspection failed')")
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert result["managed_mutation_attempted"] is False
 
 
 def test_code_interpreter_starts_each_call_in_a_fresh_process(

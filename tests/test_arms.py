@@ -333,6 +333,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     assert bare_call["skills"] is None
     assert all(call["skills"] is None for call in paper_calls)
     assert ours_call["skills"] is skills
+    assert paper_calls[-1]["force_code_on_stalled_edit"] is True
     assert bare_call["forced_tool_prefix"] == (
         "code_interpreter",
         "code_interpreter",
@@ -343,7 +344,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     )
     assert bare_call["required_tool_termination"] is True
     assert bare_call["require_workbook_change"] is True
-    assert bare_call["force_code_on_stalled_edit"] is False
+    assert bare_call["force_code_on_stalled_edit"] is True
     assert [call["required_tool_termination"] for call in paper_calls] == [
         True,
         True,
@@ -377,6 +378,12 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     for call in (bare_call, paper_calls[-1], ours_call):
         base = call["base_instructions"]
         assert "SHEET_WORKBOOK" in base
+        assert "sheet_harness.load_workbook()" in base
+        assert "sheet_harness.save_workbook(wb)" in base
+        assert "never spell" in base
+        assert "list[dict]" in base
+        assert "cell.formula" in base
+        assert "ws.merged_ranges" in base
         assert "Formula" in base or "formula" in base
         assert "Save" in base or "save" in base
         assert "reopen" in base
@@ -451,6 +458,8 @@ def test_profile_is_bare_plus_deterministic_evidence_and_native_omits_skills(
     assert native_call["tools"].allowed_tools is None
     assert native_call["skills"] is None
     assert native_call["forced_tool_prefix"] == ("list_sheets", "inspect_range")
+    assert profile_call["force_code_on_stalled_edit"] is True
+    assert native_call["force_code_on_stalled_edit"] is True
     assert "<deterministic_workbook_profile_json>" not in native_call["prompt"]
     assert native.arm == "native"  # type: ignore[attr-defined]
 

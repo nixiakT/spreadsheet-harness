@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,18 +30,82 @@ from .comparison import (
     CONTINUATION_SOURCE_FILENAME,
     INFLIGHT_FILENAME,
     INTERRUPTED_SEALS_FILENAME,
+    LEGACY_COMPARISON_CONFIGURATION_POLICIES,
+    LEGACY_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    LEGACY_COMPARISON_PROTOCOL_VERSION,
     LEGACY_PILOT_MANIFEST_SHA256,
-    PILOT_SPLIT_MANIFEST_ID,
     RUN_SPEC_COPY_FILENAME,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
     manifest_execution_contract,
     parse_pilot_run_spec_bytes,
+    protected_run_spec_split_ids,
+    resolve_run_spec_anchor,
     verify_pilot_run_spec_contract,
     verify_pilot_run_spec_provenance,
 )
-from .errors import HarnessError
+from .errors import AGENT_EXECUTION_FAILURE_REASONS, HarnessError
+
+
+@dataclass(frozen=True)
+class _AuditProtocolContract:
+    protocol_version: str
+    manifest_schema_version: int
+    configuration_policies: dict[str, Any]
+    require_v24_outcome_fields: bool
+    strict_current_source: bool
+
+
+_V23_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=LEGACY_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=LEGACY_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=LEGACY_COMPARISON_CONFIGURATION_POLICIES,
+    require_v24_outcome_fields=False,
+    strict_current_source=False,
+)
+_V24_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    require_v24_outcome_fields=True,
+    strict_current_source=True,
+)
+
+
+def _select_audit_contract(
+    manifest: dict[str, Any],
+    manifest_sha256: str | None,
+    reasons: list[str],
+) -> _AuditProtocolContract | None:
+    identity = (
+        manifest.get("comparison_protocol_version"),
+        manifest.get("schema_version"),
+    )
+    if identity == (
+        _V24_AUDIT_CONTRACT.protocol_version,
+        _V24_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V24_AUDIT_CONTRACT
+    if identity == (
+        _V23_AUDIT_CONTRACT.protocol_version,
+        _V23_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        if manifest_sha256 != LEGACY_PILOT_MANIFEST_SHA256:
+            _add_reason(reasons, "legacy_comparison_manifest_sha256_mismatch")
+        return _V23_AUDIT_CONTRACT
+    _add_reason(reasons, "comparison_manifest_protocol_schema_unsupported")
+    if manifest.get("schema_version") not in {
+        _V23_AUDIT_CONTRACT.manifest_schema_version,
+        _V24_AUDIT_CONTRACT.manifest_schema_version,
+    }:
+        _add_reason(reasons, "comparison_manifest_schema_mismatch")
+    if manifest.get("comparison_protocol_version") not in {
+        _V23_AUDIT_CONTRACT.protocol_version,
+        _V24_AUDIT_CONTRACT.protocol_version,
+    }:
+        _add_reason(reasons, "comparison_manifest_protocol_mismatch")
+    return None
 
 
 def _add_reason(reasons: list[str], reason: str) -> None:
@@ -101,6 +167,7 @@ def _load_interrupted_seals(
     manifest_sha256: str | None,
     expected_keys: set[tuple[str, str]],
     reasons: list[str],
+    protocol_version: str | None,
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], str | None]:
     """Load exact non-replay seals without treating unknown outcomes as failures."""
 
@@ -161,7 +228,7 @@ def _load_interrupted_seals(
                 or key in by_key
                 or seal.get("schema_version") != 1
                 or seal.get("comparison_protocol_version")
-                != COMPARISON_PROTOCOL_VERSION
+                != protocol_version
                 or seal.get("comparison_manifest_sha256") != manifest_sha256
                 or seal.get("split_provenance") != manifest.get("split_provenance")
                 or seal.get("run_spec_provenance")
@@ -399,12 +466,43 @@ def _valid_git_object_id(value: Any) -> bool:
     )
 
 
+def _current_repository_git_identity() -> dict[str, str] | None:
+    root = Path(__file__).resolve().parents[2]
+
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        if completed.returncode != 0:
+            raise OSError("git identity lookup failed")
+        return completed.stdout.strip()
+
+    try:
+        return {
+            "git_commit": git("rev-parse", "--verify", "HEAD^{commit}"),
+            "git_tree": git("rev-parse", "--verify", "HEAD^{tree}"),
+            "remote_tracking_commit": git(
+                "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"
+            ),
+        }
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _load_continuation_source(
     path: Path,
     *,
     manifest_sha256: str | None,
     required: bool,
     reasons: list[str],
+    strict_current_source: bool = True,
+    expected_repository_source: dict[str, Any] | None = None,
+    bind_repository_source: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         if required:
@@ -471,7 +569,12 @@ def _load_continuation_source(
             or not _valid_source_fingerprint(
                 repository_source.get("source_fingerprint")
             )
-            or repository_source.get("source_fingerprint") != _source_fingerprint()
+            or (
+                strict_current_source
+                and repository_source.get("source_fingerprint")
+                != _source_fingerprint()
+            )
+            or (bind_repository_source and repository_source != expected_repository_source)
         ):
             raise ValueError("invalid continuation source")
         return record, file_sha256
@@ -486,6 +589,7 @@ def _audit_manifest_contract(
     *,
     results_root: Path,
     manifest_sha256: str | None,
+    contract: _AuditProtocolContract | None,
 ) -> None:
     configuration = manifest.get("configuration")
     required_configuration = {
@@ -507,15 +611,16 @@ def _audit_manifest_contract(
         configuration
     ):
         _add_reason(reasons, "comparison_manifest_configuration_invalid")
-    elif any(
+    elif contract is not None and any(
         configuration.get(field) != expected
-        for field, expected in COMPARISON_CONFIGURATION_POLICIES.items()
+        for field, expected in contract.configuration_policies.items()
     ):
         _add_reason(reasons, "comparison_manifest_policy_mismatch")
     if not _valid_source_fingerprint(manifest.get("harness_source")):
         _add_reason(reasons, "comparison_manifest_source_fingerprint_invalid")
     elif (
-        manifest_sha256 != LEGACY_PILOT_MANIFEST_SHA256
+        contract is not None
+        and contract.strict_current_source
         and manifest.get("harness_source") != _source_fingerprint()
     ):
         _add_reason(reasons, "comparison_manifest_source_checkout_mismatch")
@@ -563,10 +668,15 @@ def _audit_manifest_contract(
         ):
             _add_reason(reasons, "comparison_manifest_split_provenance_invalid")
     run_spec_provenance = manifest.get("run_spec_provenance")
+    split_manifest_id = (
+        split_provenance.get("manifest_id")
+        if isinstance(split_provenance, dict)
+        and isinstance(split_provenance.get("manifest_id"), str)
+        else None
+    )
     if (
         isinstance(split_provenance, dict)
-        and split_provenance.get("manifest_id")
-        == "qwen35-trace2skill-local-unattempted-pilot16-v2"
+        and split_manifest_id in protected_run_spec_split_ids()
         and run_spec_provenance is None
     ):
         _add_reason(reasons, "comparison_manifest_run_spec_missing_for_pilot")
@@ -580,6 +690,13 @@ def _audit_manifest_contract(
             document, provenance = parse_pilot_run_spec_bytes(raw_spec)
             if provenance != run_spec_provenance:
                 _add_reason(reasons, "comparison_manifest_run_spec_copy_mismatch")
+            anchor = resolve_run_spec_anchor(provenance)
+            if contract is None or (
+                anchor.comparison_protocol_version != contract.protocol_version
+                or anchor.comparison_manifest_schema_version
+                != contract.manifest_schema_version
+            ):
+                _add_reason(reasons, "comparison_manifest_run_spec_version_mismatch")
             verify_pilot_run_spec_contract(
                 document, manifest_execution_contract(manifest)
             )
@@ -615,7 +732,14 @@ def _audit_manifest_contract(
         if manifest.get("stage_allowed_tools") != _stage_allowed_tools_policy(arms):
             _add_reason(reasons, "comparison_manifest_stage_tools_mismatch")
         if manifest.get("allowed_observed_terminals") != (
-            _allowed_observed_terminals_policy(expected_caps)
+            _allowed_observed_terminals_policy(
+                expected_caps,
+                protocol_version=(
+                    contract.protocol_version
+                    if contract is not None
+                    else COMPARISON_PROTOCOL_VERSION
+                ),
+            )
         ):
             _add_reason(reasons, "comparison_manifest_terminal_policy_mismatch")
 
@@ -805,12 +929,46 @@ def _audit_completed_row(
     root: Path,
     manifest: dict[str, Any],
     manifest_sha256: str | None,
+    contract: _AuditProtocolContract | None,
 ) -> None:
     reasons: list[str] = record["reasons"]
     _audit_row_contract(record, row, task, arm, manifest, manifest_sha256)
     if row.get("status") != "completed":
         _add_reason(reasons, "status_not_completed")
         return
+    require_v24_fields = bool(contract and contract.require_v24_outcome_fields)
+    outcome_kind = row.get("outcome_kind") if require_v24_fields else "scored"
+    model_execution_failure = outcome_kind == "model_execution_failure"
+    record["outcome_kind"] = outcome_kind
+    record["error_category"] = row.get("error_category")
+    record["model_failure_reason"] = row.get("model_failure_reason")
+    record["error_type"] = row.get("error_type")
+    record["error"] = row.get("error")
+    if require_v24_fields and outcome_kind not in {"scored", "model_execution_failure"}:
+        _add_reason(reasons, "outcome_kind_invalid")
+    if model_execution_failure:
+        if row.get("passed") is not False:
+            _add_reason(reasons, "model_execution_failure_not_failed")
+        if row.get("error_category") != "model_execution_failure":
+            _add_reason(reasons, "model_execution_failure_category_invalid")
+        if row.get("model_failure_reason") not in AGENT_EXECUTION_FAILURE_REASONS:
+            _add_reason(reasons, "model_execution_failure_reason_invalid")
+        if row.get("error_type") != "AgentExecutionFailure":
+            _add_reason(reasons, "model_execution_failure_type_invalid")
+        if not isinstance(row.get("error"), str) or not row["error"]:
+            _add_reason(reasons, "model_execution_failure_error_missing")
+        if row.get("error_retryable") is not False:
+            _add_reason(reasons, "model_execution_failure_retryable_invalid")
+    elif require_v24_fields and any(
+        field in row
+        for field in (
+            "model_failure_reason",
+            "error_category",
+            "error_type",
+            "error_retryable",
+        )
+    ):
+        _add_reason(reasons, "scored_outcome_has_failure_metadata")
     _audit_completed_agent(record, row, arm, manifest)
 
     run_dir = _absolute_path(row.get("run_dir"), base=root)
@@ -896,11 +1054,17 @@ def _audit_completed_row(
         return
     fresh_dict = fresh.to_dict()
     record["fresh_comparison"] = fresh_dict
+    if require_v24_fields and row.get("artifact_score_passed") is not fresh.passed:
+        _add_reason(reasons, "stored_artifact_score_passed_mismatch")
     stored_passed = row.get("passed")
     if not isinstance(stored_passed, bool):
         _add_reason(reasons, "stored_passed_not_boolean")
+    elif model_execution_failure:
+        record["outcome_passed"] = False
     elif stored_passed != fresh.passed:
         _add_reason(reasons, "stored_passed_mismatch")
+    else:
+        record["outcome_passed"] = stored_passed
     if row.get("comparison") != fresh_dict:
         _add_reason(reasons, "stored_comparison_mismatch")
 
@@ -935,15 +1099,13 @@ def audit_comparison(
         manifest_sha256 = _file_sha256(manifest_path)
     except OSError:
         manifest_sha256 = None
-    if manifest.get("schema_version") != COMPARISON_MANIFEST_SCHEMA_VERSION:
-        _add_reason(reasons, "comparison_manifest_schema_mismatch")
-    if manifest.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION:
-        _add_reason(reasons, "comparison_manifest_protocol_mismatch")
+    contract = _select_audit_contract(manifest, manifest_sha256, reasons)
     _audit_manifest_contract(
         manifest,
         reasons,
         results_root=root,
         manifest_sha256=manifest_sha256,
+        contract=contract,
     )
     if (root / INFLIGHT_FILENAME).exists():
         _add_reason(reasons, "ambiguous_inflight_arm_task")
@@ -972,15 +1134,41 @@ def audit_comparison(
         _add_reason(reasons, "manifest_arms_mismatch")
 
     split_provenance = manifest.get("split_provenance")
-    pilot_run = (
-        isinstance(split_provenance, dict)
-        and split_provenance.get("manifest_id") == PILOT_SPLIT_MANIFEST_ID
+    raw_split_manifest_id = (
+        split_provenance.get("manifest_id")
+        if isinstance(split_provenance, dict)
+        else None
     )
+    registered_run = isinstance(raw_split_manifest_id, str) and (
+        raw_split_manifest_id in protected_run_spec_split_ids()
+    )
+    strict_registered_source = bool(
+        registered_run and contract is not None and contract.strict_current_source
+    )
+    manifest_repository_source = manifest.get("repository_source")
+    if strict_registered_source:
+        current_identity = _current_repository_git_identity()
+        if not isinstance(manifest_repository_source, dict):
+            _add_reason(reasons, "comparison_manifest_repository_source_invalid")
+        elif current_identity is None:
+            _add_reason(reasons, "current_repository_git_identity_unavailable")
+        elif any(
+            manifest_repository_source.get(field) != value
+            for field, value in current_identity.items()
+        ):
+            _add_reason(reasons, "comparison_manifest_repository_checkout_mismatch")
     continuation_source, continuation_source_file_sha256 = _load_continuation_source(
         root / CONTINUATION_SOURCE_FILENAME,
         manifest_sha256=manifest_sha256,
-        required=pilot_run,
+        required=registered_run,
         reasons=reasons,
+        strict_current_source=bool(contract is None or contract.strict_current_source),
+        expected_repository_source=manifest_repository_source,
+        bind_repository_source=bool(
+            contract is not None
+            and contract.strict_current_source
+            and (registered_run or manifest_repository_source is not None)
+        ),
     )
 
     if not root.is_dir():
@@ -1000,6 +1188,7 @@ def audit_comparison(
         manifest_sha256=manifest_sha256,
         expected_keys=expected_keys,
         reasons=reasons,
+        protocol_version=contract.protocol_version if contract is not None else None,
     )
     if (
         not results_path.exists()
@@ -1011,7 +1200,10 @@ def audit_comparison(
     for key in interrupted_keys:
         _add_reason(reasons, f"interrupted_unknown_outcome:{key}")
     for row_number, row in enumerate(raw_rows, start=1):
-        if row.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION:
+        if (
+            contract is None
+            or row.get("comparison_protocol_version") != contract.protocol_version
+        ):
             _add_reason(reasons, f"result_protocol_mismatch:{row_number}")
         if row.get("task_id") is None or row.get("arm") is None:
             _add_reason(reasons, f"result_identity_missing:{row_number}")
@@ -1068,6 +1260,7 @@ def audit_comparison(
                     root,
                     manifest,
                     manifest_sha256,
+                    contract,
                 )
             record["audit_valid"] = not record["reasons"]
             if key not in interrupted_seals:
@@ -1089,12 +1282,12 @@ def audit_comparison(
     )
     study_complete = journal_integrity_valid and not interrupted_seals
     known_passed_rows = sum(
-        row.get("fresh_comparison", {}).get("passed") is True
+        row.get("outcome_passed") is True
         for row in audited_rows
         if row.get("outcome_observed") is True
     )
     known_failed_rows = sum(
-        row.get("fresh_comparison", {}).get("passed") is False
+        row.get("outcome_passed") is False
         for row in audited_rows
         if row.get("outcome_observed") is True
     )
@@ -1127,6 +1320,11 @@ def audit_comparison(
         "interrupted_arm_task_keys": interrupted_keys,
         "known_passed_rows": known_passed_rows,
         "known_failed_rows": known_failed_rows,
+        "known_model_execution_failure_rows": sum(
+            row.get("outcome_kind") == "model_execution_failure"
+            for row in audited_rows
+            if row.get("outcome_observed") is True
+        ),
         "rows": audited_rows,
     }
     if not study_complete:

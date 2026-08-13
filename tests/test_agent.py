@@ -23,7 +23,12 @@ from spreadsheet_harness.agent import (
 )
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
-from spreadsheet_harness.errors import AgentRoutingError, HarnessError, ProviderError
+from spreadsheet_harness.errors import (
+    AgentExecutionFailure,
+    AgentRoutingError,
+    HarnessError,
+    ProviderError,
+)
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
 
@@ -96,7 +101,11 @@ class FakeResponsesClient:
         (
             "code_interpreter",
             {"code": "wb.save(SHEET_WORKBOOK)"},
-            {"ok": False, "workbook_changed": False},
+            {
+                "ok": False,
+                "workbook_changed": False,
+                "managed_mutation_attempted": True,
+            },
             True,
         ),
         (
@@ -202,7 +211,7 @@ def test_agent_rejects_unchanged_workbook_submit(
     tools = SpreadsheetToolRegistry(session, enable_code=False)
     config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
 
-    with pytest.raises(AgentRoutingError, match="before changing"):
+    with pytest.raises(AgentExecutionFailure, match="before changing") as caught:
         SpreadsheetAgent(
             config,
             tools,
@@ -211,6 +220,8 @@ def test_agent_rejects_unchanged_workbook_submit(
             require_workbook_change=True,
             max_turns=2,
         ).run("Edit the workbook")
+    assert caught.value.reason == "workbook_unchanged"
+    assert caught.value.agent_result.turns == 2
 
 
 def test_agent_sanitizes_no_arg_tool_arguments_before_replay(
@@ -837,19 +848,10 @@ def test_agent_forces_code_recovery_after_stalled_edit(
             if self.turn <= 3:
                 return code_turn(self.turn, "print('inspect only')")
             if self.turn == 4:
-                assert payload["tool_choice"] == {
-                    "type": "function",
-                    "name": "code_interpreter",
-                }
-                assert [tool["name"] for tool in payload["tools"]] == [
-                    "code_interpreter"
-                ]
+                assert payload["tool_choice"] == "auto"
                 return code_turn(self.turn, "print('still inspect only')")
             if self.turn == 5:
-                assert payload["tool_choice"] == {
-                    "type": "function",
-                    "name": "code_interpreter",
-                }
+                assert payload["tool_choice"] == "auto"
                 return code_turn(
                     self.turn,
                     "import sheet_harness\n"
@@ -888,8 +890,8 @@ def test_agent_forces_code_recovery_after_stalled_edit(
     ).run("Edit the workbook")
 
     assert result.final_text == "edited and verified"
-    assert result.tool_trace[3] == {"name": "code_interpreter", "ok": False}
-    assert len(tools.invocations) == 4
+    assert result.tool_trace[3] == {"name": "code_interpreter", "ok": True}
+    assert len(tools.invocations) == 5
     assert tools.invocations[-1]["arguments"]["code"].count("save_workbook") == 1
     events = [
         json.loads(line)
@@ -900,7 +902,7 @@ def test_agent_forces_code_recovery_after_stalled_edit(
         for event in events
         if event["event"] == "agent.unchanged_workbook_progress_reminded"
     ]
-    assert reminders[0]["payload"]["edit_recovery_forced_next_turn"] is True
+    assert reminders[0]["payload"]["edit_recovery_guidance_added"] is True
     continued = [
         event
         for event in events
@@ -909,7 +911,7 @@ def test_agent_forces_code_recovery_after_stalled_edit(
     assert continued[0]["payload"]["turn"] == 4
 
 
-def test_agent_allows_final_turn_code_recovery_for_incomplete_edit(
+def test_agent_allows_final_turn_code_recovery_after_actual_rollback(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
     code_schema = {
@@ -929,9 +931,11 @@ def test_agent_allows_final_turn_code_recovery_for_incomplete_edit(
 
         def __init__(self, session: WorkbookSession) -> None:
             self.session = session
+            self.calls = 0
 
         def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
             assert name == "code_interpreter"
+            self.calls += 1
             code = str(arguments.get("code", ""))
             if "sheet_harness.save_workbook" in code:
                 workbook = load_workbook(self.session.workbook_path)
@@ -940,6 +944,15 @@ def test_agent_allows_final_turn_code_recovery_for_incomplete_edit(
                 workbook.save(self.session.workbook_path)
                 workbook.close()
                 return ToolOutcome({"ok": True, "workbook_changed": True})
+            if self.calls == 3:
+                return ToolOutcome(
+                    {
+                        "ok": False,
+                        "workbook_changed": False,
+                        "workbook_rolled_back": True,
+                        "error": "verification failed after an attempted edit",
+                    }
+                )
             return ToolOutcome(
                 {
                     "ok": True,
@@ -986,7 +999,7 @@ def test_agent_allows_final_turn_code_recovery_for_incomplete_edit(
                     "wb.active['A1'] = 'edited'\n"
                     "sheet_harness.save_workbook(wb)\n",
                 )
-            if self.turn in {2, 3}:
+            if self.turn <= 3:
                 return code_turn(self.turn, "print('verify: H7 is empty - needs formula')")
             assert self.turn == 4
             assert payload["tool_choice"] == {
@@ -1028,7 +1041,103 @@ def test_agent_allows_final_turn_code_recovery_for_incomplete_edit(
         for event in events
         if event["event"] == "agent.recent_tool_failure_recovery_forced"
     ]
-    assert forced[0]["payload"]["turn_found_incomplete_edit"] is True
+    assert forced[0]["payload"]["turn_had_failed_edit"] is True
+
+
+def test_agent_keeps_final_turn_for_submit_after_successful_workbook_change(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    code_schema = {
+        "type": "function",
+        "name": "code_interpreter",
+        "description": "run code",
+        "parameters": {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    }
+
+    class ChangedWorkbookTools:
+        schemas = [code_schema]
+
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            assert name == "code_interpreter"
+            assert arguments["code"] == "edit and save"
+            workbook = load_workbook(self.session.workbook_path)
+            workbook.active["A1"] = "edited"
+            workbook.save(self.session.workbook_path)
+            workbook.close()
+            return ToolOutcome({"ok": True, "workbook_changed": True})
+
+    class ChangedWorkbookClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> ChangedWorkbookClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-edit",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-edit",
+                            "name": "code_interpreter",
+                            "arguments": json.dumps({"code": "edit and save"}),
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "submit_result",
+            }
+            assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": json.dumps({"result": "edited and verified"}),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", ChangedWorkbookClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "changed-final-submit-run")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ChangedWorkbookTools(session),  # type: ignore[arg-type]
+        forced_tool_prefix=("code_interpreter",),
+        required_tool_termination=True,
+        require_workbook_change=True,
+        force_code_on_stalled_edit=True,
+        max_turns=2,
+    ).run("Edit the workbook")
+
+    assert result.final_text == "edited and verified"
+    assert result.observed_terminal_tool == "submit_result"
 
 
 def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(
@@ -1120,12 +1229,9 @@ def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(
             if self.turn == 2:
                 return code_turn(2, "save invalid formula text")
             if self.turn == 3:
-                assert payload["tool_choice"] == {
-                    "type": "function",
-                    "name": "code_interpreter",
-                }
-                assert [tool["name"] for tool in payload["tools"]] == [
-                    "code_interpreter"
+                assert payload["tool_choice"] == "auto"
+                assert "code_interpreter" in [
+                    tool["name"] for tool in payload["tools"]
                 ]
                 recovery_input = json.dumps(payload["input"])
                 assert "NameError" in recovery_input
@@ -1138,12 +1244,9 @@ def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(
                 assert "verify the requested change and nearby cells" in recovery_input
                 return code_turn(3, "sheet_harness.save_workbook(wb)")
             if self.turn == 4:
-                assert payload["tool_choice"] == {
-                    "type": "function",
-                    "name": "code_interpreter",
-                }
-                assert [tool["name"] for tool in payload["tools"]] == [
-                    "code_interpreter"
+                assert payload["tool_choice"] == "auto"
+                assert "code_interpreter" in [
+                    tool["name"] for tool in payload["tools"]
                 ]
                 return code_turn(4, "sheet_harness.save_workbook(wb)")
             assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
@@ -1241,6 +1344,8 @@ def test_agent_keeps_recovery_diagnostics_after_empty_and_inspect_only_responses
                         ),
                     }
                 )
+            if self.calls == 2:
+                return ToolOutcome({"ok": True, "workbook_changed": False})
             workbook = load_workbook(self.session.workbook_path)
             workbook.active["A1"] = "recovered"
             workbook.save(self.session.workbook_path)
@@ -1285,7 +1390,7 @@ def test_agent_keeps_recovery_diagnostics_after_empty_and_inspect_only_responses
                 recovery_input = json.dumps(payload["input"])
                 assert "NameError" in recovery_input
                 assert "missing_helper" in recovery_input
-                assert "Every call starts a fresh process" in recovery_input
+                assert "Every code_interpreter call starts a fresh process" in recovery_input
                 assert recovery_input.count("<untrusted_tool_diagnostics>") == 1
                 if self.turn == 3:
                     return code_turn(3, "print('inspect only')")
@@ -1598,12 +1703,9 @@ def test_unchanged_terminal_reprompt_forces_code_recovery(
                     {},
                 )
             if self.turn == 3:
-                assert payload["tool_choice"] == {
-                    "type": "function",
-                    "name": "code_interpreter",
-                }
-                assert [tool["name"] for tool in payload["tools"]] == [
-                    "code_interpreter"
+                assert payload["tool_choice"] == "auto"
+                assert "code_interpreter" in [
+                    tool["name"] for tool in payload["tools"]
                 ]
                 return call(
                     "code_interpreter",
@@ -1952,7 +2054,9 @@ def test_agent_fails_closed_when_final_edit_recovery_does_not_change_workbook(
     session = WorkbookSession.create(sample_workbook, tmp_path / "final-failure-run")
     config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
 
-    with pytest.raises(AgentRoutingError, match="Final workbook tool failed"):
+    with pytest.raises(
+        AgentExecutionFailure, match="Final workbook recovery did not produce"
+    ) as caught:
         SpreadsheetAgent(
             config,
             FinalFailureTools(session),  # type: ignore[arg-type]
@@ -1962,6 +2066,132 @@ def test_agent_fails_closed_when_final_edit_recovery_does_not_change_workbook(
             force_code_on_stalled_edit=True,
             max_turns=3,
         ).run("Edit the workbook")
+    assert caught.value.reason == "edit_recovery_exhausted"
+    assert caught.value.agent_result.turns == 3
+
+
+def test_failed_managed_save_after_prior_change_blocks_submission(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    code_schema = {
+        "type": "function",
+        "name": "code_interpreter",
+        "description": "run code",
+        "parameters": {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    }
+
+    class FailedSaveTools:
+        schemas = [code_schema]
+
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+            self.calls = 0
+
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            self.calls += 1
+            if self.calls == 1:
+                workbook = load_workbook(self.session.workbook_path)
+                workbook.active["A1"] = "partial edit"
+                workbook.save(self.session.workbook_path)
+                workbook.close()
+                return ToolOutcome({"ok": True, "workbook_changed": True})
+            return ToolOutcome(
+                {
+                    "ok": False,
+                    "error": "save helper failed before replacing the managed workbook",
+                    "workbook_changed": False,
+                    "managed_mutation_attempted": True,
+                }
+            )
+
+    class FailedSaveClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> FailedSaveClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn <= 2:
+                return ResponseTurn(
+                    f"response-{self.turn}",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": f"call-{self.turn}",
+                            "name": "code_interpreter",
+                            "arguments": json.dumps(
+                                {"code": "sheet_harness.save_workbook(wb)"}
+                            ),
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            if self.turn == 3:
+                assert payload["tool_choice"] == "auto"
+                return ResponseTurn(
+                    "response-submit",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-submit",
+                            "name": "submit_result",
+                            "arguments": json.dumps({"result": "done"}),
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "code_interpreter",
+            }
+            return ResponseTurn(
+                "response-final-recovery",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-final-recovery",
+                        "name": "code_interpreter",
+                        "arguments": json.dumps(
+                            {"code": "sheet_harness.save_workbook(wb)"}
+                        ),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", FailedSaveClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "failed-save-run")
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            FailedSaveTools(session),  # type: ignore[arg-type]
+            forced_tool_prefix=("code_interpreter", "code_interpreter"),
+            required_tool_termination=True,
+            require_workbook_change=True,
+            force_code_on_stalled_edit=True,
+            max_turns=4,
+        ).run("Edit the workbook")
+
+    assert caught.value.reason == "edit_recovery_exhausted"
+    assert caught.value.agent_result.observed_terminal_tool == (
+        "final_recovery_code_interpreter"
+    )
 
 
 def test_failed_inspection_code_with_incomplete_marker_does_not_force_recovery(

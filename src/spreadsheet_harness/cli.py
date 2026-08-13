@@ -31,6 +31,7 @@ from .benchmark import (
     download_verified,
     load_and_verify_trace2skill_split_manifest,
     load_verified_tasks,
+    require_evaluation_task_authorization,
     summarize_results,
     trace2skill_heldout_manifest,
     trace2skill_split_provenance,
@@ -38,12 +39,13 @@ from .benchmark import (
 from .comparison import (
     AVAILABLE_COMPARISON_ARMS,
     COMPARISON_ARMS,
-    PILOT_RUN_SPEC_FILENAME,
-    PILOT_RUN_SPEC_ID,
+    RUN_SPEC_ANCHORS,
     RUN_SPEC_COPY_FILENAME,
     ComparisonBenchmarkRunner,
     comparison_execution_contract,
     load_pilot_run_spec,
+    protected_run_spec_split_ids,
+    require_launchable_run_spec,
     verify_pilot_run_spec_contract,
 )
 from .config import API_PROTOCOLS, REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
@@ -216,15 +218,21 @@ def _load_pilot_run_spec_from_repository(
     path: str | Path,
 ) -> tuple[dict[str, Any], dict[str, str], bytes]:
     repository_root = _repository_root()
-    expected = _repository_relative_pilot_path(
-        repository_root,
-        f"benchmarks/protocols/{PILOT_RUN_SPEC_FILENAME}",
-        label="run spec",
-    )
+    actual = _lexical_absolute(path)
+    expected_paths = {
+        _repository_relative_pilot_path(
+            repository_root,
+            f"benchmarks/protocols/{anchor.filename}",
+            label="run spec",
+        ): anchor
+        for anchor in RUN_SPEC_ANCHORS
+    }
+    if actual not in expected_paths:
+        raise HarnessError("Run spec path is not a registered repository protocol")
     _require_exact_pilot_cli_path(
-        path, expected, repository_root=repository_root, label="run spec"
+        actual, actual, repository_root=repository_root, label="run spec"
     )
-    return load_pilot_run_spec(expected)
+    return load_pilot_run_spec(actual)
 
 
 def _write_private_bytes(path: Path, content: bytes) -> None:
@@ -523,6 +531,7 @@ def cmd_benchmark_run(args: argparse.Namespace) -> int:
         tasks = tasks[: args.limit]
     if not tasks:
         raise HarnessError("No benchmark tasks selected")
+    require_evaluation_task_authorization(task.task_id for task in tasks)
     output = (
         Path(args.output).expanduser().resolve()
         if args.output
@@ -570,6 +579,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         run_spec_document, run_spec_provenance, run_spec_bytes = (
             _load_pilot_run_spec_from_repository(args.run_spec)
         )
+        require_launchable_run_spec(run_spec_provenance, resume=args.resume)
         pilot_root, pilot_split_path, pilot_output = _pilot_repository_paths(
             args, run_spec_document, output_argument=args.output
         )
@@ -632,6 +642,15 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         tasks = tasks[: args.limit]
     if not tasks:
         raise HarnessError("No comparison tasks selected")
+    require_evaluation_task_authorization(
+        (task.task_id for task in tasks),
+        authorized_manifest_id=(
+            split_provenance.get("manifest_id")
+            if run_spec_document is not None
+            and isinstance(split_provenance, dict)
+            else None
+        ),
+    )
     if config is None:
         config = _provider(args)
     if skills is None:
@@ -654,10 +673,11 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         verify_pilot_run_spec_contract(run_spec_document, actual_contract)
     elif args.resume:
         raise HarnessError("--resume is supported only with --run-spec")
-    elif split_provenance and split_provenance.get("manifest_id") == (
-        "qwen35-trace2skill-local-unattempted-pilot16-v2"
+    elif (
+        split_provenance
+        and split_provenance.get("manifest_id") in protected_run_spec_split_ids()
     ):
-        raise HarnessError(f"The frozen pilot split requires run spec {PILOT_RUN_SPEC_ID}")
+        raise HarnessError("The frozen split requires its registered run spec")
     output = (
         pilot_output
         if args.run_spec
@@ -718,6 +738,10 @@ def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
         )
     run_spec_document, run_spec_provenance, run_spec_bytes = (
         _load_pilot_run_spec_from_repository(args.run_spec)
+    )
+    require_launchable_run_spec(
+        run_spec_provenance,
+        operation="seal interrupted state for",
     )
     root, split_path, output = _pilot_repository_paths(
         args, run_spec_document, output_argument=args.results

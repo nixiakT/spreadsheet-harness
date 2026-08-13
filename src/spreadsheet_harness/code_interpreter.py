@@ -35,6 +35,7 @@ _MAX_SANDBOX_PROCESSES = 64
 _PROBE_LOCK = threading.Lock()
 _PROBE_SUCCESSES: set[tuple[str, ...]] = set()
 _RUNTIME_HELPER_NAME = "sheet_harness.py"
+_MUTATION_MARKER_ENV = "SHEET_MUTATION_MARKER"
 _COMPRESSED_PLACEHOLDER_MARKERS = ("[compressed]", "[truncated]")
 _INVALID_ABSOLUTE_ROW_REFERENCE = re.compile(r"^\$\d+$")
 _FORMULA_TEXT_PREFIX = re.compile(
@@ -114,11 +115,21 @@ def _sheet_harness_install_openpyxl_compat():
             Worksheet._tableparts = property(
                 lambda self: list(getattr(self, "tables", {}).values())
             )
+        if not hasattr(Worksheet, "merged_ranges"):
+            Worksheet.merged_ranges = property(
+                lambda self: self.merged_cells.ranges
+            )
 
         from openpyxl.cell.cell import Cell
         if not hasattr(Cell, "dtype"):
             Cell.dtype = property(
                 lambda self: "formula" if getattr(self, "data_type", None) == "f" else self.data_type
+            )
+        if not hasattr(Cell, "formula"):
+            Cell.formula = property(
+                lambda self: self.value
+                if getattr(self, "data_type", None) == "f"
+                else None
             )
     except Exception as exc:
         import sys
@@ -172,7 +183,15 @@ def workbook_sha256(path: str | Path | None = None) -> str:
     return digest.hexdigest()
 
 
+def _record_managed_mutation_attempt() -> None:
+    marker = os.environ.get("SHEET_MUTATION_MARKER")
+    if marker:
+        Path(marker).touch(exist_ok=True)
+
+
 def load_workbook(path: str | Path | None = None, *, data_only: bool = False, **kwargs: Any):
+    """Load SHEET_WORKBOOK when called without a path."""
+
     target = Path(path) if path is not None else workbook_path()
     kwargs.setdefault("keep_vba", target.suffix.lower() == ".xlsm")
     kwargs.setdefault("keep_links", True)
@@ -230,6 +249,8 @@ def defined_name_refs(workbook: Any | None = None) -> dict[str, str]:
 
 
 def workbook_overview(workbook: Any | None = None) -> list[dict[str, Any]]:
+    """Return one structure dictionary per worksheet, in workbook order."""
+
     workbook, should_close = _load_if_path(workbook)
     overview: list[dict[str, Any]] = []
     try:
@@ -430,7 +451,11 @@ def fill_formula(
 
 
 def save_workbook(workbook: Any, path: str | Path | None = None) -> Path:
+    """Save to SHEET_WORKBOOK when called without a path."""
+
     target = Path(path) if path is not None else workbook_path()
+    if target.resolve() == workbook_path().resolve():
+        _record_managed_mutation_attempt()
     calculation = getattr(workbook, "calculation", None)
     if calculation is not None:
         calculation.fullCalcOnLoad = True
@@ -631,9 +656,14 @@ def _strict_command(
     return command
 
 
-def _environment(workspace: Path, workbook: Path) -> dict[str, str]:
+def _environment(
+    workspace: Path,
+    workbook: Path,
+    *,
+    mutation_marker: Path | None = None,
+) -> dict[str, str]:
     executable_dir = str(Path(sys.executable).absolute().parent)
-    return {
+    environment = {
         "PATH": f"{executable_dir}:/usr/local/bin:/usr/bin:/bin",
         "TMPDIR": "/tmp",
         "LANG": "C.UTF-8",
@@ -648,6 +678,9 @@ def _environment(workspace: Path, workbook: Path) -> dict[str, str]:
         "SHEET_WORKSPACE": str(workspace),
         "SHEET_WORKBOOK": str(workbook),
     }
+    if mutation_marker is not None:
+        environment[_MUTATION_MARKER_ENV] = str(mutation_marker)
+    return environment
 
 
 def _diagnostic(stderr: str, *, secrets: tuple[str, ...] = ()) -> str:
@@ -1225,6 +1258,7 @@ class LocalCodeInterpreter:
         script = self.code_dir / f"snippet_{identifier}.py"
         script.write_text(code, encoding="utf-8")
         launcher = self.code_dir / f".launcher_{identifier}.py"
+        mutation_marker = self.code_dir / f".managed_mutation_{identifier}"
         rollback_snapshot: Path | None = None
         if self.workbook.is_file():
             rollback_snapshot = (
@@ -1264,7 +1298,11 @@ runpy.run_path(
         if self.require_isolation:
             marker = self.code_dir / f".sandbox_started_{identifier}"
         command, sandbox = self._command(script, launcher=launcher, marker=marker)
-        environment = _environment(self.workspace, self.workbook)
+        environment = _environment(
+            self.workspace,
+            self.workbook,
+            mutation_marker=mutation_marker,
+        )
         try:
             completed = self._execute(command, environment=environment, timeout=timeout)
             if self.require_isolation and (marker is None or not marker.is_file()):
@@ -1297,6 +1335,7 @@ runpy.run_path(
             stdout, stdout_truncated = self._bounded_output(completed.stdout)
             stderr, stderr_truncated = self._bounded_output(completed.stderr)
             truncated = stdout_truncated or stderr_truncated
+            managed_mutation_attempted = mutation_marker.is_file()
             after_sha256 = _file_sha256(self.workbook)
             workbook_changed = before_sha256 != after_sha256
             if completed.returncode != 0 and workbook_changed:
@@ -1321,6 +1360,7 @@ runpy.run_path(
                     "workbook_sha256_after": restored_sha256,
                     "workbook_changed": False,
                     "workbook_rolled_back": True,
+                    "managed_mutation_attempted": managed_mutation_attempted,
                     "helper_module": _RUNTIME_HELPER_NAME,
                     "message": (
                         "The failed code transaction was rolled back. Apply one complete edit, "
@@ -1359,6 +1399,7 @@ runpy.run_path(
                         "workbook_sha256_after": restored_sha256,
                         "workbook_changed": False,
                         "workbook_rolled_back": True,
+                        "managed_mutation_attempted": managed_mutation_attempted,
                         "helper_module": _RUNTIME_HELPER_NAME,
                         "message": (
                             "The invalid workbook edit was rolled back. Save a valid workbook "
@@ -1388,6 +1429,7 @@ runpy.run_path(
                         "workbook_sha256_after": restored_sha256,
                         "workbook_changed": False,
                         "workbook_rolled_back": True,
+                        "managed_mutation_attempted": managed_mutation_attempted,
                         "formula_validation": validation,
                         "helper_module": _RUNTIME_HELPER_NAME,
                         "message": (
@@ -1407,6 +1449,7 @@ runpy.run_path(
                 "workbook_sha256_before": before_sha256,
                 "workbook_sha256_after": after_sha256,
                 "workbook_changed": workbook_changed,
+                "managed_mutation_attempted": managed_mutation_attempted,
                 "helper_module": _RUNTIME_HELPER_NAME,
                 "message": (
                     "Workbook changed. If your script already reopened or inspected the exact "
@@ -1455,6 +1498,7 @@ runpy.run_path(
                 "workbook_sha256_after": after_sha256,
                 "workbook_changed": False,
                 "workbook_rolled_back": workbook_changed,
+                "managed_mutation_attempted": mutation_marker.is_file(),
                 "helper_module": _RUNTIME_HELPER_NAME,
             }
         except OSError as exc:
@@ -1471,3 +1515,4 @@ runpy.run_path(
                 marker.unlink(missing_ok=True)
             if rollback_snapshot is not None:
                 rollback_snapshot.unlink(missing_ok=True)
+            mutation_marker.unlink(missing_ok=True)

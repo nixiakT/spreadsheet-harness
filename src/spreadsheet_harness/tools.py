@@ -391,9 +391,12 @@ class SpreadsheetToolRegistry:
                     "code_interpreter",
                     (
                         "Run trusted Python in the task workspace for analysis and direct "
-                        "workbook edits. Use SHEET_WORKBOOK for the current workbook; "
-                        "sheet_harness helper functions and openpyxl compatibility shims are "
-                        "preloaded. Every call starts a fresh Python process: variables, "
+                        "workbook edits. The preloaded sheet_harness.load_workbook() and "
+                        "sheet_harness.save_workbook(wb) no-path calls load and save the managed "
+                        "SHEET_WORKBOOK; never spell or guess its path. "
+                        "sheet_harness.workbook_overview(wb) returns a list of dictionaries, "
+                        "one per worksheet. Openpyxl compatibility shims are also preloaded. "
+                        "Every call starts a fresh Python process: variables, "
                         "imports, and workbook objects do not persist across calls. Make each "
                         "editing or recovery script self-contained: import, load, re-read the "
                         "request and inspected workbook state, edit, save, close, reopen, verify "

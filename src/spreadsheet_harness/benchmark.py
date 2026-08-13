@@ -117,6 +117,72 @@ TRACE2SKILL_RESERVE_TASK_COUNT = 127
 TRACE2SKILL_RESERVE_TASK_IDS_SHA256 = (
     "71c14c013bb98a1fe8d0219a5be4a784fc9aa13dcbce2419d2ec963c7457d6b7"
 )
+TRACE2SKILL_POSTOPT_MANIFEST_ID = "qwen35-trace2skill-local-postopt16-v1"
+TRACE2SKILL_POSTOPT_MANIFEST_FILENAME = f"{TRACE2SKILL_POSTOPT_MANIFEST_ID}.json"
+TRACE2SKILL_POSTOPT_MANIFEST_SHA256 = (
+    "de82b9a5f17aaaf66e112f4d38938abbe9651ceab1a784ba815c82d171569c1b"
+)
+TRACE2SKILL_POSTOPT_SELECTION_SEED = "20260812"
+TRACE2SKILL_POSTOPT_TASK_IDS = (
+    "36191",
+    "37456",
+    "39190",
+    "45944",
+    "50631",
+    "51354",
+    "52050",
+    "52532",
+    "58147",
+    "42902",
+    "43657",
+    "55260",
+    "55421",
+    "55976",
+    "59160",
+    "59358",
+)
+TRACE2SKILL_POSTOPT_TASK_IDS_SHA256 = (
+    "a4a485d5543710352a20be947d3ac3dc251ca8fbaa32b9a0dfe571d0506b6f7a"
+)
+TRACE2SKILL_POSTOPT_REMAINING_TASK_COUNT = 111
+TRACE2SKILL_POSTOPT_REMAINING_TASK_IDS_SHA256 = (
+    "2b62d8104fe5fd65abe4fccea90f392af4fba8479a290b4fa518a9feded38a59"
+)
+TRACE2SKILL_POSTOPT_LAST_INCLUDED_RANK = (
+    "50631",
+    "2542bdd11a794d58e4cc127f40f551b09be67e611a96620be712c5b093d3f8ff",
+)
+TRACE2SKILL_POSTOPT_FIRST_EXCLUDED_RANK = (
+    "43436",
+    "2551c80e876bac09b8ecf694187f37f684af6935594de8e1b2ddca96f5623ba9",
+)
+
+PROTECTED_EVALUATION_COHORTS: dict[str, tuple[str, ...]] = {
+    TRACE2SKILL_PILOT_MANIFEST_ID: TRACE2SKILL_PILOT_TASK_IDS,
+    TRACE2SKILL_POSTOPT_MANIFEST_ID: TRACE2SKILL_POSTOPT_TASK_IDS,
+}
+
+
+def require_evaluation_task_authorization(
+    task_ids: Iterable[str],
+    *,
+    authorized_manifest_id: str | None = None,
+) -> None:
+    """Prevent frozen or quarantined tasks from being sampled outside their run spec."""
+
+    selected = tuple(str(task_id) for task_id in task_ids)
+    protected = {
+        task_id
+        for cohort in PROTECTED_EVALUATION_COHORTS.values()
+        for task_id in cohort
+    }
+    conflicts = sorted(set(selected) & protected)
+    authorized = PROTECTED_EVALUATION_COHORTS.get(str(authorized_manifest_id))
+    if conflicts and (authorized is None or selected != authorized):
+        raise HarnessError(
+            "Protected evaluation task IDs may run only as their exact frozen cohort "
+            "under its launchable registered run spec: " + ", ".join(conflicts)
+        )
 TRACE2SKILL_LOCAL_SCAN_REVISION = "7af635617e8f78de34cd3cdbff9fec7e373f8ba5"
 TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC = "2026-08-13T15:50:24Z"
 TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_FILENAME = (
@@ -739,6 +805,113 @@ def trace2skill_local_unattempted_pilot_manifest(
     }
 
 
+def _trace2skill_postopt_rank_key(task_id: str) -> str:
+    return _text_sha256(f"{TRACE2SKILL_POSTOPT_SELECTION_SEED}:{task_id}")
+
+
+def trace2skill_local_postopt_manifest(
+    dataset_root: str | Path,
+) -> dict[str, Any]:
+    """Build the deterministic post-optimization split outside the old pilot."""
+
+    pool = trace2skill_local_unattempted_manifest(dataset_root)
+    pool_ids = [str(task_id) for task_id in pool["task_ids"]]
+    prior_pilot_ids = list(TRACE2SKILL_PILOT_TASK_IDS)
+    if prior_pilot_ids != [
+        task_id for task_id in pool_ids if task_id in set(prior_pilot_ids)
+    ]:
+        raise ValueError("Frozen prior pilot is not an ordered subset of the local pool")
+    if _ordered_task_ids_sha256(prior_pilot_ids) != TRACE2SKILL_PILOT_TASK_IDS_SHA256:
+        raise ValueError("Frozen prior pilot task anchor hash changed")
+    candidates = [task_id for task_id in pool_ids if task_id not in set(prior_pilot_ids)]
+    if len(candidates) != TRACE2SKILL_RESERVE_TASK_COUNT or (
+        _ordered_task_ids_sha256(candidates) != TRACE2SKILL_RESERVE_TASK_IDS_SHA256
+    ):
+        raise ValueError("Frozen post-optimization candidate reserve changed")
+    ranked = sorted(candidates, key=lambda task_id: (_trace2skill_postopt_rank_key(task_id), task_id))
+    selected_set = set(ranked[: len(TRACE2SKILL_POSTOPT_TASK_IDS)])
+    selected_ids = [task_id for task_id in pool_ids if task_id in selected_set]
+    if tuple(selected_ids) != TRACE2SKILL_POSTOPT_TASK_IDS or (
+        _ordered_task_ids_sha256(selected_ids) != TRACE2SKILL_POSTOPT_TASK_IDS_SHA256
+    ):
+        raise ValueError("Frozen post-optimization selection anchor changed")
+    remaining_ids = [
+        task_id
+        for task_id in pool_ids
+        if task_id not in set(prior_pilot_ids) and task_id not in selected_set
+    ]
+    if len(remaining_ids) != TRACE2SKILL_POSTOPT_REMAINING_TASK_COUNT or (
+        _ordered_task_ids_sha256(remaining_ids)
+        != TRACE2SKILL_POSTOPT_REMAINING_TASK_IDS_SHA256
+    ):
+        raise ValueError("Frozen post-optimization remaining reserve changed")
+    rank_boundary = (
+        (ranked[len(selected_ids) - 1], _trace2skill_postopt_rank_key(ranked[len(selected_ids) - 1])),
+        (ranked[len(selected_ids)], _trace2skill_postopt_rank_key(ranked[len(selected_ids)])),
+    )
+    if rank_boundary != (
+        TRACE2SKILL_POSTOPT_LAST_INCLUDED_RANK,
+        TRACE2SKILL_POSTOPT_FIRST_EXCLUDED_RANK,
+    ):
+        raise ValueError("Frozen post-optimization rank boundary changed")
+    return {
+        "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+        "manifest_id": TRACE2SKILL_POSTOPT_MANIFEST_ID,
+        "dataset": dict(pool["dataset"]),
+        "parent": {
+            "relative_path": TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME,
+            "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256,
+            "task_count": TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT,
+            "task_ids_sha256": TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256,
+        },
+        "prior_development_pilot": {
+            "relative_path": TRACE2SKILL_PILOT_MANIFEST_FILENAME,
+            "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_PILOT_MANIFEST_SHA256,
+            "task_count": len(TRACE2SKILL_PILOT_TASK_IDS),
+            "task_ids_sha256": TRACE2SKILL_PILOT_TASK_IDS_SHA256,
+            "exclusion": "exact_task_id_set_before_ranking",
+        },
+        "derivation": {
+            "operation": "deterministic_hash_ranked_subset_after_exact_exclusion",
+            "purpose": "post_optimization_evaluation",
+            "candidate_ordering": "parent_manifest_order_minus_prior_development_pilot",
+            "rank_key": "sha256_utf8_seed_colon_task_id",
+            "rank_seed": TRACE2SKILL_POSTOPT_SELECTION_SEED,
+            "rank_ordering": "ascending_digest_hex_then_task_id",
+            "selection_count": len(selected_ids),
+            "output_ordering": "parent_manifest_order",
+            "last_included_rank": {
+                "task_id": TRACE2SKILL_POSTOPT_LAST_INCLUDED_RANK[0],
+                "sha256": TRACE2SKILL_POSTOPT_LAST_INCLUDED_RANK[1],
+            },
+            "first_excluded_rank": {
+                "task_id": TRACE2SKILL_POSTOPT_FIRST_EXCLUDED_RANK[0],
+                "sha256": TRACE2SKILL_POSTOPT_FIRST_EXCLUDED_RANK[1],
+            },
+        },
+        "candidate_pool": {
+            "ordering": "parent_manifest_order_minus_prior_development_pilot",
+            "task_count": len(candidates),
+            "task_ids_sha256": _ordered_task_ids_sha256(candidates),
+        },
+        "selection": {
+            "ordering": "parent_manifest_order",
+            "task_count": len(selected_ids),
+            "task_ids_sha256": _ordered_task_ids_sha256(selected_ids),
+        },
+        "remaining_reserve": {
+            "ordering": "parent_manifest_order_minus_prior_pilot_and_selection",
+            "task_count": len(remaining_ids),
+            "task_ids_sha256": _ordered_task_ids_sha256(remaining_ids),
+        },
+        "task_ids": selected_ids,
+        "task_count": len(selected_ids),
+        "task_ids_sha256": _ordered_task_ids_sha256(selected_ids),
+    }
+
+
 def _resolve_derivative_sibling(
     path: Path, expected_filename: str, *, artifact_label: str
 ) -> Path:
@@ -889,6 +1062,13 @@ def _verify_trace2skill_derivative_document(
         expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
         expected = trace2skill_local_unattempted_pilot_manifest(dataset_root)
+    elif manifest_id == TRACE2SKILL_POSTOPT_MANIFEST_ID:
+        expected_parent_filename = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME
+        expected_parent_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
+        expected_parent_schema = TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
+        expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
+        expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
+        expected = trace2skill_local_postopt_manifest(dataset_root)
     else:
         raise ValueError(f"Unsupported derivative split manifest_id: {manifest_id!r}")
     parent_reference = frozen.get("parent")
@@ -906,6 +1086,32 @@ def _verify_trace2skill_derivative_document(
         or parent_report["task_ids_sha256"] != expected_parent_ids_hash
     ):
         raise ValueError("Derivative split parent manifest checksum mismatch or invalid report")
+    if manifest_id == TRACE2SKILL_POSTOPT_MANIFEST_ID:
+        prior_reference = frozen.get("prior_development_pilot")
+        if not isinstance(prior_reference, dict):
+            raise ValueError("Post-optimization split prior pilot reference must be a JSON object")
+        prior_path = prior_reference.get("relative_path")
+        if (
+            prior_path != TRACE2SKILL_PILOT_MANIFEST_FILENAME
+            or Path(str(prior_path)).is_absolute()
+        ):
+            raise ValueError("Post-optimization split prior pilot path is invalid")
+        prior_pilot_path = _resolve_derivative_sibling(
+            path,
+            TRACE2SKILL_PILOT_MANIFEST_FILENAME,
+            artifact_label="prior development pilot",
+        )
+        prior_report = load_and_verify_trace2skill_split_manifest(
+            dataset_root, prior_pilot_path
+        )
+        if (
+            prior_report["manifest_sha256"] != TRACE2SKILL_PILOT_MANIFEST_SHA256
+            or prior_report["schema_version"]
+            != TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
+            or prior_report["usable_tasks"] != len(TRACE2SKILL_PILOT_TASK_IDS)
+            or prior_report["task_ids_sha256"] != TRACE2SKILL_PILOT_TASK_IDS_SHA256
+        ):
+            raise ValueError("Post-optimization split prior pilot sibling is invalid")
     if frozen != expected:
         mismatches = _manifest_mismatch_fields(frozen, expected)
         raise ValueError(
@@ -924,6 +1130,11 @@ def _verify_trace2skill_derivative_document(
         and manifest_hash != TRACE2SKILL_PILOT_MANIFEST_SHA256
     ):
         raise ValueError("Frozen pilot manifest checksum does not match its code anchor")
+    if (
+        manifest_id == TRACE2SKILL_POSTOPT_MANIFEST_ID
+        and manifest_hash != TRACE2SKILL_POSTOPT_MANIFEST_SHA256
+    ):
+        raise ValueError("Frozen post-optimization manifest checksum does not match its code anchor")
     return {
         "valid": True,
         "manifest": str(path),
@@ -989,6 +1200,13 @@ def _trace2skill_split_provenance_anchors() -> dict[str, dict[str, Any]]:
             "manifest_sha256": TRACE2SKILL_PILOT_MANIFEST_SHA256,
             "task_count": len(TRACE2SKILL_PILOT_TASK_IDS),
             "task_ids_sha256": TRACE2SKILL_PILOT_TASK_IDS_SHA256,
+            "dataset_json_sha256": VERIFIED_DATASET_JSON_SHA256,
+        },
+        TRACE2SKILL_POSTOPT_MANIFEST_ID: {
+            "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_POSTOPT_MANIFEST_SHA256,
+            "task_count": len(TRACE2SKILL_POSTOPT_TASK_IDS),
+            "task_ids_sha256": TRACE2SKILL_POSTOPT_TASK_IDS_SHA256,
             "dataset_json_sha256": VERIFIED_DATASET_JSON_SHA256,
         },
     }
@@ -1601,6 +1819,7 @@ class VerifiedBenchmarkRunner:
         task_ids = [task.task_id for task in task_list]
         if len(task_ids) != len(set(task_ids)):
             raise ValueError("Benchmark task IDs must be unique")
+        require_evaluation_task_authorization(task_ids)
         with self._exclusive_lock():
             self.recovered_invalid_rows = _repair_jsonl(self.results_path)
             self._prepare_manifest(task_list)

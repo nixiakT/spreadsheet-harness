@@ -265,6 +265,10 @@ def test_pilot_compare_manifest_preflight_precedes_output_creation(
     )
     monkeypatch.setattr(cli, "verify_pilot_run_spec_contract", lambda *_: None)
     monkeypatch.setattr(cli, "comparison_execution_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "require_launchable_run_spec", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli, "require_evaluation_task_authorization", lambda *_args, **_kwargs: None
+    )
 
     class FrozenSkills:
         def freeze(self) -> FrozenSkills:
@@ -376,7 +380,7 @@ def test_fresh_pilot_output_claim_rolls_back_after_publish_sync_failure(
     assert not list(tmp_path.glob(".pilot.claim-*"))
 
 
-def test_documented_pilot_compare_command_matches_run_spec_contract(
+def test_documented_v24_compare_command_matches_run_spec_contract(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -388,7 +392,7 @@ def test_documented_pilot_compare_command_matches_run_spec_contract(
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     document, _, _ = cli._load_pilot_run_spec_from_repository(
-        "benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json"
+        "benchmarks/protocols/qwen35-trace2skill-local-postopt16-run-spec-v1.json"
     )
     args = cli.build_parser().parse_args(
         [
@@ -397,11 +401,11 @@ def test_documented_pilot_compare_command_matches_run_spec_contract(
             "--dataset",
             "benchmarks/data/spreadsheetbench_verified_400",
             "--split-manifest",
-            "benchmarks/protocols/qwen35-trace2skill-local-unattempted-pilot16-v2.json",
+            "benchmarks/protocols/qwen35-trace2skill-local-postopt16-v1.json",
             "--run-spec",
-            "benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json",
+            "benchmarks/protocols/qwen35-trace2skill-local-postopt16-run-spec-v1.json",
             "--output",
-            "benchmarks/results/qwen36-local-pilot16-v2-bare-ours-v23-seed41",
+            "benchmarks/results/qwen36-local-postopt-eval16-v3-bare-ours-v24-seed41",
             "--api-key-file",
             str(key_file),
             "--arm",
@@ -527,6 +531,7 @@ def test_pilot_seal_calls_public_locked_runner_entrypoint(
     )
     monkeypatch.setattr(cli, "verify_pilot_run_spec_contract", lambda *_: None)
     monkeypatch.setattr(cli, "comparison_execution_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "require_launchable_run_spec", lambda *_args, **_kwargs: None)
 
     class FrozenSkills:
         def freeze(self) -> FrozenSkills:

@@ -146,7 +146,9 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "stage_turn_caps": {"solve": 3},
         "calculation_backend": "not_recalculated",
         "status": "completed",
+        "outcome_kind": "scored",
         "passed": comparison.passed,
+        "artifact_score_passed": comparison.passed,
         "comparison": comparison.to_dict(),
         "agent": {
             "arm": "bare",
@@ -283,6 +285,120 @@ def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
     assert _tree_hashes(tmp_path) == before
 
 
+def test_live_v23_pilot_audit_has_no_version_drift_false_positives() -> None:
+    results = Path(
+        "benchmarks/results/qwen36-local-pilot16-v2-bare-ours-v23-seed41"
+    )
+    dataset = Path("benchmarks/data/spreadsheetbench_verified_400")
+    if not results.is_dir() or not dataset.is_dir():
+        pytest.skip("ignored historical v23 pilot artifacts are not available")
+    manifest = json.loads(
+        (results / "comparison-manifest.json").read_text(encoding="utf-8")
+    )
+    from spreadsheet_harness.benchmark import load_verified_tasks
+
+    tasks_by_id = {task.task_id: task for task in load_verified_tasks(dataset)}
+    summary = audit_comparison(
+        results,
+        [tasks_by_id[task_id] for task_id in manifest["task_ids"]],
+    )
+    forbidden_exact = {
+        "comparison_manifest_schema_mismatch",
+        "comparison_manifest_protocol_mismatch",
+        "comparison_manifest_policy_mismatch",
+        "continuation_source_invalid",
+        "interrupted_arm_task_seals_invalid",
+    }
+    forbidden_fragments = {
+        "result_protocol_mismatch:",
+        "result_continuation_source_without_record:",
+        "outcome_kind_invalid",
+        "stored_artifact_score_passed_mismatch",
+    }
+
+    assert not (set(summary["reasons"]) & forbidden_exact)
+    assert not any(
+        fragment in reason
+        for reason in summary["reasons"]
+        for fragment in forbidden_fragments
+    )
+    assert summary["valid_rows"] == 9
+    assert summary["known_passed_rows"] == 6
+    assert summary["known_failed_rows"] == 3
+
+
+def test_audit_accepts_known_model_execution_failure_as_completed_false(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row.update(
+        {
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "managed workbook remained unchanged",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "workbook_unchanged",
+        }
+    )
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8"
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["study_complete"] is True
+    assert summary["inference_valid"] is True
+    assert summary["known_passed_rows"] == 0
+    assert summary["known_failed_rows"] == 1
+    assert summary["known_model_execution_failure_rows"] == 1
+    assert summary["rows"][0]["outcome_passed"] is False
+    assert summary["rows"][0]["fresh_comparison"]["passed"] is True
+    assert summary["rows"][0]["model_failure_reason"] == "workbook_unchanged"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_reason"),
+    [
+        ("passed", True, "model_execution_failure_not_failed"),
+        ("error_category", "routing_protocol", "model_execution_failure_category_invalid"),
+        ("model_failure_reason", "route_failed", "model_execution_failure_reason_invalid"),
+        ("error_type", "AgentRoutingError", "model_execution_failure_type_invalid"),
+        ("error_retryable", True, "model_execution_failure_retryable_invalid"),
+        ("artifact_score_passed", False, "stored_artifact_score_passed_mismatch"),
+    ],
+)
+def test_audit_rejects_tampered_model_execution_failure_taxonomy(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+    expected_reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row.update(
+        {
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "managed workbook remained unchanged",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "workbook_unchanged",
+        }
+    )
+    row[field] = value
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8"
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, expected_reason)
+
+
 def test_audit_rejects_ambiguous_inflight_marker(tmp_path: Path) -> None:
     results, task, _ = _fixture(tmp_path)
     (results / INFLIGHT_FILENAME).write_text("{}\n", encoding="utf-8")
@@ -341,6 +457,17 @@ def test_audit_allows_missing_empty_journal_when_every_key_is_sealed(
 def test_audit_binds_result_to_exact_continuation_source(tmp_path: Path) -> None:
     results, task, row = _fixture(tmp_path)
     continuation = _continuation_source(results)
+    manifest = json.loads(
+        (results / "comparison-manifest.json").read_text(encoding="utf-8")
+    )
+    manifest["repository_source"] = continuation["repository_source"]
+    (results / "comparison-manifest.json").write_text(
+        json.dumps(manifest) + "\n", encoding="utf-8"
+    )
+    row["comparison_manifest_sha256"] = _sha256(
+        results / "comparison-manifest.json"
+    )
+    continuation = _continuation_source(results)
     _write_continuation_source(results, continuation)
     row["continuation_source"] = continuation
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -352,6 +479,63 @@ def test_audit_binds_result_to_exact_continuation_source(tmp_path: Path) -> None
     assert summary["continuation_source_file_sha256"] == _sha256(
         results / CONTINUATION_SOURCE_FILENAME
     )
+
+
+def test_audit_rejects_manifest_continuation_repository_source_mismatch(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    continuation = _continuation_source(results)
+    manifest["repository_source"] = {
+        **continuation["repository_source"],
+        "git_commit": "3" * 40,
+        "remote_tracking_commit": "3" * 40,
+        "remote_observed_commit": "3" * 40,
+    }
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    continuation = _continuation_source(results)
+    _write_continuation_source(results, continuation)
+    row["continuation_source"] = continuation
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8"
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "continuation_source_invalid" in summary["reasons"]
+
+
+def test_audit_rejects_registered_v24_manifest_not_bound_to_current_git(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["split_provenance"] = {
+        "manifest_id": "qwen35-trace2skill-local-postopt16-v1"
+    }
+    manifest["repository_source"] = _continuation_source(results)[
+        "repository_source"
+    ]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "spreadsheet_harness.audit._current_repository_git_identity",
+        lambda: {
+            "git_commit": "3" * 40,
+            "git_tree": "4" * 40,
+            "remote_tracking_commit": "3" * 40,
+        },
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "comparison_manifest_repository_checkout_mismatch" in summary["reasons"]
 
 
 @pytest.mark.parametrize(
@@ -658,6 +842,12 @@ def test_audit_rejects_symlinked_core_document(
         ("row", "generation", {"temperature": 0.5}, "row_manifest_mismatch:generation"),
         ("row", "stage_turn_caps", {"solve": 99}, "row_manifest_mismatch:stage_turn_caps"),
         ("row", "calculation_backend", "libreoffice", "row_manifest_mismatch:calculation_backend"),
+        (
+            "row",
+            "artifact_score_passed",
+            False,
+            "stored_artifact_score_passed_mismatch",
+        ),
         ("agent", "arm", "ours", "agent_arm_mismatch"),
         ("stage", "observed_forced_tool_prefix", [], "agent_observed_prefix_mismatch:solve"),
         ("stage", "observed_terminal_tool", "unknown", "agent_observed_terminal_invalid:solve"),

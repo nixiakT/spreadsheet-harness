@@ -1,0 +1,69 @@
+{
+  "schema_version": "spreadsheet-harness-comparison-run-spec-v1",
+  "run_spec_id": "qwen36-local-postopt-eval16-v3-bare-ours-v24-seed41",
+  "phase": "post_optimization_evaluation",
+  "repository_relative_paths": {
+    "dataset": "benchmarks/data/spreadsheetbench_verified_400",
+    "split_manifest": "benchmarks/protocols/qwen35-trace2skill-local-postopt16-v1.json",
+    "output": "benchmarks/results/qwen36-local-postopt-eval16-v3-bare-ours-v24-seed41"
+  },
+  "execution": {
+    "comparison_protocol_version": "resource_matched_multi_arm_v24",
+    "comparison_manifest_schema_version": 13,
+    "split_provenance": {
+      "manifest_id": "qwen35-trace2skill-local-postopt16-v1",
+      "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
+      "manifest_sha256": "de82b9a5f17aaaf66e112f4d38938abbe9651ceab1a784ba815c82d171569c1b",
+      "task_count": 16,
+      "task_ids_sha256": "a4a485d5543710352a20be947d3ac3dc251ca8fbaa32b9a0dfe571d0506b6f7a",
+      "dataset_json_sha256": "bcecaa89a005bd4e3bbe98da150a86e8062c27f262e575d5e47bd9861b3525e7"
+    },
+    "arms": [
+      "bare",
+      "ours"
+    ],
+    "provider": {
+      "base_url": "http://101.37.174.109:8010/v1",
+      "model": "qwen36-35b-a3b",
+      "api_protocol": "chat-completions",
+      "requested_reasoning_effort": "none",
+      "reasoning_effort": "none",
+      "request_timeout_seconds": 700.0,
+      "request_retries": 0,
+      "request_interval_seconds": 0.0,
+      "litellm_timeout_seconds": 600.0,
+      "store_responses": false,
+      "generation": {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "seed": 41,
+        "presence_penalty": 2.0,
+        "top_k": 40,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "enable_thinking": false
+      }
+    },
+    "resources": {
+      "max_model_calls": 8,
+      "max_turns_per_arm": 8,
+      "max_total_tokens": 120000,
+      "max_output_tokens_per_call": 4096,
+      "task_timeout_seconds": 1200.0,
+      "recalculate": true,
+      "task_retries": 0,
+      "circuit_breaker_threshold": 3,
+      "arm_order_seed": 20260812
+    },
+    "skills_for_ours_only": [
+      {
+        "name": "spreadsheet-core",
+        "sha256": "720c4c19f7034802b91ff102f9e78804ae194265050d43cd2d4b4619a73a8752"
+      },
+      {
+        "name": "visual-review",
+        "sha256": "d41ebedc305b9c5de53b5df7701180730a50ae47c96fe94012a6988474f91213"
+      }
+    ]
+  }
+}

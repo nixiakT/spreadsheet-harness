@@ -1,6 +1,11 @@
 """Domain-specific exceptions."""
 
 import re
+from typing import Any
+
+AGENT_EXECUTION_FAILURE_REASONS = frozenset(
+    {"edit_recovery_exhausted", "workbook_unchanged"}
+)
 
 _SECRET_VALUE = re.compile(
     r"\b(?:cr|sk)[-_][A-Za-z0-9_-]{12,}\b"
@@ -130,3 +135,20 @@ class AgentTurnLimitError(HarnessError):
 
 class AgentRoutingError(HarnessError):
     """Raised when a required deterministic first-tool route is not honored."""
+
+
+class AgentExecutionFailure(HarnessError):
+    """Known model-execution failure with auditable partial agent evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        agent_result: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        if reason not in AGENT_EXECUTION_FAILURE_REASONS:
+            raise ValueError(f"Unknown agent execution failure reason: {reason!r}")
+        self.reason = reason
+        self.agent_result = agent_result

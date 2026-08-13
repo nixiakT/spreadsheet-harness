@@ -18,6 +18,7 @@ from spreadsheet_harness.benchmark import (
     compare_workbooks,
     comparison_evidence,
     load_verified_tasks,
+    require_evaluation_task_authorization,
     summarize_results,
     trace2skill_heldout_manifest,
     verify_trace2skill_heldout_manifest,
@@ -76,6 +77,49 @@ class TransientThenSuccessProcessRunner(VerifiedBenchmarkRunner):
             "calculation_backend": "not_recalculated",
             "elapsed_seconds": 0.001,
         }
+
+
+def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
+    pilot_ids = list(benchmark_module.TRACE2SKILL_PILOT_TASK_IDS)
+    postopt_ids = list(benchmark_module.TRACE2SKILL_POSTOPT_TASK_IDS)
+
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        require_evaluation_task_authorization([pilot_ids[0]])
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        require_evaluation_task_authorization([postopt_ids[0]])
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        require_evaluation_task_authorization(
+            postopt_ids[:-1],
+            authorized_manifest_id=benchmark_module.TRACE2SKILL_POSTOPT_MANIFEST_ID,
+        )
+
+    require_evaluation_task_authorization(
+        postopt_ids,
+        authorized_manifest_id=benchmark_module.TRACE2SKILL_POSTOPT_MANIFEST_ID,
+    )
+
+
+def test_plain_benchmark_runner_rejects_protected_task_before_manifest(
+    tmp_path: Path,
+) -> None:
+    task = SpreadsheetTask(
+        benchmark_module.TRACE2SKILL_PILOT_TASK_IDS[0],
+        "Do not run this quarantined task.",
+        tmp_path / "input.xlsx",
+        tmp_path / "golden.xlsx",
+        "Cell-Level Manipulation",
+        "A1",
+        "Sheet1",
+    )
+    runner = OfflineProcessRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "protected-output",
+    )
+
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        runner.run([task])
+
+    assert not runner.manifest_path.exists()
 
 
 def _book(path: Path, sheets: dict[str, list[list[object]]]) -> None:
@@ -274,6 +318,9 @@ DERIVATIVE_POOL_MANIFEST = Path(
 DERIVATIVE_PILOT_MANIFEST = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-unattempted-pilot16-v2.json"
 )
+DERIVATIVE_POSTOPT_MANIFEST = Path(
+    "benchmarks/protocols/qwen35-trace2skill-local-postopt16-v1.json"
+)
 LOCAL_EXPOSURE_EVIDENCE = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-exposure-evidence-v1.json"
 )
@@ -306,6 +353,7 @@ def _copy_derivative_manifest_tree(destination: Path) -> dict[str, Path]:
         "v1": Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
         "pool": DERIVATIVE_POOL_MANIFEST,
         "pilot": DERIVATIVE_PILOT_MANIFEST,
+        "postopt": DERIVATIVE_POSTOPT_MANIFEST,
         "evidence": LOCAL_EXPOSURE_EVIDENCE,
     }
     copies: dict[str, Path] = {}
@@ -333,6 +381,7 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
         DERIVATIVE_POOL_MANIFEST,
         DERIVATIVE_PILOT_MANIFEST,
+        DERIVATIVE_POSTOPT_MANIFEST,
         LOCAL_EXPOSURE_EVIDENCE,
     ]
     before = {path: _file_state(path) for path in watched}
@@ -342,6 +391,9 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
     )
     pilot = benchmark_module.verify_trace2skill_derivative_manifest(
         dataset, DERIVATIVE_PILOT_MANIFEST
+    )
+    postopt = benchmark_module.verify_trace2skill_derivative_manifest(
+        dataset, DERIVATIVE_POSTOPT_MANIFEST
     )
 
     assert pool["valid"] is True
@@ -356,6 +408,12 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
     assert pilot["task_ids_sha256"] == (
         "f25f8b75ac231f81e23e812097d3060d3e1f16597b0a5196cdeee9a833b91b82"
     )
+    assert postopt["valid"] is True
+    assert postopt["manifest_id"] == "qwen35-trace2skill-local-postopt16-v1"
+    assert postopt["usable_tasks"] == 16
+    assert postopt["task_ids_sha256"] == (
+        "a4a485d5543710352a20be947d3ac3dc251ca8fbaa32b9a0dfe571d0506b6f7a"
+    )
     assert {path: _file_state(path) for path in watched} == before
 
 
@@ -365,6 +423,7 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         Path("benchmarks/protocols/qwen35-trace2skill-heldout-v1.json"),
         DERIVATIVE_POOL_MANIFEST,
         DERIVATIVE_PILOT_MANIFEST,
+        DERIVATIVE_POSTOPT_MANIFEST,
     ],
 )
 def test_trace2skill_verified_reports_produce_canonical_provenance(
@@ -389,7 +448,10 @@ def test_trace2skill_verified_reports_produce_canonical_provenance(
         ) is False
 
 
-@pytest.mark.parametrize("manifest_path", [DERIVATIVE_POOL_MANIFEST, DERIVATIVE_PILOT_MANIFEST])
+@pytest.mark.parametrize(
+    "manifest_path",
+    [DERIVATIVE_POOL_MANIFEST, DERIVATIVE_PILOT_MANIFEST, DERIVATIVE_POSTOPT_MANIFEST],
+)
 def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys(
     manifest_path: Path,
     tmp_path: Path,
@@ -417,7 +479,7 @@ def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys
 
 @pytest.mark.parametrize(
     "manifest_name",
-    ["v1", "pool", "pilot"],
+    ["v1", "pool", "pilot", "postopt"],
 )
 def test_trace2skill_split_manifest_rejects_noncanonical_bytes(
     manifest_name: str,
@@ -433,7 +495,10 @@ def test_trace2skill_split_manifest_rejects_noncanonical_bytes(
         )
 
 
-@pytest.mark.parametrize("manifest_name,parent_name", [("pool", "v1"), ("pilot", "pool")])
+@pytest.mark.parametrize(
+    "manifest_name,parent_name",
+    [("pool", "v1"), ("pilot", "pool"), ("postopt", "pool")],
+)
 def test_trace2skill_derivative_manifest_binds_parent_file_sha256(
     manifest_name: str,
     parent_name: str,
@@ -476,7 +541,7 @@ def test_trace2skill_local_pool_requires_exact_regular_evidence_sibling(
         )
 
 
-@pytest.mark.parametrize("manifest_name", ["pool", "pilot"])
+@pytest.mark.parametrize("manifest_name", ["pool", "pilot", "postopt"])
 @pytest.mark.parametrize("parent_path", ["../parent.json", "/tmp/parent.json"])
 def test_trace2skill_derivative_manifest_rejects_non_sibling_parent_path(
     manifest_name: str,
@@ -495,7 +560,7 @@ def test_trace2skill_derivative_manifest_rejects_non_sibling_parent_path(
         )
 
 
-@pytest.mark.parametrize("manifest_name", ["pool", "pilot"])
+@pytest.mark.parametrize("manifest_name", ["pool", "pilot", "postopt"])
 def test_trace2skill_derivative_manifest_rejects_tampered_parent_hash_field(
     manifest_name: str,
     tmp_path: Path,
@@ -639,6 +704,110 @@ def test_trace2skill_pilot_rejects_self_consistent_selection_or_reserve_tamperin
 
     with pytest.raises(ValueError, match="does not match its anchors"):
         benchmark_module.verify_trace2skill_derivative_manifest(dataset, copies["pilot"])
+
+
+def test_trace2skill_postopt_is_hash_ranked_outside_prior_pilot() -> None:
+    _require_pinned_derivative_manifests()
+    pool = _load_derivative_manifest(DERIVATIVE_POOL_MANIFEST)
+    pilot = _load_derivative_manifest(DERIVATIVE_PILOT_MANIFEST)
+    postopt = _load_derivative_manifest(DERIVATIVE_POSTOPT_MANIFEST)
+    pilot_set = set(pilot["task_ids"])
+    candidates = [task_id for task_id in pool["task_ids"] if task_id not in pilot_set]
+    ranked = sorted(
+        candidates,
+        key=lambda task_id: (
+            benchmark_module._trace2skill_postopt_rank_key(task_id),
+            task_id,
+        ),
+    )
+    selected_set = set(ranked[:16])
+    expected_selected = [
+        task_id for task_id in pool["task_ids"] if task_id in selected_set
+    ]
+    expected_remaining = [
+        task_id
+        for task_id in pool["task_ids"]
+        if task_id not in pilot_set and task_id not in selected_set
+    ]
+
+    assert pilot_set.isdisjoint(postopt["task_ids"])
+    assert postopt["task_ids"] == expected_selected
+    assert postopt["candidate_pool"]["task_count"] == len(candidates) == 127
+    assert postopt["candidate_pool"]["task_ids_sha256"] == _ordered_ids_sha256(
+        candidates
+    )
+    assert postopt["remaining_reserve"]["task_count"] == len(expected_remaining) == 111
+    assert postopt["remaining_reserve"]["task_ids_sha256"] == _ordered_ids_sha256(
+        expected_remaining
+    )
+    assert postopt["derivation"]["last_included_rank"] == {
+        "task_id": ranked[15],
+        "sha256": benchmark_module._trace2skill_postopt_rank_key(ranked[15]),
+    }
+    assert postopt["derivation"]["first_excluded_rank"] == {
+        "task_id": ranked[16],
+        "sha256": benchmark_module._trace2skill_postopt_rank_key(ranked[16]),
+    }
+
+
+@pytest.mark.parametrize("failure_mode", ["missing", "tampered", "symlink"])
+def test_trace2skill_postopt_requires_exact_prior_pilot_sibling(
+    tmp_path: Path, failure_mode: str
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    pilot = copies["pilot"]
+    if failure_mode == "missing":
+        pilot.unlink()
+    elif failure_mode == "tampered":
+        pilot.write_bytes(pilot.read_bytes() + b"\n")
+    else:
+        outside = tmp_path / "outside-pilot.json"
+        shutil.copy2(pilot, outside)
+        pilot.unlink()
+        try:
+            pilot.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(ValueError, match="pilot|checksum"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies["postopt"]
+        )
+
+
+@pytest.mark.parametrize("target", ["membership", "order", "boundary", "remaining"])
+def test_trace2skill_postopt_rejects_self_consistent_selection_tampering(
+    tmp_path: Path, target: str
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    frozen = _load_derivative_manifest(copies["postopt"])
+    pool = _load_derivative_manifest(copies["pool"])
+    pilot = _load_derivative_manifest(copies["pilot"])
+    if target == "membership":
+        replacement = next(
+            task_id
+            for task_id in pool["task_ids"]
+            if task_id not in set(pilot["task_ids"]) | set(frozen["task_ids"])
+        )
+        frozen["task_ids"][0] = replacement
+        frozen["task_ids_sha256"] = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["selection"]["task_ids_sha256"] = frozen["task_ids_sha256"]
+    elif target == "order":
+        frozen["task_ids"][:2] = reversed(frozen["task_ids"][:2])
+        frozen["task_ids_sha256"] = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["selection"]["task_ids_sha256"] = frozen["task_ids_sha256"]
+    elif target == "boundary":
+        frozen["derivation"]["first_excluded_rank"]["task_id"] = "not-the-boundary"
+    else:
+        frozen["remaining_reserve"]["task_count"] -= 1
+    _write_derivative_manifest(copies["postopt"], frozen)
+
+    with pytest.raises(ValueError, match="does not match its anchors"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies["postopt"]
+        )
 
 
 def test_summarize_results(tmp_path: Path) -> None:

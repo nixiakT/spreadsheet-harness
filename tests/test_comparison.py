@@ -17,14 +17,17 @@ from spreadsheet_harness.comparison import (
     COMPARISON_ARMS,
     COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
+    RunSpecAnchor,
     _arm_order,
     _balanced_arm_orders,
     comparison_summary,
     load_pilot_run_spec,
+    require_launchable_run_spec,
     verify_repository_source_state,
 )
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import (
+    AgentExecutionFailure,
     AgentRoutingError,
     CodeIsolationError,
     HarnessError,
@@ -108,14 +111,14 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 12
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v23"
+    assert manifest["schema_version"] == 13
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v24"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
     )
     assert manifest["configuration"]["failed_edit_recovery_policy"] == (
-        "force-successful-code-edit-before-terminal-v1"
+        "shared_state_based_recovery_v1"
     )
     assert manifest["configuration"]["spreadsheet_skill_policy"] == (
         "pre-evaluation-baseline-frozen-v1"
@@ -161,6 +164,16 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "assistant_text"
     ]
     assert manifest["allowed_observed_terminals"]["ours"]["solve"] == [
+        "submit_result",
+        "assistant_text",
+        "final_recovery_code_interpreter",
+    ]
+    assert manifest["allowed_observed_terminals"]["bare"]["solve"] == [
+        "submit_result",
+        "assistant_text",
+        "final_recovery_code_interpreter",
+    ]
+    assert manifest["allowed_observed_terminals"]["paper"]["solve"] == [
         "submit_result",
         "assistant_text",
         "final_recovery_code_interpreter",
@@ -246,6 +259,13 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["resume_journal_policy"] == (
         "durable-inflight-fail-closed-no-replay-v3"
     )
+    assert manifest["configuration"]["model_execution_failure_policy"] == (
+        "known-false-score-artifact-and-request-audited-nonbreaker-v1"
+    )
+    assert manifest["configuration"]["model_execution_failure_reasons"] == [
+        "edit_recovery_exhausted",
+        "workbook_unchanged",
+    ]
     assert manifest["hidden_from_models"] == [
         "instruction_type",
         "answer_position",
@@ -574,11 +594,10 @@ def _pilot_run_spec_runner(
     monkeypatch: Any,
     *,
     split_provenance: dict[str, Any] | None = None,
+    spec_filename: str = "qwen35-trace2skill-local-pilot16-run-spec-v1.json",
 ) -> tuple[ComparisonBenchmarkRunner, list[SpreadsheetTask]]:
     source = _tasks(tmp_path)[0]
-    spec_path = Path(
-        "benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json"
-    )
+    spec_path = Path("benchmarks/protocols") / spec_filename
     document, provenance, raw = load_pilot_run_spec(spec_path)
     if split_provenance is None:
         split_provenance = document["execution"]["split_provenance"]
@@ -601,12 +620,8 @@ def _pilot_run_spec_runner(
             "source_fingerprint": {"sha256": "3" * 64, "files": []},
         },
     )
-    pilot_ids = json.loads(
-        Path(
-            "benchmarks/protocols/"
-            "qwen35-trace2skill-local-unattempted-pilot16-v2.json"
-        ).read_text(encoding="utf-8")
-    )["task_ids"]
+    split_path = Path(document["repository_relative_paths"]["split_manifest"])
+    pilot_ids = json.loads(split_path.read_text(encoding="utf-8"))["task_ids"]
     tasks = [
         SpreadsheetTask(
             task_id,
@@ -658,6 +673,31 @@ def _pilot_run_spec_runner(
     return runner, tasks
 
 
+def _generic_journal_runner(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> tuple[ComparisonBenchmarkRunner, list[SpreadsheetTask]]:
+    tasks = _tasks(tmp_path)[:1]
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "journal-output",
+        skill_registry=SkillRegistry([]),
+        arms=("bare", "ours"),
+        max_model_calls=8,
+        max_turns_per_arm=8,
+        max_total_tokens=120000,
+        max_output_tokens=4096,
+        task_timeout_seconds=1200,
+        recalculate=False,
+        arm_order_seed=20260812,
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+    return runner, tasks
+
+
 def test_pilot_run_spec_rejects_noncanonical_bytes(tmp_path: Path) -> None:
     source = Path(
         "benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json"
@@ -667,6 +707,37 @@ def test_pilot_run_spec_rejects_noncanonical_bytes(tmp_path: Path) -> None:
 
     with pytest.raises(HarnessError, match="checksum"):
         load_pilot_run_spec(target)
+
+
+def test_legacy_run_spec_is_parseable_but_never_launchable() -> None:
+    _, provenance, _ = load_pilot_run_spec(
+        Path("benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json")
+    )
+
+    with pytest.raises(HarnessError, match="read-only"):
+        require_launchable_run_spec(provenance)
+
+
+def test_v24_run_spec_is_fresh_only() -> None:
+    document, provenance, _ = load_pilot_run_spec(
+        Path("benchmarks/protocols/qwen35-trace2skill-local-postopt16-run-spec-v1.json")
+    )
+
+    anchor = require_launchable_run_spec(provenance)
+
+    assert anchor == RunSpecAnchor(
+        run_spec_id=document["run_spec_id"],
+        filename="qwen35-trace2skill-local-postopt16-run-spec-v1.json",
+        sha256=provenance["run_spec_sha256"],
+        schema_version=document["schema_version"],
+        phase="post_optimization_evaluation",
+        split_manifest_id="qwen35-trace2skill-local-postopt16-v1",
+        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=13,
+        launchable=True,
+    )
+    with pytest.raises(HarnessError, match="fresh-only"):
+        require_launchable_run_spec(provenance, resume=True)
 
 
 def test_pilot_split_requires_canonical_run_spec_in_runner(
@@ -683,6 +754,39 @@ def test_pilot_split_requires_canonical_run_spec_in_runner(
 
     with pytest.raises(HarnessError, match="requires its code-anchored run spec"):
         runner._manifest(tasks)
+
+
+def test_comparison_preflight_rejects_direct_protected_task_bypass(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source = _tasks(tmp_path)[0]
+    task = SpreadsheetTask(
+        "33157",
+        source.instruction,
+        source.input_path,
+        source.golden_path,
+        source.instruction_type,
+        source.answer_position,
+        source.answer_sheet,
+    )
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "direct-protected-bypass",
+        skill_registry=SkillRegistry([]),
+        arms=("bare", "ours"),
+        max_model_calls=8,
+        max_turns_per_arm=8,
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        runner.preflight([task])
+
+    assert not runner.manifest_path.exists()
 
 
 def test_repository_source_state_requires_clean_head_at_local_origin_main(
@@ -768,7 +872,11 @@ def test_preflight_verifies_source_before_isolation(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    runner, tasks = _pilot_run_spec_runner(tmp_path, monkeypatch)
+    runner, tasks = _pilot_run_spec_runner(
+        tmp_path,
+        monkeypatch,
+        spec_filename="qwen35-trace2skill-local-postopt16-run-spec-v1.json",
+    )
     events: list[str] = []
     monkeypatch.setattr(
         "spreadsheet_harness.comparison.verify_repository_source_state",
@@ -837,9 +945,7 @@ def test_comparison_crash_marker_blocks_ambiguous_replay(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    runner, tasks = _pilot_run_spec_runner(tmp_path, monkeypatch)
-    runner.output_dir.mkdir()
-    runner.run_spec_copy_path.write_bytes(runner.run_spec_bytes or b"")
+    runner, tasks = _generic_journal_runner(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "spreadsheet_harness.comparison.ensure_strict_code_isolation",
         lambda *_args, **_kwargs: {},
@@ -865,9 +971,7 @@ def test_comparison_seals_interrupted_marker_without_replay(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    runner, tasks = _pilot_run_spec_runner(tmp_path, monkeypatch)
-    runner.output_dir.mkdir()
-    runner.run_spec_copy_path.write_bytes(runner.run_spec_bytes or b"")
+    runner, tasks = _generic_journal_runner(tmp_path, monkeypatch)
     provider_calls: list[str] = []
     monkeypatch.setattr(
         "spreadsheet_harness.comparison.ensure_strict_code_isolation",
@@ -897,12 +1001,8 @@ def test_comparison_seals_interrupted_marker_without_replay(
     seals = json.loads(runner.interrupted_seals_path.read_text(encoding="utf-8"))
     assert seals == {"schema_version": 1, "seals": [row]}
     assert not runner.results_path.exists()
-    continuation = json.loads(
-        runner.continuation_source_path.read_text(encoding="utf-8")
-    )
-    assert continuation == runner.continuation_source_record
-    assert continuation["comparison_manifest_sha256"] == manifest_sha
-    assert continuation["repository_source"] == runner.repository_source_state
+    assert not runner.continuation_source_path.exists()
+    assert runner.continuation_source_record is None
     assert provider_calls == []
     assert runner.seal_interrupted_inflight(tasks) == row
 
@@ -945,9 +1045,7 @@ def test_comparison_resume_clears_marker_after_bound_row_fsync(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    runner, tasks = _pilot_run_spec_runner(tmp_path, monkeypatch)
-    runner.output_dir.mkdir()
-    runner.run_spec_copy_path.write_bytes(runner.run_spec_bytes or b"")
+    runner, tasks = _generic_journal_runner(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "spreadsheet_harness.comparison.ensure_strict_code_isolation",
         lambda *_args, **_kwargs: {},
@@ -994,9 +1092,7 @@ def test_interrupted_seals_reject_extra_document_fields(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    runner, tasks = _pilot_run_spec_runner(tmp_path, monkeypatch)
-    runner.output_dir.mkdir()
-    runner.run_spec_copy_path.write_bytes(runner.run_spec_bytes or b"")
+    runner, tasks = _generic_journal_runner(tmp_path, monkeypatch)
     runner.preflight(tasks)
     runner._prepare_manifest(tasks)
     manifest_sha = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
@@ -1068,6 +1164,56 @@ def test_comparison_summary_uses_end_to_end_denominator_and_pairing(tmp_path: Pa
     ours_vs_paper = summary["pairwise"]["paper_vs_ours"]
     assert ours_vs_paper["accuracy_delta_right_minus_left"] == 0.5
     assert ours_vs_paper["right_only_passes"] == 1
+
+
+def test_comparison_summary_counts_known_model_failure_as_complete_nonbreaker(
+    tmp_path: Path,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    rows = [
+        {
+            "task_id": task.task_id,
+            "arm": arm,
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "status": "completed",
+            "outcome_kind": (
+                "model_execution_failure" if arm == "ours" else "scored"
+            ),
+            "passed": arm == "bare",
+            "error_category": (
+                "model_execution_failure" if arm == "ours" else None
+            ),
+            "model_failure_reason": (
+                "edit_recovery_exhausted" if arm == "ours" else None
+            ),
+            "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
+            "agent": {
+                "usage": {"total_tokens": 1},
+                "request_timings": [
+                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
+                ],
+            },
+        }
+        for arm in ("bare", "ours")
+    ]
+    results = tmp_path / "known-model-failure-summary.jsonl"
+    results.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    summary = comparison_summary(results, [task], arms=("bare", "ours"))
+
+    assert summary["inference_valid"] is True
+    assert summary["completed_arm_tasks"] == 2
+    assert summary["errored_arm_tasks"] == 0
+    assert summary["known_model_execution_failure_arm_tasks"] == 1
+    assert summary["arms"]["ours"]["completion_rate"] == 1
+    assert summary["arms"]["ours"]["end_to_end_accuracy"] == 0
+    assert summary["arms"]["ours"]["known_model_execution_failures"] == 1
+    assert summary["arms"]["ours"]["model_execution_failure_reasons"] == {
+        "edit_recovery_exhausted": 1
+    }
+    assert summary["pairwise"]["bare_vs_ours"]["inference_valid"] is True
 
 
 def test_comparison_summary_treats_sealed_unknown_as_nonprimary_not_missing(
@@ -1757,8 +1903,10 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
             "max_turns_per_arm": 20,
             "stage_turn_caps": {"solve": 20},
             "calculation_backend": "not_recalculated",
-            "status": "completed",
-            "passed": comparison["passed"],
+                "status": "completed",
+                "outcome_kind": "scored",
+                "passed": comparison["passed"],
+                "artifact_score_passed": comparison["passed"],
             "comparison": comparison,
             "run_dir": str(task_dir),
             "output_workbook": str(output),
@@ -1853,6 +2001,187 @@ def test_comparison_classifies_required_routing_failure(
 
     assert row["status"] == "error"
     assert row["error_category"] == "routing_protocol"
+
+
+@pytest.mark.parametrize(
+    "reason", ["workbook_unchanged", "edit_recovery_exhausted"]
+)
+def test_comparison_scores_known_model_execution_failure_as_completed_false(
+    tmp_path: Path,
+    monkeypatch: Any,
+    reason: str,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    evidence = AgentResult(
+        "unable to finish",
+        2,
+        0,
+        {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
+        "response-2",
+        request_timings=[
+            {"turn": turn, "attempts": 1, "attempt_history": [{}]}
+            for turn in (1, 2)
+        ],
+    )
+
+    def fail_execution(**_: Any) -> AgentResult:
+        raise AgentExecutionFailure(
+            "model did not produce a usable workbook edit",
+            reason=reason,
+            agent_result=evidence,
+        )
+
+    monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", fail_execution)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / f"known-failure-{reason}",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=3,
+        max_turns_per_arm=3,
+        recalculate=False,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "completed"
+    assert row["passed"] is False
+    assert row["artifact_score_passed"] is False
+    assert row["comparison"]["passed"] is False
+    assert row["outcome_kind"] == "model_execution_failure"
+    assert row["error_category"] == "model_execution_failure"
+    assert row["model_failure_reason"] == reason
+    assert row["error_retryable"] is False
+    assert row["agent"] == evidence.to_dict()
+
+
+def test_comparison_requires_evidence_for_known_model_execution_failure(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task = _tasks(tmp_path)[0]
+
+    def fail_without_evidence(**_: Any) -> AgentResult:
+        raise AgentExecutionFailure(
+            "model did not edit the workbook",
+            reason="workbook_unchanged",
+        )
+
+    monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", fail_without_evidence)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "known-failure-without-evidence",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        recalculate=False,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "error"
+    assert row["error_category"] == "harness"
+    assert row["error_type"] == "HarnessError"
+
+
+def test_known_model_execution_failure_row_passes_full_audit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from spreadsheet_harness.audit import audit_comparison
+
+    task = _tasks(tmp_path)[0]
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "audited-known-failure",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=3,
+        max_turns_per_arm=3,
+        max_total_tokens=100,
+        recalculate=False,
+    )
+
+    class AuditableFailureEvidence:
+        def __init__(self, budget: Any, timings: list[dict[str, Any]]) -> None:
+            self.budget = budget
+            self.timings = timings
+
+        def to_dict(self) -> dict[str, Any]:
+            budget = self.budget.to_dict()
+            return {
+                "arm": "bare",
+                "usage": {
+                    "input_tokens": 8,
+                    "output_tokens": 2,
+                    "total_tokens": 10,
+                },
+                "request_timings": self.timings,
+                "budget": budget,
+                "stages": [
+                    {
+                        "name": "solve",
+                        "max_turns": 3,
+                        "allowed_tools": ["code_interpreter"],
+                        "first_tool_choice": "code_interpreter",
+                        "observed_first_tool": "code_interpreter",
+                        "forced_tool_prefix": [
+                            "code_interpreter",
+                            "code_interpreter",
+                        ],
+                        "observed_forced_tool_prefix": [
+                            "code_interpreter",
+                            "code_interpreter",
+                        ],
+                        "terminal_tool": "submit_result",
+                        "observed_terminal_tool": "final_recovery_code_interpreter",
+                        "agent": {"turns": 2, "request_timings": self.timings},
+                    }
+                ],
+            }
+
+    def fail_with_auditable_evidence(**kwargs: Any) -> AgentResult:
+        budget = kwargs["budget"]
+        timings = []
+        for turn in (1, 2):
+            reservation = budget.begin_model_call(stage="solve")
+            budget.record_response(
+                reservation,
+                {
+                    "input_tokens": 4,
+                    "output_tokens": 1,
+                    "total_tokens": 5,
+                },
+                stage="solve",
+            )
+            timings.append(
+                {
+                    "turn": turn,
+                    "attempts": 1,
+                    "attempt_history": [
+                        {"api_protocol": "responses", "endpoint": "/responses"}
+                    ],
+                }
+            )
+        raise AgentExecutionFailure(
+            "final recovery code did not produce a saved edit",
+            reason="edit_recovery_exhausted",
+            agent_result=AuditableFailureEvidence(budget, timings),
+        )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.run_arm", fail_with_auditable_evidence
+    )
+    runner._prepare_manifest([task])
+    manifest_sha256 = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
+    row = runner._run_one(
+        task, "bare", comparison_manifest_sha256=manifest_sha256
+    )
+    runner._append(row)
+
+    report = audit_comparison(runner.output_dir, [task], arms=("bare",))
+
+    assert report["audit_valid"] is True
+    assert report["study_complete"] is True
+    assert report["known_failed_rows"] == 1
+    assert report["known_model_execution_failure_rows"] == 1
 
 
 def test_comparison_counts_ambiguous_delivery_as_transient_but_not_retryable(

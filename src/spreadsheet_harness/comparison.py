@@ -14,6 +14,7 @@ import uuid
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -32,6 +33,7 @@ from .agent import (
 )
 from .arms import (
     BARE_TOOLS,
+    COMPARISON_EDIT_RECOVERY_POLICY_VERSION,
     COMPARISON_FORCED_TOOL_PREFIX_POLICY,
     COMPARISON_TURN_CAP_POLICY_VERSION,
     PAPER_EXTRACTION_TOOLS,
@@ -56,13 +58,16 @@ from .benchmark import (
     _text_sha256,
     compare_workbooks,
     comparison_evidence,
+    require_evaluation_task_authorization,
     verify_trace2skill_split_provenance,
 )
 from .budget import RunBudget
 from .code_interpreter import STRICT_ISOLATION_POLICY, ensure_strict_code_isolation
 from .config import ProviderConfig
 from .errors import (
+    AGENT_EXECUTION_FAILURE_REASONS,
     AgentBudgetError,
+    AgentExecutionFailure,
     AgentRoutingError,
     AgentTimeoutError,
     CodeIsolationError,
@@ -89,8 +94,8 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v23"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 12
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v24"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 13
 PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
 PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
 PILOT_RUN_SPEC_FILENAME = "qwen35-trace2skill-local-pilot16-run-spec-v1.json"
@@ -105,7 +110,9 @@ PILOT_SPLIT_MANIFEST_ID = "qwen35-trace2skill-local-unattempted-pilot16-v2"
 LEGACY_PILOT_MANIFEST_SHA256 = (
     "7eee847bc9880ec112ac78eefaac0c97d350da31c6e045c1d5c924e95b0b04c1"
 )
-COMPARISON_CONFIGURATION_POLICIES = {
+LEGACY_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v23"
+LEGACY_COMPARISON_MANIFEST_SCHEMA_VERSION = 12
+LEGACY_COMPARISON_CONFIGURATION_POLICIES = {
     "code_workbook_formula_gate": (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
     ),
@@ -116,6 +123,134 @@ COMPARISON_CONFIGURATION_POLICIES = {
     "resume_journal_policy": "durable-inflight-fail-closed-no-replay-v3",
     "request_attempt_audit_policy": "exact-attempt-history-per-response-v1",
 }
+COMPARISON_CONFIGURATION_POLICIES = {
+    "code_workbook_formula_gate": (
+        "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
+    ),
+    "failed_edit_recovery_policy": COMPARISON_EDIT_RECOVERY_POLICY_VERSION,
+    "spreadsheet_skill_policy": "pre-evaluation-baseline-frozen-v1",
+    "edit_recovery_prompt_policy": "self-contained-request-scoped-verification-v1",
+    "result_manifest_binding_policy": "exact-manifest-sha256-v1",
+    "resume_journal_policy": "durable-inflight-fail-closed-no-replay-v3",
+    "request_attempt_audit_policy": "exact-attempt-history-per-response-v1",
+    "model_execution_failure_policy": (
+        "known-false-score-artifact-and-request-audited-nonbreaker-v1"
+    ),
+    "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
+    "circuit_breaker_nonbreaker_categories": ["model_execution_failure"],
+}
+
+
+@dataclass(frozen=True)
+class RunSpecAnchor:
+    """Code-owned identity and execution policy for one immutable run spec."""
+
+    run_spec_id: str
+    filename: str
+    sha256: str
+    schema_version: str
+    phase: str
+    split_manifest_id: str
+    comparison_protocol_version: str
+    comparison_manifest_schema_version: int
+    launchable: bool
+    resumable: bool = False
+
+    def provenance(self) -> dict[str, str]:
+        return {
+            "run_spec_id": self.run_spec_id,
+            "schema_version": self.schema_version,
+            "run_spec_sha256": self.sha256,
+        }
+
+
+RUN_SPEC_ANCHORS = (
+    RunSpecAnchor(
+        run_spec_id=PILOT_RUN_SPEC_ID,
+        filename=PILOT_RUN_SPEC_FILENAME,
+        sha256=PILOT_RUN_SPEC_SHA256,
+        schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
+        phase="exploratory_development_pilot",
+        split_manifest_id=PILOT_SPLIT_MANIFEST_ID,
+        comparison_protocol_version=LEGACY_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=LEGACY_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
+    ),
+    RunSpecAnchor(
+        run_spec_id="qwen36-local-postopt-eval16-v3-bare-ours-v24-seed41",
+        filename="qwen35-trace2skill-local-postopt16-run-spec-v1.json",
+        sha256="a7e335c81cd86ec1edb81f223b103bafabec19e983a669d56f3ded6965151644",
+        schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
+        phase="post_optimization_evaluation",
+        split_manifest_id="qwen35-trace2skill-local-postopt16-v1",
+        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=True,
+    ),
+)
+
+
+def _run_spec_anchor_by_sha256(digest: str) -> RunSpecAnchor | None:
+    return next((anchor for anchor in RUN_SPEC_ANCHORS if anchor.sha256 == digest), None)
+
+
+def resolve_run_spec_anchor(value: Any) -> RunSpecAnchor:
+    """Resolve a registered anchor from a document or provenance object."""
+
+    if not isinstance(value, dict):
+        raise HarnessError("Run spec identity must be a JSON object")
+    digest = value.get("run_spec_sha256")
+    if isinstance(digest, str):
+        anchor = _run_spec_anchor_by_sha256(digest)
+    else:
+        run_spec_id = value.get("run_spec_id")
+        anchor = next(
+            (
+                candidate
+                for candidate in RUN_SPEC_ANCHORS
+                if candidate.run_spec_id == run_spec_id
+            ),
+            None,
+        )
+    if anchor is None:
+        raise HarnessError("Run spec checksum is not registered")
+    if "execution" in value:
+        expected = {
+            "run_spec_id": anchor.run_spec_id,
+            "schema_version": anchor.schema_version,
+            "phase": anchor.phase,
+        }
+        if any(value.get(field) != expected_value for field, expected_value in expected.items()):
+            raise HarnessError("Run spec identity does not match its registered anchor")
+    elif value != anchor.provenance():
+        raise HarnessError("Run spec provenance does not match its registered anchor")
+    return anchor
+
+
+def require_launchable_run_spec(
+    value: Any,
+    *,
+    resume: bool = False,
+    operation: str = "launch",
+) -> RunSpecAnchor:
+    anchor = resolve_run_spec_anchor(value)
+    if not anchor.launchable:
+        raise HarnessError(
+            f"Run spec {anchor.run_spec_id} is read-only and cannot {operation}"
+        )
+    if resume and not anchor.resumable:
+        raise HarnessError(f"Run spec {anchor.run_spec_id} is fresh-only and cannot resume")
+    if (
+        anchor.comparison_protocol_version != COMPARISON_PROTOCOL_VERSION
+        or anchor.comparison_manifest_schema_version
+        != COMPARISON_MANIFEST_SCHEMA_VERSION
+    ):
+        raise HarnessError("Run spec execution version is not supported by this runner")
+    return anchor
+
+
+def protected_run_spec_split_ids() -> frozenset[str]:
+    return frozenset(anchor.split_manifest_id for anchor in RUN_SPEC_ANCHORS)
 
 
 def _strict_json_document(raw: bytes, *, label: str) -> dict[str, Any]:
@@ -205,12 +340,13 @@ def _atomic_write_bytes(path: Path, value: bytes) -> None:
 def parse_pilot_run_spec_bytes(
     raw: bytes,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """Parse exact bytes for the one code-anchored pilot execution contract."""
+    """Parse exact bytes for a registered immutable execution contract."""
 
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != PILOT_RUN_SPEC_SHA256:
-        raise HarnessError("Pilot run spec checksum does not match its code anchor")
-    document = _strict_json_document(raw, label="pilot run spec")
+    anchor = _run_spec_anchor_by_sha256(digest)
+    if anchor is None:
+        raise HarnessError("Run spec checksum does not match a registered code anchor")
+    document = _strict_json_document(raw, label="run spec")
     if set(document) != {
         "schema_version",
         "run_spec_id",
@@ -218,40 +354,48 @@ def parse_pilot_run_spec_bytes(
         "repository_relative_paths",
         "execution",
     }:
-        raise HarnessError("Pilot run spec top-level fields do not match its schema")
+        raise HarnessError("Run spec top-level fields do not match its schema")
     if (
-        document.get("schema_version") != PILOT_RUN_SPEC_SCHEMA_VERSION
-        or document.get("run_spec_id") != PILOT_RUN_SPEC_ID
-        or document.get("phase") != "exploratory_development_pilot"
+        document.get("schema_version") != anchor.schema_version
+        or document.get("run_spec_id") != anchor.run_spec_id
+        or document.get("phase") != anchor.phase
         or not isinstance(document.get("repository_relative_paths"), dict)
         or not isinstance(document.get("execution"), dict)
     ):
-        raise HarnessError("Pilot run spec identity does not match its code anchors")
-    provenance = {
-        "run_spec_id": PILOT_RUN_SPEC_ID,
-        "schema_version": PILOT_RUN_SPEC_SCHEMA_VERSION,
-        "run_spec_sha256": digest,
-    }
+        raise HarnessError("Run spec identity does not match its registered anchor")
+    execution = document["execution"]
+    split_provenance = execution.get("split_provenance")
+    if (
+        execution.get("comparison_protocol_version")
+        != anchor.comparison_protocol_version
+        or execution.get("comparison_manifest_schema_version")
+        != anchor.comparison_manifest_schema_version
+        or not isinstance(split_provenance, dict)
+        or split_provenance.get("manifest_id") != anchor.split_manifest_id
+    ):
+        raise HarnessError("Run spec execution identity does not match its registered anchor")
+    provenance = anchor.provenance()
     return document, provenance
 
 
 def load_pilot_run_spec(path: str | Path) -> tuple[dict[str, Any], dict[str, str], bytes]:
-    """Load the one code-anchored pilot contract without accepting path aliases."""
+    """Load a registered run spec without accepting a filename alias."""
 
     candidate = Path(path).expanduser()
-    if candidate.name != PILOT_RUN_SPEC_FILENAME:
-        raise HarnessError(f"Pilot run spec must be named {PILOT_RUN_SPEC_FILENAME}")
-    raw = _regular_file_bytes(candidate, label="pilot run spec")
+    raw = _regular_file_bytes(candidate, label="run spec")
     document, provenance = parse_pilot_run_spec_bytes(raw)
+    anchor = resolve_run_spec_anchor(provenance)
+    if candidate.name != anchor.filename:
+        raise HarnessError(f"Run spec must be named {anchor.filename}")
     return document, provenance, raw
 
 
 def verify_pilot_run_spec_provenance(value: Any) -> bool:
-    return value == {
-        "run_spec_id": PILOT_RUN_SPEC_ID,
-        "schema_version": PILOT_RUN_SPEC_SCHEMA_VERSION,
-        "run_spec_sha256": PILOT_RUN_SPEC_SHA256,
-    }
+    try:
+        resolve_run_spec_anchor(value)
+    except HarnessError:
+        return False
+    return True
 
 
 def verify_repository_source_state(
@@ -448,6 +592,8 @@ def _stage_allowed_tools_policy(arms: tuple[str, ...]) -> dict[str, dict[str, An
 
 def _allowed_observed_terminals_policy(
     stage_turn_caps: dict[str, dict[str, int]],
+    *,
+    protocol_version: str = COMPARISON_PROTOCOL_VERSION,
 ) -> dict[str, dict[str, list[str]]]:
     return {
         arm: {
@@ -459,7 +605,11 @@ def _allowed_observed_terminals_policy(
                     ASSISTANT_TEXT_TERMINAL,
                     *(
                         [FINAL_RECOVERY_TERMINAL]
-                        if arm == "ours" and stage == "solve"
+                        if stage == "solve"
+                        and (
+                            protocol_version != LEGACY_COMPARISON_PROTOCOL_VERSION
+                            or arm == "ours"
+                        )
                         else []
                     ),
                 ]
@@ -712,6 +862,11 @@ def _arm_subset_summary(
         for row in arm_rows
         if row.get("status") != "completed"
     )
+    model_execution_failures = Counter(
+        str(row.get("model_failure_reason") or "unspecified")
+        for row in arm_rows
+        if row.get("outcome_kind") == "model_execution_failure"
+    )
     terminations = Counter(
         str(termination.get("reason") or "unspecified")
         for row in arm_rows
@@ -735,6 +890,10 @@ def _arm_subset_summary(
         "completed_only_accuracy": passed / len(completed) if completed else None,
         "completion_rate": len(completed) / len(tasks) if tasks else 0.0,
         "error_categories": dict(sorted(errors.items())),
+        "known_model_execution_failures": sum(model_execution_failures.values()),
+        "model_execution_failure_reasons": dict(
+            sorted(model_execution_failures.items())
+        ),
         "budget_termination_reasons": dict(sorted(terminations.items())),
         "input_tokens": _distribution([item["input_tokens"] for item in usage]),
         "output_tokens": _distribution([item["output_tokens"] for item in usage]),
@@ -854,6 +1013,7 @@ def comparison_summary(
     bootstrap_seed: int = 20260811,
     collection_tasks: list[SpreadsheetTask] | None = None,
     interrupted_keys: set[str] | None = None,
+    expected_protocol_version: str = COMPARISON_PROTOCOL_VERSION,
 ) -> dict[str, Any]:
     interrupted_keys = set() if interrupted_keys is None else set(interrupted_keys)
     collection_tasks = tasks if collection_tasks is None else collection_tasks
@@ -887,7 +1047,7 @@ def comparison_summary(
             str(raw_protocol) if raw_protocol is not None else "<missing>"
         )
         observed_protocols.add(observed_protocol)
-        if raw_protocol != COMPARISON_PROTOCOL_VERSION:
+        if raw_protocol != expected_protocol_version:
             protocol_mismatch_rows += 1
         if raw_task_id is not None and raw_arm is not None:
             identity_counts[_run_key(task_id, arm)] += 1
@@ -1084,7 +1244,7 @@ def comparison_summary(
         for key in attempted_expected
     )
     return {
-        "protocol": COMPARISON_PROTOCOL_VERSION,
+        "protocol": expected_protocol_version,
         "arm_display_names": {
             arm: COMPARISON_ARM_DISPLAY_NAMES[arm] for arm in arms
         },
@@ -1099,6 +1259,10 @@ def comparison_summary(
         "errored_arm_tasks": errored_arm_tasks,
         "missing_arm_tasks": missing_arm_tasks,
         "interrupted_unknown_arm_tasks": len(interrupted_keys),
+        "known_model_execution_failure_arm_tasks": sum(
+            latest[key].get("outcome_kind") == "model_execution_failure"
+            for key in attempted_expected
+        ),
         "interrupted_unknown_keys": sorted(interrupted_keys),
         "invalid_result_rows_ignored": invalid,
         "duplicate_arm_tasks": len(duplicate_arm_task_keys),
@@ -1187,6 +1351,7 @@ class ComparisonBenchmarkRunner:
             else None
         )
         self.run_spec_bytes = bytes(run_spec_bytes) if run_spec_bytes is not None else None
+        self.run_spec_anchor: RunSpecAnchor | None = None
         if any(
             value is not None
             for value in (
@@ -1212,6 +1377,7 @@ class ComparisonBenchmarkRunner:
                 or parsed_provenance != self.run_spec_provenance
             ):
                 raise ValueError("run spec document or provenance does not match its bytes")
+            self.run_spec_anchor = resolve_run_spec_anchor(parsed_provenance)
         self.relay_pacer = RelayPacer(config.request_interval_seconds)
         self.results_path = self.output_dir / "results.jsonl"
         self.manifest_path = self.output_dir / "comparison-manifest.json"
@@ -1241,12 +1407,21 @@ class ComparisonBenchmarkRunner:
             os.close(descriptor)
 
     def _prepare_repository_source_state(self) -> None:
-        is_pilot = (
-            self.split_provenance is not None
-            and self.split_provenance.get("manifest_id") == PILOT_SPLIT_MANIFEST_ID
-        )
         self.repository_source_state = (
-            verify_repository_source_state() if is_pilot else None
+            verify_repository_source_state()
+            if self.run_spec_anchor is not None and self.run_spec_anchor.launchable
+            else None
+        )
+
+    def _require_launchable_run_spec(
+        self, *, resume: bool = False, operation: str = "launch"
+    ) -> RunSpecAnchor | None:
+        if self.run_spec_provenance is None:
+            return None
+        return require_launchable_run_spec(
+            self.run_spec_provenance,
+            resume=resume,
+            operation=operation,
         )
 
     def preflight(self, tasks: list[SpreadsheetTask]) -> dict[str, Any]:
@@ -1254,6 +1429,16 @@ class ComparisonBenchmarkRunner:
 
         if not tasks or len({task.task_id for task in tasks}) != len(tasks):
             raise ValueError("comparison tasks must be non-empty with unique IDs")
+        self._require_launchable_run_spec(operation="launch")
+        require_evaluation_task_authorization(
+            (task.task_id for task in tasks),
+            authorized_manifest_id=(
+                self.run_spec_anchor.split_manifest_id
+                if self.run_spec_anchor is not None
+                and self.run_spec_anchor.launchable
+                else None
+            ),
+        )
         self._prepare_repository_source_state()
         ensure_strict_code_isolation((self.config.api_key,))
         return self._manifest(tasks)
@@ -1272,14 +1457,20 @@ class ComparisonBenchmarkRunner:
             raise HarnessError(
                 "Comparison tasks or dataset do not match frozen split provenance"
             )
+        split_manifest_id = (
+            self.split_provenance.get("manifest_id")
+            if isinstance(self.split_provenance, dict)
+            else None
+        )
         if (
-            self.split_provenance is not None
-            and self.split_provenance.get("manifest_id")
-            == PILOT_SPLIT_MANIFEST_ID
+            split_manifest_id in protected_run_spec_split_ids()
             and self.run_spec_document is None
         ):
-            raise HarnessError("The frozen pilot split requires its code-anchored run spec")
+            raise HarnessError("The frozen split requires its code-anchored run spec")
         if self.run_spec_document is not None:
+            anchor = resolve_run_spec_anchor(self.run_spec_provenance)
+            if anchor.split_manifest_id != split_manifest_id:
+                raise HarnessError("Run spec and split manifest identities do not match")
             actual_contract = comparison_execution_contract(
                 self.config,
                 arms=self.arms,
@@ -1836,6 +2027,7 @@ class ComparisonBenchmarkRunner:
     def seal_interrupted_inflight(self, tasks: list[SpreadsheetTask]) -> dict[str, Any]:
         if not tasks or len({task.task_id for task in tasks}) != len(tasks):
             raise ValueError("comparison tasks must be non-empty with unique IDs")
+        self._require_launchable_run_spec(operation="seal interrupted state for")
         # Sealing changes no model-visible state, but it must be attributed to
         # the same clean, remotely observed source identity as a continuation.
         self._prepare_repository_source_state()
@@ -1936,18 +2128,31 @@ class ComparisonBenchmarkRunner:
                     "task_timeout_seconds": self.task_timeout_seconds,
                 },
             )
-            result = run_arm(
-                arm=arm,
-                config=self.config,
-                session=session,
-                skills=self.skill_registry if arm == "ours" else None,
-                instruction=task.instruction,
-                max_output_tokens=self.max_output_tokens,
-                max_elapsed_seconds=self.task_timeout_seconds,
-                budget=budget,
-                pacer=self.relay_pacer,
-                max_turns_per_arm=self.max_turns_per_arm,
-            )
+            execution_failure: AgentExecutionFailure | None = None
+            try:
+                result = run_arm(
+                    arm=arm,
+                    config=self.config,
+                    session=session,
+                    skills=self.skill_registry if arm == "ours" else None,
+                    instruction=task.instruction,
+                    max_output_tokens=self.max_output_tokens,
+                    max_elapsed_seconds=self.task_timeout_seconds,
+                    budget=budget,
+                    pacer=self.relay_pacer,
+                    max_turns_per_arm=self.max_turns_per_arm,
+                )
+            except AgentExecutionFailure as exc:
+                if exc.reason not in AGENT_EXECUTION_FAILURE_REASONS:
+                    raise HarnessError(
+                        "Agent execution failure used an unknown reason"
+                    ) from exc
+                result = exc.agent_result
+                if result is None or not callable(getattr(result, "to_dict", None)):
+                    raise HarnessError(
+                        "Agent execution failure omitted auditable agent evidence"
+                    ) from exc
+                execution_failure = exc
             recalculation: dict[str, Any] | None = None
             if self.recalculate:
                 from .render import recalculate_workbook
@@ -1966,23 +2171,48 @@ class ComparisonBenchmarkRunner:
                 answer_sheet=task.answer_sheet,
             )
             budget.ensure_within_time(stage="score")
+            agent_evidence = result.to_dict()
+            if not isinstance(agent_evidence, dict):
+                raise HarnessError("Agent result evidence must be a JSON object")
             row.update(
                 {
                     "status": "completed",
-                    "passed": comparison.passed,
+                    "passed": comparison.passed if execution_failure is None else False,
+                    "artifact_score_passed": comparison.passed,
                     "comparison": comparison.to_dict(),
-                    "agent": result.to_dict(),
+                    "agent": agent_evidence,
                     "recalculation": recalculation,
                     "output_workbook": str(session.workbook_path),
                     "output_sha256": _sha256(session.workbook_path),
+                    "outcome_kind": (
+                        "scored"
+                        if execution_failure is None
+                        else "model_execution_failure"
+                    ),
                 }
             )
+            if execution_failure is not None:
+                safe_error = str(execution_failure).replace(
+                    self.config.api_key, "[REDACTED]"
+                )
+                row.update(
+                    {
+                        "error": safe_error,
+                        "error_type": type(execution_failure).__name__,
+                        "error_retryable": False,
+                        "error_category": "model_execution_failure",
+                        "model_failure_reason": execution_failure.reason,
+                    }
+                )
             session.recorder.record(
                 "benchmark.evaluated",
                 {
                     "task_id": task.task_id,
                     "arm": arm,
-                    "passed": comparison.passed,
+                    "passed": row["passed"],
+                    "artifact_score_passed": comparison.passed,
+                    "outcome_kind": row["outcome_kind"],
+                    "model_failure_reason": row.get("model_failure_reason"),
                     "status": "completed",
                     "scorer": "cleanroom-corrected-value-v1",
                     "style_checked": False,
@@ -2079,6 +2309,7 @@ class ComparisonBenchmarkRunner:
     def run(self, tasks: list[SpreadsheetTask], *, resume: bool = True) -> dict[str, Any]:
         if not tasks or len({task.task_id for task in tasks}) != len(tasks):
             raise ValueError("comparison tasks must be non-empty with unique IDs")
+        self._require_launchable_run_spec(resume=resume, operation="launch")
         # Source verification and the isolation probe run before creating a
         # manifest, spending model budget, or writing a result row.
         self.preflight(tasks)
@@ -2241,6 +2472,7 @@ class ComparisonBenchmarkRunner:
                 arms=self.arms,
                 bootstrap_seed=self.arm_order_seed,
                 interrupted_keys=set(interrupted_seals),
+                expected_protocol_version=COMPARISON_PROTOCOL_VERSION,
             )
             summary["circuit_breaker_tripped"] = circuit_breaker
             summary["exhausted_transient_arm_tasks"] = exhausted_transient
