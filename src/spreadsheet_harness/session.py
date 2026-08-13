@@ -218,12 +218,22 @@ class SessionPaths:
 class WorkbookSession:
     """Own one isolated workbook copy and apply atomic, auditable mutations."""
 
-    def __init__(self, paths: SessionPaths, run_id: str) -> None:
+    def __init__(
+        self,
+        paths: SessionPaths,
+        run_id: str,
+        *,
+        recorder_secrets: tuple[str, ...] = (),
+    ) -> None:
         self.paths = paths
         self.run_id = run_id
         self._write_lock = threading.RLock()
         self._snapshot_counter = 0
-        self.recorder = TrajectoryRecorder(paths.trajectory, run_id)
+        self.recorder = TrajectoryRecorder(
+            paths.trajectory,
+            run_id,
+            secrets=recorder_secrets,
+        )
 
     @classmethod
     def create(
@@ -232,6 +242,7 @@ class WorkbookSession:
         run_dir: str | Path,
         *,
         run_id: str | None = None,
+        recorder_secrets: tuple[str, ...] = (),
     ) -> WorkbookSession:
         source_path = Path(source).expanduser().resolve(strict=True)
         if source_path.suffix.lower() not in SUPPORTED_EDIT_FORMATS:
@@ -261,7 +272,11 @@ class WorkbookSession:
             artifacts=artifacts,
             trajectory=root / "trajectory.jsonl",
         )
-        session = cls(paths, run_id or root.name or uuid.uuid4().hex)
+        session = cls(
+            paths,
+            run_id or root.name or uuid.uuid4().hex,
+            recorder_secrets=recorder_secrets,
+        )
         session._validate(workbook_copy)
         session.recorder.record(
             "session.created",

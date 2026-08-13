@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from openpyxl import Workbook
 from spreadsheet_harness import cli as cli_module
 from spreadsheet_harness.agent import AgentResult
 from spreadsheet_harness.arms import PaperStageValidationError
-from spreadsheet_harness.benchmark import SpreadsheetTask
+from spreadsheet_harness.benchmark import SpreadsheetTask, compare_workbooks
 from spreadsheet_harness.comparison import (
     AVAILABLE_COMPARISON_ARMS,
     COMPARISON_ARMS,
@@ -106,13 +107,19 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
 
     assert manifest["task_count"] == 2
     assert manifest["schema_version"] == 10
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v19"
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v21"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
     )
     assert manifest["configuration"]["failed_edit_recovery_policy"] == (
         "force-successful-code-edit-before-terminal-v1"
+    )
+    assert manifest["configuration"]["spreadsheet_skill_policy"] == (
+        "pre-evaluation-baseline-frozen-v1"
+    )
+    assert manifest["configuration"]["edit_recovery_prompt_policy"] == (
+        "self-contained-request-scoped-verification-v1"
     )
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
@@ -137,6 +144,25 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "applies_to": "comparison stages with workbook tools after forced prefix",
         "direct_text_stages": ["paper.reconcile"],
     }
+    assert manifest["stage_allowed_tools"] == {
+        "bare": {"solve": ["code_interpreter"]},
+        "paper": {
+            "extract": ["inspect_range", "list_sheets"],
+            "vision_verify": ["render_workbook", "view_image"],
+            "latex_verify": ["range_to_latex"],
+            "reconcile": [],
+            "solve": ["code_interpreter"],
+        },
+        "ours": {"solve": "all"},
+    }
+    assert manifest["allowed_observed_terminals"]["paper"]["reconcile"] == [
+        "assistant_text"
+    ]
+    assert manifest["allowed_observed_terminals"]["ours"]["solve"] == [
+        "submit_result",
+        "assistant_text",
+        "final_recovery_code_interpreter",
+    ]
     assert manifest["forced_prefix_wire_policy"] == {
         "tool_choice": "explicit_function",
         "available_tools": "forced tool only",
@@ -211,6 +237,12 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     )
     assert manifest["configuration"]["request_attempt_telemetry"] == (
         "delivery-safe-retry-ids-headers-backoff-pacing-v4"
+    )
+    assert manifest["configuration"]["result_manifest_binding_policy"] == (
+        "exact-manifest-sha256-v1"
+    )
+    assert manifest["configuration"]["resume_journal_policy"] == (
+        "fail-closed-strict-utf8-no-repair-or-resample-v2"
     )
     assert manifest["hidden_from_models"] == [
         "instruction_type",
@@ -373,6 +405,7 @@ def test_comparison_summary_uses_end_to_end_denominator_and_pairing(tmp_path: Pa
         {
             "task_id": task.task_id,
             "arm": arm,
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "status": "completed",
             "passed": (
                 arm == "ours" or (arm == "paper" and task.task_id == "cell-1")
@@ -388,8 +421,8 @@ def test_comparison_summary_uses_end_to_end_denominator_and_pairing(tmp_path: Pa
                     "total_tokens": 120,
                 },
                 "request_timings": [
-                    {"turn": 1, "attempts": 1},
-                    {"turn": 2, "attempts": 2},
+                    {"turn": 1, "attempts": 1, "attempt_history": [{}]},
+                    {"turn": 2, "attempts": 2, "attempt_history": [{}, {}]},
                 ],
             },
         }
@@ -470,7 +503,9 @@ def test_comparison_request_attempt_audit_is_incomplete_when_expected_rows_are_m
             "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
             "agent": {
                 "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
-                "request_timings": [{"turn": 1, "attempts": 1}],
+                "request_timings": [
+                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
+                ],
             },
         }
         for task in tasks[:present_rows]
@@ -487,6 +522,36 @@ def test_comparison_request_attempt_audit_is_incomplete_when_expected_rows_are_m
     assert bare["expected"] == 2
     assert bare["attempted"] == present_rows
     assert bare["request_attempt_audit_complete"] is False
+    assert summary["inference_valid"] is False
+    assert "request_attempt_audit_incomplete" in summary["inference_invalid_reasons"]
+
+
+def test_comparison_summary_rejects_inexact_request_attempt_history(
+    tmp_path: Path,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    row = {
+        "task_id": task.task_id,
+        "arm": "bare",
+        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+        "status": "completed",
+        "passed": True,
+        "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
+        "agent": {
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+            "request_timings": [
+                {"turn": 1, "attempts": 2, "attempt_history": [{}]}
+            ],
+        },
+    }
+    results = tmp_path / "inexact-attempt-results.jsonl"
+    results.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = comparison_summary(results, [task], arms=("bare",))
+
+    assert summary["arms"]["bare"]["request_attempt_audit_complete"] is False
+    assert summary["inference_valid"] is False
+    assert "request_attempt_audit_incomplete" in summary["inference_invalid_reasons"]
 
 
 def test_comparison_summary_audits_unexpected_rows_and_disables_inference(
@@ -571,6 +636,7 @@ def test_comparison_summary_clears_pairwise_inference_on_collection_pollution(
         {
             "task_id": task.task_id,
             "arm": arm,
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "status": "completed",
             "passed": arm == "ours",
         }
@@ -609,13 +675,16 @@ def test_comparison_summary_supports_preregistered_analysis_subset(
         {
             "task_id": task.task_id,
             "arm": arm,
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "status": "completed",
             "passed": task.task_id == "cell-1",
             "calculation_backend": "libreoffice",
             "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
             "agent": {
                 "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
-                "request_timings": [{"turn": 1, "attempts": 1}],
+                "request_timings": [
+                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
+                ],
             },
         }
         for task in tasks
@@ -636,6 +705,31 @@ def test_comparison_summary_supports_preregistered_analysis_subset(
     assert subset["expected_arm_tasks"] == subset["completed_arm_tasks"] == 3
     assert subset["unknown_task_rows"] == 0
     assert subset["arms"]["bare"]["end_to_end_accuracy"] == 1
+
+
+@pytest.mark.parametrize("protocol", [None, "resource_matched_multi_arm_v19"])
+def test_comparison_summary_rejects_missing_or_mismatched_row_protocol(
+    tmp_path: Path,
+    protocol: str | None,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    row = {
+        "task_id": task.task_id,
+        "arm": "bare",
+        "status": "completed",
+        "passed": True,
+    }
+    if protocol is not None:
+        row["comparison_protocol_version"] = protocol
+    results = tmp_path / "protocol-mismatch-results.jsonl"
+    results.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = comparison_summary(results, [task], arms=("bare",))
+
+    assert summary["inference_valid"] is False
+    assert summary["protocol_mismatch_rows"] == 1
+    assert summary["observed_protocols"] == [protocol or "<missing>"]
+    assert "comparison_protocol_mismatch" in summary["inference_invalid_reasons"]
 
 
 def test_comparison_summary_rejects_analysis_outside_collection(tmp_path: Path) -> None:
@@ -670,6 +764,128 @@ def test_comparison_runner_refuses_duplicate_arm_task_rows(tmp_path: Path) -> No
         runner._latest()
 
 
+def test_comparison_runner_refuses_protocol_mismatched_resume(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    tasks = _tasks(tmp_path)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "mismatched-resume",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+    )
+    runner._prepare_manifest(tasks)
+    manifest_sha256 = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
+    runner.results_path.write_text(
+        json.dumps(
+            {
+                "task_id": tasks[0].task_id,
+                "arm": "bare",
+                "comparison_protocol_version": "resource_matched_multi_arm_v19",
+                "comparison_manifest_sha256": manifest_sha256,
+                "status": "completed",
+                "passed": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+
+    with pytest.raises(HarnessError, match="different or missing protocol"):
+        runner.run(tasks)
+
+
+@pytest.mark.parametrize(
+    "damaged",
+    [
+        '{"task_id":',
+        json.dumps(
+            {
+                "task_id": "cell-1",
+                "arm": "bare",
+                "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+                "status": "completed",
+                "passed": True,
+            }
+        ),
+    ],
+)
+def test_comparison_resume_fails_closed_on_damaged_journal_without_mutation(
+    tmp_path: Path,
+    monkeypatch: Any,
+    damaged: str,
+) -> None:
+    tasks = _tasks(tmp_path)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "damaged-resume",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+    )
+    runner._prepare_manifest(tasks)
+    runner.results_path.write_text(damaged, encoding="utf-8")
+    before = runner.results_path.read_bytes()
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def must_not_run(*_: Any, **__: Any) -> dict[str, Any]:
+        raise AssertionError("damaged comparison journal must never be resampled")
+
+    monkeypatch.setattr(runner, "_run_one", must_not_run)
+
+    with pytest.raises(HarnessError, match="damaged or non-terminated"):
+        runner.run(tasks)
+
+    assert runner.results_path.read_bytes() == before
+
+
+def test_comparison_resume_fails_closed_on_invalid_utf8_without_sampling(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    tasks = _tasks(tmp_path)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "invalid-utf8-resume",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+    )
+    runner._prepare_manifest(tasks)
+    manifest_sha256 = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
+    row = {
+        "task_id": tasks[0].task_id,
+        "arm": "bare",
+        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+        "comparison_manifest_sha256": manifest_sha256,
+        "status": "completed",
+        "agent": {"final_text": "CORRUPT"},
+    }
+    encoded = json.dumps(row).encode("utf-8").replace(b"CORRUPT", b"\xff") + b"\n"
+    runner.results_path.write_bytes(encoded)
+    before = runner.results_path.read_bytes()
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def must_not_run(*_: Any, **__: Any) -> dict[str, Any]:
+        raise AssertionError("invalid UTF-8 comparison journal must stop all sampling")
+
+    monkeypatch.setattr(runner, "_run_one", must_not_run)
+
+    with pytest.raises(HarnessError, match="damaged or non-terminated"):
+        runner.run(tasks)
+
+    assert runner.results_path.read_bytes() == before
+
+
 def test_comparison_runner_calls_arm_without_answer_metadata(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -692,8 +908,8 @@ def test_comparison_runner_calls_arm_without_answer_metadata(
         recalculate=False,
     )
 
-    row = runner._run_one(task, "bare")
-    second_row = runner._run_one(task, "ours")
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+    second_row = runner._run_one(task, "ours", comparison_manifest_sha256="a" * 64)
 
     assert row["status"] == "completed"
     assert second_row["status"] == "completed"
@@ -704,6 +920,7 @@ def test_comparison_runner_calls_arm_without_answer_metadata(
     assert row["max_model_calls"] == 100
     assert row["max_turns_per_arm"] == 100
     assert row["stage_turn_caps"] == {"solve": 100}
+    assert row["comparison_manifest_sha256"] == "a" * 64
     assert row["request_interval_seconds"] == 0.0
     assert row["litellm_timeout_seconds"] is None
     assert "TOP_SECRET" not in json.dumps(captured, default=str)
@@ -723,6 +940,129 @@ def test_comparison_runner_calls_arm_without_answer_metadata(
     }
 
 
+def test_comparison_run_binds_result_row_to_exact_manifest(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    tasks = _tasks(tmp_path)[:1]
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "manifest-bound",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        recalculate=False,
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_run_one(*_: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        task = tasks[0]
+        manifest = json.loads(runner.manifest_path.read_text(encoding="utf-8"))
+        task_dir = runner.output_dir / "runs" / task.task_id / "bare"
+        output = task_dir / "artifacts" / "output.xlsx"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(task.golden_path.read_bytes())
+        output_sha256 = hashlib.sha256(output.read_bytes()).hexdigest()
+        timings = [
+            {
+                "turn": turn,
+                "attempts": 1,
+                "attempt_history": [
+                    {"api_protocol": "responses", "endpoint": "/responses"}
+                ],
+            }
+            for turn in range(1, 4)
+        ]
+        budget = {
+            "limit": {
+                "model_calls": 20,
+                "total_tokens": 100_000,
+                "elapsed_seconds": 900,
+            },
+            "used": {"model_calls": 3, "total_tokens": 10, "elapsed_seconds": 1.0},
+            "termination": None,
+        }
+        comparison = compare_workbooks(
+            task.golden_path,
+            output,
+            task.answer_position,
+            answer_sheet=task.answer_sheet,
+        ).to_dict()
+        return {
+            "task_id": task.task_id,
+            "arm": "bare",
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "comparison_manifest_sha256": kwargs["comparison_manifest_sha256"],
+            "instruction_type": task.instruction_type,
+            "model": "test-model",
+            "api_protocol": "responses",
+            "requested_reasoning_effort": manifest["configuration"][
+                "requested_reasoning_effort"
+            ],
+            "reasoning_effort": manifest["configuration"]["reasoning_effort"],
+            "request_interval_seconds": 0.0,
+            "litellm_timeout_seconds": None,
+            "generation": manifest["configuration"]["generation"],
+            "max_model_calls": 20,
+            "max_turns_per_arm": 20,
+            "stage_turn_caps": {"solve": 20},
+            "calculation_backend": "not_recalculated",
+            "status": "completed",
+            "passed": comparison["passed"],
+            "comparison": comparison,
+            "run_dir": str(task_dir),
+            "output_workbook": str(output),
+            "output_sha256": output_sha256,
+            "budget": budget,
+            "agent": {
+                "arm": "bare",
+                "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
+                "request_timings": timings,
+                "budget": budget,
+                "stages": [
+                    {
+                        "name": "solve",
+                        "max_turns": 20,
+                        "allowed_tools": ["code_interpreter"],
+                        "first_tool_choice": "code_interpreter",
+                        "observed_first_tool": "code_interpreter",
+                        "forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+                        "observed_forced_tool_prefix": [
+                            "code_interpreter",
+                            "code_interpreter",
+                        ],
+                        "terminal_tool": "submit_result",
+                        "observed_terminal_tool": "submit_result",
+                        "agent": {"turns": 3, "request_timings": timings},
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(runner, "_run_one", fake_run_one)
+
+    summary = runner.run(tasks)
+
+    expected = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
+    assert captured["comparison_manifest_sha256"] == expected
+    row = json.loads(runner.results_path.read_text(encoding="utf-8"))
+    assert row["comparison_manifest_sha256"] == expected
+    assert row["status"] == "completed"
+    assert summary["protocol_audit_valid"] is True
+    assert summary["inference_valid"] is True
+
+    row["model"] = "tampered-model"
+    runner.results_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    rerun = runner.run(tasks)
+    assert rerun["protocol_audit_valid"] is False
+    assert rerun["inference_valid"] is False
+    assert "comparison_audit_failed" in rerun["inference_invalid_reasons"]
+
+
 def test_comparison_classifies_paper_stage_validation(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -739,7 +1079,7 @@ def test_comparison_classifies_paper_stage_validation(
         recalculate=False,
     )
 
-    row = runner._run_one(task, "paper")
+    row = runner._run_one(task, "paper", comparison_manifest_sha256="a" * 64)
 
     assert row["status"] == "error"
     assert row["error_category"] == "paper_stage_validation"
@@ -763,7 +1103,7 @@ def test_comparison_classifies_required_routing_failure(
         recalculate=False,
     )
 
-    row = runner._run_one(task, "bare")
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
 
     assert row["status"] == "error"
     assert row["error_category"] == "routing_protocol"
@@ -791,7 +1131,7 @@ def test_comparison_counts_ambiguous_delivery_as_transient_but_not_retryable(
         recalculate=False,
     )
 
-    row = runner._run_one(task, "bare")
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
 
     assert row["status"] == "error"
     assert row["error_category"] == "provider_transient"
@@ -815,11 +1155,14 @@ def test_resume_preserves_historical_provider_circuit_breaker(
         skill_registry=SkillRegistry([]),
     )
     runner._prepare_manifest(tasks)
+    manifest_sha256 = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
     runner.results_path.write_text(
         json.dumps(
             {
                 "task_id": tasks[0].task_id,
                 "arm": "bare",
+                "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+                "comparison_manifest_sha256": manifest_sha256,
                 "status": "error",
                 "passed": False,
                 "error_category": "provider_fatal",
@@ -829,7 +1172,8 @@ def test_resume_preserves_historical_provider_circuit_breaker(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "spreadsheet_harness.comparison.ensure_strict_code_isolation", lambda: {}
+        "spreadsheet_harness.comparison.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
     )
 
     def must_not_run(*_: Any, **__: Any) -> dict[str, Any]:
@@ -869,7 +1213,7 @@ def test_end_to_end_deadline_covers_scoring(
         recalculate=False,
     )
 
-    row = runner._run_one(task, "bare")
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
 
     assert row["status"] == "error"
     assert row["error_category"] == "budget_exhausted"
@@ -882,7 +1226,7 @@ def test_comparison_fails_before_writes_when_strict_isolation_is_unavailable(
 ) -> None:
     tasks = _tasks(tmp_path)
 
-    def unavailable() -> dict[str, str]:
+    def unavailable(*_: Any, **__: Any) -> dict[str, str]:
         raise CodeIsolationError("bwrap probe failed")
 
     monkeypatch.setattr(

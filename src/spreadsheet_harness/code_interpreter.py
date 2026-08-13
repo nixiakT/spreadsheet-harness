@@ -27,7 +27,7 @@ from openpyxl import load_workbook
 from openpyxl.formula import Tokenizer
 from openpyxl.utils import FORMULAE, column_index_from_string, coordinate_to_tuple
 
-from .errors import CodeIsolationError, ToolInputError
+from .errors import CodeIsolationError, ToolInputError, redact_sensitive_text
 
 STRICT_ISOLATION_POLICY = "bubblewrap-strict-workspace-v1"
 _PROBE_SENTINEL = "SHEET_STRICT_ISOLATION_OK"
@@ -650,12 +650,17 @@ def _environment(workspace: Path, workbook: Path) -> dict[str, str]:
     }
 
 
-def _diagnostic(stderr: str) -> str:
-    cleaned = " ".join(stderr.strip().split())[:1_000]
-    for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-        secret = os.environ.get(name)
-        if secret:
-            cleaned = cleaned.replace(secret, "[REDACTED]")
+def _diagnostic(stderr: str, *, secrets: tuple[str, ...] = ()) -> str:
+    environment_secrets = tuple(
+        secret
+        for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+        if (secret := os.environ.get(name))
+    )
+    redacted = redact_sensitive_text(
+        stderr,
+        secrets=(*secrets, *environment_secrets),
+    )
+    cleaned = " ".join(redacted.strip().split())[:1_000]
     return cleaned or "no diagnostic output"
 
 
@@ -983,7 +988,7 @@ def _formula_validation_failure(
     }
 
 
-def _run_strict_probe(bubblewrap: Path) -> None:
+def _run_strict_probe(bubblewrap: Path, *, secrets: tuple[str, ...] = ()) -> None:
     with tempfile.TemporaryDirectory(prefix="sheet-code-isolation-") as temporary:
         root = Path(temporary)
         workspace = root / "workspace"
@@ -1042,8 +1047,10 @@ print("SHEET_STRICT_ISOLATION_OK")
                 preexec_fn=_outer_sandbox_limits if os.name == "posix" else None,
             )
         except (OSError, subprocess.SubprocessError) as exc:
+            detail = _diagnostic(str(exc), secrets=secrets)
             raise CodeIsolationError(
-                f"Strict comparison sandbox probe could not start: {type(exc).__name__}: {exc}"
+                "Strict comparison sandbox probe could not start: "
+                f"{type(exc).__name__}: {detail}"
             ) from exc
         if (
             completed.returncode != 0
@@ -1052,11 +1059,12 @@ print("SHEET_STRICT_ISOLATION_OK")
         ):
             raise CodeIsolationError(
                 "Strict comparison sandbox probe failed "
-                f"(exit {completed.returncode}): {_diagnostic(completed.stderr)}"
+                f"(exit {completed.returncode}): "
+                f"{_diagnostic(completed.stderr, secrets=secrets)}"
             )
 
 
-def ensure_strict_code_isolation() -> dict[str, str]:
+def ensure_strict_code_isolation(secrets: tuple[str, ...] = ()) -> dict[str, str]:
     """Prove that strict isolation and the active venv's openpyxl work."""
 
     bubblewrap = _require_bubblewrap()
@@ -1069,7 +1077,7 @@ def ensure_strict_code_isolation() -> dict[str, str]:
     )
     with _PROBE_LOCK:
         if key not in _PROBE_SUCCESSES:
-            _run_strict_probe(bubblewrap)
+            _run_strict_probe(bubblewrap, secrets=secrets)
             _PROBE_SUCCESSES.add(key)
     return {
         "policy": STRICT_ISOLATION_POLICY,
@@ -1094,23 +1102,38 @@ class LocalCodeInterpreter:
         default_timeout: int = 30,
         max_output_chars: int = 20_000,
         require_isolation: bool = False,
+        secrets: tuple[str, ...] = (),
     ) -> None:
         self.workspace = workspace.resolve()
         self.workbook = workbook.resolve()
         self.default_timeout = default_timeout
         self.max_output_chars = max_output_chars
         self.require_isolation = require_isolation
+        self._secrets = tuple(secret for secret in secrets if secret)
         if self.require_isolation:
             if (
                 self.workspace != self.workbook
                 and self.workspace not in self.workbook.parents
             ):
                 raise CodeIsolationError("SHEET_WORKBOOK must be inside the isolated workspace")
-            ensure_strict_code_isolation()
+            ensure_strict_code_isolation(self._secrets)
         self.code_dir = self.workspace / "code"
         self.code_dir.mkdir(exist_ok=True)
         self._runtime_helper = self.workspace / _RUNTIME_HELPER_NAME
         self._runtime_helper.write_text(_RUNTIME_HELPER_SOURCE, encoding="utf-8")
+
+    def _bounded_output(self, value: str | bytes | None) -> tuple[str, bool]:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        raw = value or ""
+        redacted = redact_sensitive_text(raw, secrets=self._secrets)
+        truncated = len(raw) > self.max_output_chars or len(redacted) > self.max_output_chars
+        return redacted[: self.max_output_chars], truncated
+
+    def _bounded_diagnostic(self, value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        return _diagnostic(value or "", secrets=self._secrets)
 
     def _limits(self) -> None:
         _limits()
@@ -1247,7 +1270,7 @@ runpy.run_path(
             if self.require_isolation and (marker is None or not marker.is_file()):
                 raise CodeIsolationError(
                     "Strict comparison sandbox did not start; refusing unsandboxed fallback: "
-                    + _diagnostic(completed.stderr)
+                    + self._bounded_diagnostic(completed.stderr)
                 )
             bubblewrap_error: str | None = None
             namespace_failure = (
@@ -1264,15 +1287,16 @@ runpy.run_path(
                 )
             )
             if namespace_failure:
-                bubblewrap_error = completed.stderr.strip()[:1000]
+                bubblewrap_error = self._bounded_diagnostic(completed.stderr)
                 completed = self._execute(
                     [sys.executable, "-I", str(launcher), str(script)],
                     environment=environment,
                     timeout=timeout,
                 )
                 sandbox = "cwd+rlimit fallback (bubblewrap unavailable; trusted code only)"
-            stdout = completed.stdout
-            stderr = completed.stderr
+            stdout, stdout_truncated = self._bounded_output(completed.stdout)
+            stderr, stderr_truncated = self._bounded_output(completed.stderr)
+            truncated = stdout_truncated or stderr_truncated
             after_sha256 = _file_sha256(self.workbook)
             workbook_changed = before_sha256 != after_sha256
             if completed.returncode != 0 and workbook_changed:
@@ -1286,12 +1310,9 @@ runpy.run_path(
                         "Code execution failed after changing the workbook; all partial edits "
                         "were rolled back. Correct the script and apply the complete edit again."
                     ),
-                    "stdout": stdout[: self.max_output_chars],
-                    "stderr": stderr[: self.max_output_chars],
-                    "truncated": (
-                        len(stdout) > self.max_output_chars
-                        or len(stderr) > self.max_output_chars
-                    ),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "truncated": truncated,
                     "sandbox": sandbox,
                     "bubblewrap_error": bubblewrap_error,
                     "script": str(script.relative_to(self.workspace)),
@@ -1323,14 +1344,13 @@ runpy.run_path(
                         "exit_code": completed.returncode,
                         "error": (
                             "Workbook edit rolled back because the saved artifact could not "
-                            f"pass formula validation: {type(exc).__name__}: {exc}"
+                            "pass formula validation: "
+                            f"{type(exc).__name__}: "
+                            f"{redact_sensitive_text(str(exc), secrets=self._secrets)}"
                         ),
-                        "stdout": stdout[: self.max_output_chars],
-                        "stderr": stderr[: self.max_output_chars],
-                        "truncated": (
-                            len(stdout) > self.max_output_chars
-                            or len(stderr) > self.max_output_chars
-                        ),
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "truncated": truncated,
                         "sandbox": sandbox,
                         "bubblewrap_error": bubblewrap_error,
                         "script": str(script.relative_to(self.workspace)),
@@ -1357,12 +1377,9 @@ runpy.run_path(
                         "ok": False,
                         "exit_code": completed.returncode,
                         "error": error,
-                        "stdout": stdout[: self.max_output_chars],
-                        "stderr": stderr[: self.max_output_chars],
-                        "truncated": (
-                            len(stdout) > self.max_output_chars
-                            or len(stderr) > self.max_output_chars
-                        ),
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "truncated": truncated,
                         "sandbox": sandbox,
                         "bubblewrap_error": bubblewrap_error,
                         "script": str(script.relative_to(self.workspace)),
@@ -1378,12 +1395,11 @@ runpy.run_path(
                             "formula issue in one complete edit, save, recalculate, and verify."
                         ),
                     }
-            truncated = len(stdout) > self.max_output_chars or len(stderr) > self.max_output_chars
             return {
                 "ok": completed.returncode == 0,
                 "exit_code": completed.returncode,
-                "stdout": stdout[: self.max_output_chars],
-                "stderr": stderr[: self.max_output_chars],
+                "stdout": stdout,
+                "stderr": stderr,
                 "truncated": truncated,
                 "sandbox": sandbox,
                 "bubblewrap_error": bubblewrap_error,
@@ -1417,6 +1433,8 @@ runpy.run_path(
                 rejected_sha256 = after_sha256
                 _restore_workbook(rollback_snapshot, self.workbook)
                 after_sha256 = _file_sha256(self.workbook)
+            stdout, stdout_truncated = self._bounded_output(exc.stdout)
+            stderr, stderr_truncated = self._bounded_output(exc.stderr)
             return {
                 "ok": False,
                 "error": (
@@ -1427,12 +1445,9 @@ runpy.run_path(
                         else ""
                     )
                 ),
-                "stdout": (exc.stdout or "")[: self.max_output_chars]
-                if isinstance(exc.stdout, str)
-                else "",
-                "stderr": (exc.stderr or "")[: self.max_output_chars]
-                if isinstance(exc.stderr, str)
-                else "",
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
                 "sandbox": sandbox,
                 "script": str(script.relative_to(self.workspace)),
                 "workbook_sha256_before": before_sha256,
@@ -1445,7 +1460,8 @@ runpy.run_path(
         except OSError as exc:
             if self.require_isolation:
                 raise CodeIsolationError(
-                    f"Strict comparison sandbox could not start: {type(exc).__name__}: {exc}"
+                    "Strict comparison sandbox could not start: "
+                    f"{type(exc).__name__}: {self._bounded_diagnostic(str(exc))}"
                 ) from exc
             raise
         finally:

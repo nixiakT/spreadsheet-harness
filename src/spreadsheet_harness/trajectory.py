@@ -10,22 +10,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .errors import redact_sensitive_text
+
 _SECRET_KEY = re.compile(r"(?:api[_-]?key|authorization|auth[_-]?token|access[_-]?token)", re.I)
-_SECRET_VALUE = re.compile(r"\b(?:cr|sk)-[A-Za-z0-9_-]{12,}\b|\bcr_[A-Za-z0-9_-]{12,}\b")
 _DATA_URL = re.compile(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)")
 
 
-def _sanitize(value: Any, key: str | None = None) -> Any:
+def _sanitize(
+    value: Any,
+    key: str | None = None,
+    *,
+    secrets: tuple[str, ...] = (),
+) -> Any:
     if key and _SECRET_KEY.search(key):
         return "[REDACTED]"
     if isinstance(value, dict):
-        return {str(k): _sanitize(v, str(k)) for k, v in value.items()}
+        result: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            string_key = str(raw_key)
+            safe_key = redact_sensitive_text(string_key, secrets=secrets)
+            result[safe_key] = _sanitize(item, string_key, secrets=secrets)
+        return result
     if isinstance(value, list | tuple):
-        return [_sanitize(item) for item in value]
+        return [_sanitize(item, secrets=secrets) for item in value]
     if isinstance(value, Path):
-        return str(value)
+        return _sanitize(str(value), secrets=secrets)
     if isinstance(value, str):
-        value = _SECRET_VALUE.sub("[REDACTED]", value)
+        value = redact_sensitive_text(value, secrets=secrets)
 
         def replace_image(match: re.Match[str]) -> str:
             encoded = match.group(1)
@@ -35,15 +46,22 @@ def _sanitize(value: Any, key: str | None = None) -> Any:
         return _DATA_URL.sub(replace_image, value)
     if value is None or isinstance(value, bool | int | float):
         return value
-    return repr(value)
+    return _sanitize(repr(value), secrets=secrets)
 
 
 class TrajectoryRecorder:
     """Write one JSON object per line so interrupted runs remain inspectable."""
 
-    def __init__(self, path: Path, run_id: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        run_id: str,
+        *,
+        secrets: tuple[str, ...] = (),
+    ) -> None:
         self.path = path
         self.run_id = run_id
+        self._secrets = tuple(secret for secret in secrets if secret)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
@@ -52,7 +70,7 @@ class TrajectoryRecorder:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "run_id": self.run_id,
             "event": event,
-            "payload": _sanitize(payload or {}),
+            "payload": _sanitize(payload or {}, secrets=self._secrets),
         }
         encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self.path.open("a", encoding="utf-8") as handle:

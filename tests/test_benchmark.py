@@ -436,6 +436,45 @@ def test_benchmark_passes_max_output_tokens_to_agent(
     assert len(payload["scoring_metadata_sha256"]) == 64
 
 
+def test_benchmark_passes_provider_key_to_registry_redaction(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    initial = tmp_path / "redaction-initial.xlsx"
+    golden = tmp_path / "redaction-golden.xlsx"
+    _book(initial, {"Sheet": [[1]]})
+    _book(golden, {"Sheet": [[1]]})
+    secret = "key://benchmark+tenant?signature=" + "B" * 128
+    captured: dict[str, Any] = {}
+
+    class CapturingRegistry:
+        def __init__(self, session: Any, **kwargs: Any) -> None:
+            captured["session"] = session
+            captured.update(kwargs)
+
+    class OfflineAgent:
+        def __init__(self, _: ProviderConfig, tools: Any, **__: Any) -> None:
+            assert tools is not None
+
+        def run(self, _: str) -> AgentResult:
+            return AgentResult("done", 1, 0, {}, "response")
+
+    monkeypatch.setattr(benchmark_module, "SpreadsheetToolRegistry", CapturingRegistry)
+    monkeypatch.setattr(benchmark_module, "SpreadsheetAgent", OfflineAgent)
+    task = SpreadsheetTask("1", "noop", initial, golden, "Cell-Level", "A1", None)
+    runner = VerifiedBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", secret, "test-model"),
+        tmp_path / "redaction-results",
+        enable_code=True,
+        recalculate=False,
+    )
+
+    row = runner._run_task(task, 1)
+
+    assert row["status"] == "completed", row
+    assert captured["enable_code"] is True
+    assert captured["redaction_secrets"] == (secret,)
+
+
 def test_benchmark_does_not_task_retry_ambiguous_provider_delivery(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

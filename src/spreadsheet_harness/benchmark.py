@@ -197,7 +197,12 @@ def _valid_jsonl_rows(path: Path) -> tuple[list[dict[str, Any]], int]:
         return [], 0
     rows: list[dict[str, Any]] = []
     invalid = 0
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw_line in path.read_bytes().splitlines():
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            invalid += 1
+            continue
         if not line.strip():
             continue
         try:
@@ -856,8 +861,17 @@ class VerifiedBenchmarkRunner:
         }
         session: WorkbookSession | None = None
         try:
-            session = WorkbookSession.create(task.input_path, task_dir, run_id=task.task_id)
-            tools = SpreadsheetToolRegistry(session, enable_code=self.enable_code)
+            session = WorkbookSession.create(
+                task.input_path,
+                task_dir,
+                run_id=task.task_id,
+                recorder_secrets=(self.config.api_key,),
+            )
+            tools = SpreadsheetToolRegistry(
+                session,
+                enable_code=self.enable_code,
+                redaction_secrets=(self.config.api_key,),
+            )
             pacer = _process_pacer(
                 self._pacing_scope_id, self.config.request_interval_seconds
             )

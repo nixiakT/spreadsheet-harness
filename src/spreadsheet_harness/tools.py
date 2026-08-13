@@ -180,6 +180,7 @@ class SpreadsheetToolRegistry:
         enable_code: bool = True,
         allowed_tools: set[str] | None = None,
         require_code_isolation: bool = False,
+        redaction_secrets: tuple[str, ...] = (),
     ) -> None:
         self.session = session
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
@@ -188,6 +189,7 @@ class SpreadsheetToolRegistry:
                 session.workspace,
                 session.workbook_path,
                 require_isolation=require_code_isolation,
+                secrets=redaction_secrets,
             )
             if enable_code
             else None
@@ -391,7 +393,11 @@ class SpreadsheetToolRegistry:
                         "Run trusted Python in the task workspace for analysis and direct "
                         "workbook edits. Use SHEET_WORKBOOK for the current workbook; "
                         "sheet_harness helper functions and openpyxl compatibility shims are "
-                        "preloaded."
+                        "preloaded. Every call starts a fresh Python process: variables, "
+                        "imports, and workbook objects do not persist across calls. Make each "
+                        "editing or recovery script self-contained: import, load, re-read the "
+                        "request and inspected workbook state, edit, save, close, reopen, verify "
+                        "the requested change and nearby cells, then print compact verification."
                     ),
                     _object_schema(
                         {

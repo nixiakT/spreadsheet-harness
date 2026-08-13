@@ -221,12 +221,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = _provider(args)
 
     with _editable_source(source) as (editable, normalized):
-        session = WorkbookSession.create(editable, run_dir)
+        session = WorkbookSession.create(
+            editable,
+            run_dir,
+            recorder_secrets=(config.api_key,),
+        )
         if normalized:
             shutil.copy2(
                 source.resolve(), session.paths.input.parent / ("original" + source.suffix)
             )
-        tools = SpreadsheetToolRegistry(session, enable_code=not args.no_code)
+        tools = SpreadsheetToolRegistry(
+            session,
+            enable_code=not args.no_code,
+            redaction_secrets=(config.api_key,),
+        )
         agent = SpreadsheetAgent(
             config,
             tools,

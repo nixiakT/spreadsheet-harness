@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import platform
 import shutil
 import subprocess
@@ -11,7 +12,9 @@ import pytest
 from openpyxl import load_workbook
 
 from spreadsheet_harness import code_interpreter
+from spreadsheet_harness.agent import ResponseTurn, SpreadsheetAgent
 from spreadsheet_harness.code_interpreter import LocalCodeInterpreter
+from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import CodeIsolationError, ToolInputError
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry
@@ -128,6 +131,36 @@ def test_required_isolation_fails_when_bubblewrap_probe_cannot_start(
         code_interpreter.ensure_strict_code_isolation()
 
 
+def test_strict_preflight_redacts_configured_secret_before_diagnostic_truncation(
+    monkeypatch: Any,
+) -> None:
+    code_interpreter._reset_isolation_probe_cache()
+    secret = "key://tenant+spreadsheet?signature=" + "Q" * 256 + "&scope=%2Fall"
+    diagnostic = "x" * 950 + secret + " probe failed"
+    monkeypatch.setattr(code_interpreter.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        code_interpreter.shutil, "which", lambda _: "/usr/bin/bwrap"
+    )
+    monkeypatch.setattr(
+        code_interpreter.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["bwrap"],
+            1,
+            stdout="",
+            stderr=diagnostic,
+        ),
+    )
+
+    with pytest.raises(CodeIsolationError, match="probe failed") as caught:
+        code_interpreter.ensure_strict_code_isolation((secret,))
+
+    message = str(caught.value)
+    assert secret not in message
+    assert secret[:32] not in message
+    assert "[REDACTED]" in message
+
+
 def test_strict_execution_never_falls_back_when_launcher_did_not_start(
     tmp_path: Path,
     monkeypatch: Any,
@@ -136,7 +169,11 @@ def test_strict_execution_never_falls_back_when_launcher_did_not_start(
     workspace.mkdir()
     workbook = workspace / "book.xlsx"
     workbook.touch()
-    monkeypatch.setattr(code_interpreter, "ensure_strict_code_isolation", lambda: {})
+    monkeypatch.setattr(
+        code_interpreter,
+        "ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
     monkeypatch.setattr(
         code_interpreter,
         "_strict_command",
@@ -192,6 +229,53 @@ wb.close()
     assert result["workbook_changed"] is True
     assert result["helper_module"] == "sheet_harness.py"
     assert "Sales" in result["stdout"]
+
+
+def test_code_interpreter_starts_each_call_in_a_fresh_process(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "fresh-process-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    first = interpreter.run("transient_name = 42")
+    second = interpreter.run("print(transient_name)")
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert "NameError" in second["stderr"]
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("bwrap") is None,
+    reason="strict Bubblewrap integration requires Linux and bwrap",
+)
+def test_strict_code_interpreter_starts_each_call_in_a_fresh_process(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    code_interpreter._reset_isolation_probe_cache()
+    session = WorkbookSession.create(sample_workbook, tmp_path / "strict-fresh-run")
+    try:
+        interpreter = LocalCodeInterpreter(
+            session.workspace,
+            session.workbook_path,
+            require_isolation=True,
+        )
+    except CodeIsolationError as exc:
+        pytest.skip(f"Bubblewrap installed but namespaces unavailable: {exc}")
+
+    first = interpreter.run("transient_name = 42")
+    second = interpreter.run("print(transient_name)")
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert "NameError" in second["stderr"]
+    assert first["sandbox"].startswith(code_interpreter.STRICT_ISOLATION_POLICY)
 
 
 def test_code_interpreter_rolls_back_new_invalid_formula_references(
@@ -987,3 +1071,257 @@ print("openpyxl-isolated-ok")
     assert result["stdout"].strip() == "openpyxl-isolated-ok"
     assert result["sandbox"].startswith(code_interpreter.STRICT_ISOLATION_POLICY)
     assert workbook.is_file()
+
+
+@pytest.mark.parametrize(
+    ("stream", "code_template"),
+    [
+        ("stdout", "print('x' * 19900 + {secret!r}, end='')"),
+        (
+            "stderr",
+            "import sys\nsys.stderr.write('x' * 19900 + {secret!r})",
+        ),
+    ],
+)
+def test_code_interpreter_redacts_secret_before_output_truncation(
+    sample_workbook: Path,
+    tmp_path: Path,
+    stream: str,
+    code_template: str,
+) -> None:
+    secret = "credential-" + "Q" * 256
+    session = WorkbookSession.create(sample_workbook, tmp_path / f"{stream}-redaction")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        max_output_chars=20_000,
+        require_isolation=False,
+        secrets=(secret,),
+    )
+
+    result = interpreter.run(code_template.format(secret=secret))
+
+    assert result["ok"] is True, result
+    output = result[stream]
+    assert secret not in output
+    assert secret[:100] not in output
+    assert output.endswith("[REDACTED]")
+    assert len(output) <= 20_000
+
+
+def test_code_interpreter_redacts_timeout_output_before_truncation(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    secret = "credential-" + "T" * 256
+    exposed = "x" * 19_900 + secret
+    session = WorkbookSession.create(sample_workbook, tmp_path / "timeout-redaction")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        max_output_chars=20_000,
+        require_isolation=False,
+        secrets=(secret,),
+    )
+
+    def time_out(
+        command: list[str],
+        *,
+        environment: dict[str, str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        del environment
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=exposed,
+            stderr=exposed,
+        )
+
+    monkeypatch.setattr(interpreter, "_execute", time_out)
+
+    result = interpreter.run("print('never completes')")
+
+    assert result["ok"] is False
+    for stream in ("stdout", "stderr"):
+        assert secret not in result[stream]
+        assert secret[:100] not in result[stream]
+        assert result[stream].endswith("[REDACTED]")
+        assert len(result[stream]) <= 20_000
+
+
+def test_code_interpreter_redacts_bubblewrap_diagnostic_before_truncation(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    secret = "credential-" + "B" * 256
+    diagnostic = "x" * 900 + secret + " permission denied"
+    session = WorkbookSession.create(sample_workbook, tmp_path / "bubblewrap-redaction")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+        secrets=(secret,),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_command",
+        lambda *_args, **_kwargs: (["bwrap", "probe"], "bubblewrap: test"),
+    )
+    attempts = iter(
+        [
+            subprocess.CompletedProcess(
+                ["bwrap", "probe"],
+                1,
+                stdout="",
+                stderr=diagnostic,
+            ),
+            subprocess.CompletedProcess(
+                [sys.executable],
+                0,
+                stdout="fallback completed",
+                stderr="",
+            ),
+        ]
+    )
+    monkeypatch.setattr(interpreter, "_execute", lambda *_args, **_kwargs: next(attempts))
+
+    result = interpreter.run("print('fallback')")
+
+    assert result["ok"] is True, result
+    assert secret not in result["bubblewrap_error"]
+    assert secret[:100] not in result["bubblewrap_error"]
+    assert "[REDACTED]" in result["bubblewrap_error"]
+
+
+def test_strict_code_interpreter_redacts_launcher_diagnostic_before_truncation(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    secret = "credential-" + "D" * 256
+    diagnostic = "x" * 900 + secret + " permission denied"
+    session = WorkbookSession.create(sample_workbook, tmp_path / "strict-redaction")
+    monkeypatch.setattr(
+        code_interpreter,
+        "ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        code_interpreter,
+        "_strict_command",
+        lambda *_args, **_kwargs: ["bwrap", "strict"],
+    )
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=True,
+        secrets=(secret,),
+    )
+    monkeypatch.setattr(
+        interpreter,
+        "_execute",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["bwrap", "strict"],
+            1,
+            stdout="",
+            stderr=diagnostic,
+        ),
+    )
+
+    with pytest.raises(CodeIsolationError) as caught:
+        interpreter.run("print('must not run')")
+
+    message = str(caught.value)
+    assert secret not in message
+    assert secret[:100] not in message
+    assert "[REDACTED]" in message
+
+
+def test_registry_redaction_reaches_trajectory_and_next_model_turn(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    secret = "credential-" + "R" * 256
+    exposed = "x" * 19_900 + secret
+    session = WorkbookSession.create(sample_workbook, tmp_path / "registry-redaction")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=True,
+        allowed_tools={"code_interpreter"},
+        redaction_secrets=(secret,),
+    )
+    assert tools.interpreter is not None
+    monkeypatch.setattr(
+        tools.interpreter,
+        "_execute",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [sys.executable],
+            0,
+            stdout=exposed,
+            stderr="",
+        ),
+    )
+
+    class BoundaryClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> BoundaryClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **_: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-1",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "code_interpreter",
+                            "arguments": json.dumps({"code": "print('probe')"}),
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-2",
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done"}],
+                    }
+                ],
+                "Done",
+                {},
+            )
+
+    BoundaryClient.requests = []
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", BoundaryClient)
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", secret, "test-model"),
+        tools,
+        first_tool_choice="code_interpreter",
+        max_turns=2,
+    ).run("Inspect the workbook")
+
+    assert result.final_text == "Done"
+    assert len(BoundaryClient.requests) == 2
+    second_payload = json.dumps(BoundaryClient.requests[1], ensure_ascii=False)
+    trajectory = session.paths.trajectory.read_text(encoding="utf-8")
+    for rendered in (second_payload, trajectory):
+        assert secret not in rendered
+        assert secret[:100] not in rendered
+        assert "[REDACTED]" in rendered

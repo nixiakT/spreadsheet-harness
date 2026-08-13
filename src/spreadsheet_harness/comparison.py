@@ -19,7 +19,9 @@ from time import monotonic
 from typing import Any
 
 from .agent import (
+    ASSISTANT_TEXT_TERMINAL,
     CONNECT_RETRY_MIN_SECONDS,
+    FINAL_RECOVERY_TERMINAL,
     OVERLOAD_RETRY_MIN_SECONDS,
     RETRY_BACKOFF_MAX_SECONDS,
     SAFE_AUTOMATIC_RETRY_REASONS,
@@ -27,9 +29,15 @@ from .agent import (
     TERMINAL_TOOL_NAME,
 )
 from .arms import (
+    BARE_TOOLS,
     COMPARISON_FORCED_TOOL_PREFIX_POLICY,
     COMPARISON_TURN_CAP_POLICY_VERSION,
+    PAPER_EXTRACTION_TOOLS,
+    PAPER_LATEX_TOOLS,
+    PAPER_RECONCILIATION_TOOLS,
+    PAPER_SOLVER_TOOLS,
     PAPER_TURN_CAP_SCALING_VERSION,
+    PAPER_VISION_TOOLS,
     PaperStageValidationError,
     comparison_stage_turn_caps,
     run_arm,
@@ -39,7 +47,6 @@ from .benchmark import (
     VERIFIED_SHA256,
     SpreadsheetTask,
     _atomic_write_json,
-    _repair_jsonl,
     _runtime_fingerprint,
     _sha256,
     _source_fingerprint,
@@ -79,11 +86,115 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v19"
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v21"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 10
+COMPARISON_CONFIGURATION_POLICIES = {
+    "code_workbook_formula_gate": (
+        "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
+    ),
+    "failed_edit_recovery_policy": "force-successful-code-edit-before-terminal-v1",
+    "spreadsheet_skill_policy": "pre-evaluation-baseline-frozen-v1",
+    "edit_recovery_prompt_policy": "self-contained-request-scoped-verification-v1",
+    "result_manifest_binding_policy": "exact-manifest-sha256-v1",
+    "resume_journal_policy": "fail-closed-strict-utf8-no-repair-or-resample-v2",
+    "request_attempt_audit_policy": "exact-attempt-history-per-response-v1",
+}
 
 
 def _run_key(task_id: str, arm: str) -> str:
     return f"{task_id}::{arm}"
+
+
+def _stage_allowed_tools_policy(arms: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    return {
+        arm: (
+            {"solve": sorted(BARE_TOOLS)}
+            if arm in {"bare", "profile"}
+            else {"solve": "all"}
+            if arm in {"native", "ours"}
+            else {
+                "extract": sorted(PAPER_EXTRACTION_TOOLS),
+                "vision_verify": sorted(PAPER_VISION_TOOLS),
+                "latex_verify": sorted(PAPER_LATEX_TOOLS),
+                "reconcile": sorted(PAPER_RECONCILIATION_TOOLS),
+                "solve": sorted(PAPER_SOLVER_TOOLS),
+            }
+        )
+        for arm in arms
+    }
+
+
+def _allowed_observed_terminals_policy(
+    stage_turn_caps: dict[str, dict[str, int]],
+) -> dict[str, dict[str, list[str]]]:
+    return {
+        arm: {
+            stage: (
+                [ASSISTANT_TEXT_TERMINAL]
+                if arm == "paper" and stage == "reconcile"
+                else [
+                    TERMINAL_TOOL_NAME,
+                    ASSISTANT_TEXT_TERMINAL,
+                    *(
+                        [FINAL_RECOVERY_TERMINAL]
+                        if arm == "ours" and stage == "solve"
+                        else []
+                    ),
+                ]
+            )
+            for stage in stage_turn_caps[arm]
+        }
+        for arm in stage_turn_caps
+    }
+
+
+def _manifest_file_sha256(path: Path) -> str:
+    return _sha256(path)
+
+
+def _require_int(value: Any, *, minimum: int = 0) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        return None
+    return value
+
+
+def _request_attempt_audit(row: dict[str, Any]) -> dict[str, int | bool]:
+    budget_calls = _require_int(
+        ((row.get("budget") or {}).get("used") or {}).get("model_calls"),
+    )
+    timings = (row.get("agent") or {}).get("request_timings")
+    attempts: list[int] = []
+    valid_timings = isinstance(timings, list) and bool(timings)
+    if valid_timings:
+        for timing in timings:
+            if not isinstance(timing, dict):
+                valid_timings = False
+                break
+            raw_attempts = _require_int(timing.get("attempts"), minimum=1)
+            history = timing.get("attempt_history")
+            if raw_attempts is None or not isinstance(history, list) or len(history) != raw_attempts:
+                valid_timings = False
+                break
+            attempts.append(raw_attempts)
+    failed_attempts = _require_int(
+        (row.get("provider_error") or {}).get("attempts", 0),
+    )
+    if failed_attempts is None:
+        failed_attempts = 0
+    exact = bool(
+        row.get("status") == "completed"
+        and budget_calls is not None
+        and valid_timings
+        and len(attempts) == budget_calls
+    )
+    known_success_attempts = sum(attempts) if valid_timings else (budget_calls or 0)
+    return {
+        "known_http_attempts": known_success_attempts + failed_attempts,
+        "known_successful_retries": sum(attempts) - len(attempts) if valid_timings else 0,
+        "known_failed_attempts": failed_attempts,
+        "has_audit": bool(valid_timings or budget_calls or failed_attempts),
+        "exact": exact,
+    }
 
 
 def _arm_order(task_id: str, seed: int, arms: tuple[str, ...]) -> list[str]:
@@ -273,53 +384,7 @@ def _arm_subset_summary(
         float(((row.get("budget") or {}).get("used") or {}).get("model_calls", 0) or 0)
         for row in arm_rows
     ]
-    request_attempt_audits: list[dict[str, int | bool]] = []
-    for row in arm_rows:
-        budget_calls = int(
-            ((row.get("budget") or {}).get("used") or {}).get("model_calls", 0)
-            or 0
-        )
-        timings = (row.get("agent") or {}).get("request_timings")
-        attempts: list[int] = []
-        valid_timings = isinstance(timings, list) and bool(timings)
-        if valid_timings:
-            for timing in timings:
-                if not isinstance(timing, dict):
-                    valid_timings = False
-                    break
-                raw_attempts = timing.get("attempts", 1)
-                if (
-                    not isinstance(raw_attempts, int)
-                    or isinstance(raw_attempts, bool)
-                    or raw_attempts < 1
-                ):
-                    valid_timings = False
-                    break
-                attempts.append(raw_attempts)
-        failed_attempts = (row.get("provider_error") or {}).get("attempts", 0)
-        if (
-            not isinstance(failed_attempts, int)
-            or isinstance(failed_attempts, bool)
-            or failed_attempts < 0
-        ):
-            failed_attempts = 0
-        exact = bool(
-            row.get("status") == "completed"
-            and valid_timings
-            and len(attempts) == budget_calls
-        )
-        known_success_attempts = sum(attempts) if valid_timings else budget_calls
-        request_attempt_audits.append(
-            {
-                "known_http_attempts": known_success_attempts + failed_attempts,
-                "known_successful_retries": (
-                    sum(attempts) - len(attempts) if valid_timings else 0
-                ),
-                "known_failed_attempts": failed_attempts,
-                "has_audit": bool(valid_timings or budget_calls or failed_attempts),
-                "exact": exact,
-            }
-        )
+    request_attempt_audits = [_request_attempt_audit(row) for row in arm_rows]
     errors = Counter(
         str(row.get("error_category") or "unspecified")
         for row in arm_rows
@@ -483,6 +548,8 @@ def comparison_summary(
     unknown_task_ids: set[str] = set()
     unknown_arms: set[str] = set()
     unexpected_arms: set[str] = set()
+    protocol_mismatch_rows = 0
+    observed_protocols: set[str] = set()
     unknown_task_rows = 0
     unknown_arm_rows = 0
     unexpected_arm_rows = 0
@@ -491,6 +558,13 @@ def comparison_summary(
         raw_arm = row.get("arm")
         task_id = str(raw_task_id) if raw_task_id is not None else "<missing>"
         arm = str(raw_arm) if raw_arm is not None else "<missing>"
+        raw_protocol = row.get("comparison_protocol_version")
+        observed_protocol = (
+            str(raw_protocol) if raw_protocol is not None else "<missing>"
+        )
+        observed_protocols.add(observed_protocol)
+        if raw_protocol != COMPARISON_PROTOCOL_VERSION:
+            protocol_mismatch_rows += 1
         if raw_task_id is not None and raw_arm is not None:
             identity_counts[_run_key(task_id, arm)] += 1
         if raw_task_id is None or task_id not in expected_task_ids:
@@ -592,6 +666,13 @@ def comparison_summary(
         inference_invalid_reasons.append("unknown_arms")
     if unexpected_arm_rows:
         inference_invalid_reasons.append("unexpected_arms")
+    if protocol_mismatch_rows:
+        inference_invalid_reasons.append("comparison_protocol_mismatch")
+    if any(
+        not arm_summary.get("request_attempt_audit_complete")
+        for arm_summary in by_arm.values()
+    ):
+        inference_invalid_reasons.append("request_attempt_audit_incomplete")
     if missing_arm_tasks:
         inference_invalid_reasons.append("missing_arm_tasks")
     if errored_arm_tasks:
@@ -628,6 +709,8 @@ def comparison_summary(
         "unknown_arms": sorted(unknown_arms),
         "unexpected_arm_rows": unexpected_arm_rows,
         "unexpected_arms": sorted(unexpected_arms),
+        "protocol_mismatch_rows": protocol_mismatch_rows,
+        "observed_protocols": sorted(observed_protocols),
         "inference_valid": not inference_invalid_reasons,
         "inference_invalid_reasons": inference_invalid_reasons,
         "arms": by_arm,
@@ -721,7 +804,7 @@ class ComparisonBenchmarkRunner:
             else {}
         )
         return {
-            "schema_version": 10,
+            "schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "study": "SpreadsheetAgent-style adapted small-model comparison",
             "not_paper_reproduction": True,
@@ -765,6 +848,10 @@ class ComparisonBenchmarkRunner:
                 "applies_to": "comparison stages with workbook tools after forced prefix",
                 "direct_text_stages": ["paper.reconcile"],
             },
+            "stage_allowed_tools": _stage_allowed_tools_policy(self.arms),
+            "allowed_observed_terminals": _allowed_observed_terminals_policy(
+                self.stage_turn_caps
+            ),
             "forced_prefix_wire_policy": {
                 "tool_choice": "explicit_function",
                 "available_tools": "forced tool only",
@@ -860,12 +947,7 @@ class ComparisonBenchmarkRunner:
                 "circuit_breaker_immediate_categories": ["provider_fatal"],
                 "skills_for_ours_only": skills,
                 "code_isolation": STRICT_ISOLATION_POLICY,
-                "code_workbook_formula_gate": (
-                    "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
-                ),
-                "failed_edit_recovery_policy": (
-                    "force-successful-code-edit-before-terminal-v1"
-                ),
+                **COMPARISON_CONFIGURATION_POLICIES,
             },
         }
 
@@ -923,7 +1005,18 @@ class ComparisonBenchmarkRunner:
             path = path.with_name(f"{arm}-{uuid.uuid4().hex[:8]}")
         return path
 
-    def _run_one(self, task: SpreadsheetTask, arm: str) -> dict[str, Any]:
+    def _run_one(
+        self,
+        task: SpreadsheetTask,
+        arm: str,
+        *,
+        comparison_manifest_sha256: str,
+    ) -> dict[str, Any]:
+        if len(comparison_manifest_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in comparison_manifest_sha256
+        ):
+            raise ValueError("comparison_manifest_sha256 must be a lowercase SHA-256")
         started_at = datetime.now(timezone.utc)
         started_clock = monotonic()
         task_dir = self._task_directory(task.task_id, arm)
@@ -936,6 +1029,7 @@ class ComparisonBenchmarkRunner:
             "task_id": task.task_id,
             "arm": arm,
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "comparison_manifest_sha256": comparison_manifest_sha256,
             "instruction_type": task.instruction_type,
             "model": self.config.model,
             "api_protocol": self.config.api_protocol,
@@ -965,11 +1059,12 @@ class ComparisonBenchmarkRunner:
                 task.input_path,
                 task_dir,
                 run_id=f"{task.task_id}-{arm}",
+                recorder_secrets=(self.config.api_key,),
             )
             session.recorder.record(
                 "benchmark.configured",
                 {
-                    "schema_version": 10,
+                    "schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
                     "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
                     "arm": arm,
                     "api_protocol": self.config.api_protocol,
@@ -1132,10 +1227,42 @@ class ComparisonBenchmarkRunner:
         # Probe before creating a manifest, spending model budget, or writing a
         # result row. The probe imports openpyxl inside the active venv and
         # verifies that a sibling file is not visible in the sandbox.
-        ensure_strict_code_isolation()
+        ensure_strict_code_isolation((self.config.api_key,))
         with self._exclusive_lock():
-            _repair_jsonl(self.results_path)
             self._prepare_manifest(tasks)
+            raw_results = self.results_path.read_bytes() if self.results_path.is_file() else b""
+            _, invalid_rows = _valid_jsonl_rows(self.results_path)
+            if invalid_rows or (raw_results and not raw_results.endswith(b"\n")):
+                raise HarnessError(
+                    "Refusing to resume comparison with a damaged or non-terminated "
+                    "results journal"
+                )
+            manifest_sha256 = _manifest_file_sha256(self.manifest_path)
+            resume_rows, _ = _valid_jsonl_rows(self.results_path)
+            expected_task_ids = {task.task_id for task in tasks}
+            for row_number, row in enumerate(resume_rows, start=1):
+                task_id = row.get("task_id")
+                arm = row.get("arm")
+                if task_id is None or arm is None:
+                    raise HarnessError(
+                        "Refusing to resume comparison with a result row missing its "
+                        f"identity: line {row_number}"
+                    )
+                if str(task_id) not in expected_task_ids or str(arm) not in self.arms:
+                    raise HarnessError(
+                        "Refusing to resume comparison with an unexpected arm-task row: "
+                        f"{task_id}::{arm}"
+                    )
+                if row.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION:
+                    raise HarnessError(
+                        "Refusing to resume comparison with result rows from a different "
+                        f"or missing protocol: {task_id}::{arm}"
+                    )
+                if row.get("comparison_manifest_sha256") != manifest_sha256:
+                    raise HarnessError(
+                        "Refusing to resume comparison with a result row not bound to the "
+                        f"current manifest: {task_id}::{arm}"
+                    )
             latest = self._latest()
             arm_orders = _balanced_arm_orders(
                 [task.task_id for task in tasks], self.arm_order_seed, self.arms
@@ -1168,7 +1295,11 @@ class ComparisonBenchmarkRunner:
                         continue
                     if circuit_breaker:
                         break
-                    row = self._run_one(task, arm)
+                    row = self._run_one(
+                        task,
+                        arm,
+                        comparison_manifest_sha256=manifest_sha256,
+                    )
                     self._append(row)
                     latest[key] = row
                     finished += 1
@@ -1214,5 +1345,34 @@ class ComparisonBenchmarkRunner:
             summary["fatal_provider_arm_tasks"] = fatal_provider_errors
             summary["routing_protocol_arm_tasks"] = routing_protocol_errors
             summary["circuit_breaker_threshold"] = self.circuit_breaker_threshold
+            # Bind the official summary to a full read-only protocol audit. A
+            # score alone is not evidence that the frozen resources and routes
+            # produced the artifact.
+            from .audit import audit_comparison
+
+            protocol_audit = audit_comparison(
+                self.output_dir,
+                tasks,
+                arms=self.arms,
+            )
+            summary["protocol_audit_valid"] = protocol_audit["audit_valid"]
+            summary["protocol_audit_reasons"] = protocol_audit["reasons"]
+            summary["protocol_audit_manifest_sha256"] = protocol_audit[
+                "manifest_sha256"
+            ]
+            summary["protocol_audit_results_sha256"] = protocol_audit[
+                "results_sha256"
+            ]
+            if not protocol_audit["audit_valid"]:
+                if "comparison_audit_failed" not in summary["inference_invalid_reasons"]:
+                    summary["inference_invalid_reasons"].append(
+                        "comparison_audit_failed"
+                    )
+                summary["inference_valid"] = False
+                for pairwise in summary["pairwise"].values():
+                    _invalidate_pairwise_inference(
+                        pairwise,
+                        ["comparison_audit_failed"],
+                    )
             _atomic_write_json(self.summary_path, summary)
             return summary

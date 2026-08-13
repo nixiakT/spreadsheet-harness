@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from openpyxl import load_workbook
 from PIL import Image
@@ -19,6 +20,63 @@ def test_tool_registry_dispatch_and_errors(sample_workbook: Path, tmp_path: Path
     result = tools.invoke("inspect_range", {"sheet": "Nope", "range_ref": "A1"})
     assert result.data["ok"] is False
     assert result.data["type"] == "ToolInputError"
+
+
+def test_code_interpreter_schema_requires_self_contained_calls(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    tools = SpreadsheetToolRegistry(session, enable_code=True)
+    schema = next(item for item in tools.schemas if item["name"] == "code_interpreter")
+    description = schema["description"]
+
+    assert "fresh Python process" in description
+    assert "variables, imports, and workbook objects do not persist" in description
+    assert "editing or recovery script self-contained" in description
+    workflow = description.split("self-contained:", 1)[1]
+    expected_steps = (
+        "import",
+        "load",
+        "re-read the request and inspected workbook state",
+        "edit",
+        "save",
+        "close",
+        "reopen",
+        "verify the requested change and nearby cells",
+        "print compact verification",
+    )
+    positions = [workflow.index(step) for step in expected_steps]
+    assert positions == sorted(positions)
+
+
+def test_tool_registry_redacts_configured_secret_from_recorded_outcome(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    unusual_secret = "credential-with-an-unusual-shape"
+    session = WorkbookSession.create(
+        sample_workbook,
+        tmp_path / "run",
+        recorder_secrets=(unusual_secret,),
+    )
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=True,
+        allowed_tools={"code_interpreter"},
+    )
+
+    class LeakingInterpreter:
+        def run(self, *_: Any, **__: Any) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "stdout": unusual_secret,
+                "nested": {"message": unusual_secret},
+            }
+
+    tools.interpreter = LeakingInterpreter()  # type: ignore[assignment]
+    result = tools.invoke("code_interpreter", {"code": "print('x')"})
+
+    assert result.data["stdout"] == unusual_secret
+    assert unusual_secret not in session.paths.trajectory.read_text(encoding="utf-8")
 
 
 def test_allowed_tools_filters_schemas_and_dispatch(sample_workbook: Path, tmp_path: Path) -> None:

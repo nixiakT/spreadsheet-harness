@@ -29,11 +29,13 @@ class FakeTools:
         enable_code: bool,
         allowed_tools: set[str] | None,
         require_code_isolation: bool,
+        redaction_secrets: tuple[str, ...],
     ) -> None:
         self.session = session
         self.enable_code = enable_code
         self.allowed_tools = allowed_tools
         self.require_code_isolation = require_code_isolation
+        self.redaction_secrets = redaction_secrets
         self.created.append(self)
 
 
@@ -138,7 +140,14 @@ def test_paper_vision_three_turn_required_route_attaches_image_and_submits_yaml(
     Image.new("RGB", (4, 4), "white").save(rendered)
 
     class VisionTools:
-        def __init__(self, session: WorkbookSession, **_: Any) -> None:
+        def __init__(
+            self,
+            session: WorkbookSession,
+            *,
+            redaction_secrets: tuple[str, ...],
+            **_: Any,
+        ) -> None:
+            assert redaction_secrets == ("test-key",)
             self.session = session
             self.schemas = [
                 {
@@ -315,6 +324,10 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     assert ours_call["tools"].require_code_isolation is True
     assert all(
         call["tools"].require_code_isolation is False for call in paper_calls[:-1]
+    )
+    assert all(
+        call["tools"].redaction_secrets == ("test-key",)
+        for call in [bare_call, *paper_calls, ours_call]
     )
 
     assert bare_call["skills"] is None

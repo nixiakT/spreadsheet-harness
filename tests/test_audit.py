@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,12 @@ from openpyxl import Workbook, load_workbook
 
 from spreadsheet_harness.audit import audit_comparison
 from spreadsheet_harness.benchmark import SpreadsheetTask, compare_workbooks
+from spreadsheet_harness.comparison import (
+    COMPARISON_PROTOCOL_VERSION,
+    ComparisonBenchmarkRunner,
+)
+from spreadsheet_harness.config import ProviderConfig
+from spreadsheet_harness.skills import SkillRegistry
 
 
 def _sha256(path: Path) -> str:
@@ -63,43 +70,112 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
     )
 
     results = tmp_path / "comparison"
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            reasoning_effort="none",
+        ),
+        results,
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=3,
+        max_turns_per_arm=3,
+        max_total_tokens=100,
+        max_output_tokens=64,
+        task_timeout_seconds=30,
+        recalculate=False,
+    )
+    runner._prepare_manifest([task])
+    manifest = json.loads(runner.manifest_path.read_text(encoding="utf-8"))
+    manifest_sha256 = _sha256(runner.manifest_path)
     run_dir = results / "runs" / task.task_id / "bare"
     output = run_dir / "artifacts" / "output.xlsx"
-    _book(output, 42)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(task.golden_path, output)
     comparison = compare_workbooks(
         task.golden_path,
         output,
         task.answer_position,
         answer_sheet=task.answer_sheet,
     )
-    manifest = {
-        "schema_version": 8,
-        "task_count": 1,
-        "task_ids": [task.task_id],
-        "arms": ["bare"],
-        "tasks": [
-            {
-                "task_id": task.task_id,
-                "instruction_sha256": _text_sha256(task.instruction),
-                "input_sha256": _sha256(task.input_path),
-                "golden_sha256": _sha256(task.golden_path),
-                "scoring_metadata_sha256": _scoring_metadata_sha256(task),
-            }
-        ],
+    attempt = {"api_protocol": "responses", "endpoint": "/responses"}
+    timings = [
+        {
+            "turn": turn,
+            "attempts": 1,
+            "attempt_history": [attempt],
+        }
+        for turn in range(1, 4)
+    ]
+    stage_agent = {
+        "turns": 3,
+        "request_timings": timings,
     }
-    results.mkdir(parents=True, exist_ok=True)
-    (results / "comparison-manifest.json").write_text(
-        json.dumps(manifest), encoding="utf-8"
-    )
+    stage = {
+        "name": "solve",
+        "max_turns": 3,
+        "allowed_tools": ["code_interpreter"],
+        "first_tool_choice": "code_interpreter",
+        "observed_first_tool": "code_interpreter",
+        "forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+        "observed_forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+        "terminal_tool": "submit_result",
+        "observed_terminal_tool": "submit_result",
+        "agent": stage_agent,
+    }
     row = {
         "task_id": task.task_id,
         "arm": "bare",
+        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+        "comparison_manifest_sha256": manifest_sha256,
+        "instruction_type": task.instruction_type,
+        "model": "test-model",
+        "api_protocol": "responses",
+        "requested_reasoning_effort": "none",
+        "reasoning_effort": "none",
+        "request_interval_seconds": 0.0,
+        "litellm_timeout_seconds": None,
+        "generation": manifest["configuration"]["generation"],
+        "max_model_calls": 3,
+        "max_turns_per_arm": 3,
+        "stage_turn_caps": {"solve": 3},
+        "calculation_backend": "not_recalculated",
         "status": "completed",
         "passed": comparison.passed,
         "comparison": comparison.to_dict(),
+        "agent": {
+            "arm": "bare",
+            "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
+            "request_timings": timings,
+            "stages": [stage],
+            "budget": {
+                "limit": {
+                    "model_calls": 3,
+                    "total_tokens": 100,
+                    "elapsed_seconds": 30,
+                },
+                "used": {
+                    "model_calls": 3,
+                    "total_tokens": 10,
+                    "elapsed_seconds": 0.9,
+                },
+                "termination": None,
+            },
+        },
+        "budget": {
+            "limit": {
+                "model_calls": 3,
+                "total_tokens": 100,
+                "elapsed_seconds": 30,
+            },
+            "used": {"model_calls": 3, "total_tokens": 10, "elapsed_seconds": 1.0},
+            "termination": None,
+        },
         "run_dir": str(run_dir),
         "output_workbook": str(output),
-        "recalculation": {"output_sha256": _sha256(output)},
+        "output_sha256": _sha256(output),
     }
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return results, task, row
@@ -133,6 +209,137 @@ def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
         "expected_output_sha256"
     ]
     assert _tree_hashes(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "expected_reason"),
+    [
+        (
+            "manifest",
+            "schema_version",
+            9,
+            "comparison_manifest_schema_mismatch",
+        ),
+        (
+            "manifest",
+            "comparison_protocol_version",
+            "resource_matched_multi_arm_v19",
+            "comparison_manifest_protocol_mismatch",
+        ),
+        (
+            "row",
+            "comparison_protocol_version",
+            "resource_matched_multi_arm_v19",
+            "result_protocol_mismatch:1",
+        ),
+    ],
+)
+def test_audit_rejects_protocol_provenance_mismatch(
+    tmp_path: Path,
+    target: str,
+    field: str,
+    value: Any,
+    expected_reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    path = (
+        results / "comparison-manifest.json"
+        if target == "manifest"
+        else results / "results.jsonl"
+    )
+    if target == "manifest":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload[field] = value
+    else:
+        payload = dict(row)
+        payload[field] = value
+    path.write_text(json.dumps(payload) + ("\n" if target == "row" else ""), encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert expected_reason in summary["reasons"]
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "expected_reason"),
+    [
+        ("row", "comparison_manifest_sha256", "0" * 64, "manifest_sha256_binding_mismatch"),
+        ("row", "model", "different-model", "row_manifest_mismatch:model"),
+        ("row", "generation", {"temperature": 0.5}, "row_manifest_mismatch:generation"),
+        ("row", "stage_turn_caps", {"solve": 99}, "row_manifest_mismatch:stage_turn_caps"),
+        ("row", "calculation_backend", "libreoffice", "row_manifest_mismatch:calculation_backend"),
+        ("agent", "arm", "ours", "agent_arm_mismatch"),
+        ("stage", "observed_forced_tool_prefix", [], "agent_observed_prefix_mismatch:solve"),
+        ("stage", "observed_terminal_tool", "unknown", "agent_observed_terminal_invalid:solve"),
+        ("timing", "attempt_history", [], "request_attempt_audit_inexact"),
+    ],
+)
+def test_audit_rejects_tampered_resource_and_routing_evidence(
+    tmp_path: Path,
+    target: str,
+    field: str,
+    value: Any,
+    expected_reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    if target == "row":
+        row[field] = value
+    elif target == "agent":
+        row["agent"][field] = value
+    elif target == "stage":
+        row["agent"]["stages"][0][field] = value
+    else:
+        row["agent"]["request_timings"][0][field] = value
+        row["agent"]["stages"][0]["agent"]["request_timings"][0][field] = value
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, expected_reason)
+
+
+@pytest.mark.parametrize("field", ["configuration", "harness_source", "runtime"])
+def test_audit_requires_frozen_manifest_provenance(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+    path = results / "comparison-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.pop(field)
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    expected_fragment = "source_fingerprint" if field == "harness_source" else field
+    assert any(expected_fragment in reason for reason in summary["reasons"])
+
+
+def test_audit_requires_manifest_source_to_match_active_checkout(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    path = results / "comparison-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["harness_source"]["files"][0]["sha256"] = "0" * 64
+    combined = hashlib.sha256()
+    for entry in manifest["harness_source"]["files"]:
+        combined.update(entry["path"].encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(entry["sha256"].encode("ascii"))
+        combined.update(b"\n")
+    manifest["harness_source"]["sha256"] = combined.hexdigest()
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(path)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "comparison_manifest_source_checkout_mismatch" in summary["reasons"]
 
 
 def test_audit_rejects_tampered_stored_passed(tmp_path: Path) -> None:
