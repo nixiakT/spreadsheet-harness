@@ -281,6 +281,26 @@ def _rename_directory_noreplace(source: Path, destination: Path) -> None:
     raise OSError(error_number, os.strerror(error_number), destination)
 
 
+def _claim_directory_with_mkdir(source: Path, destination: Path) -> None:
+    """Fallback for filesystems that reject renameat2(RENAME_NOREPLACE)."""
+
+    try:
+        destination.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise HarnessError("Fresh pilot output path must not already exist") from exc
+    try:
+        children = list(source.iterdir())
+        if any(child.is_symlink() or not child.is_file() for child in children):
+            raise HarnessError("Fresh pilot claim contains an unexpected entry")
+        for child in children:
+            child.rename(destination / child.name)
+        _fsync_directory(destination)
+        source.rmdir()
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -300,7 +320,18 @@ def _claim_fresh_pilot_output(output: Path, run_spec_bytes: bytes) -> None:
     try:
         _write_private_bytes(temporary / RUN_SPEC_COPY_FILENAME, run_spec_bytes)
         _fsync_directory(temporary)
-        _rename_directory_noreplace(temporary, output)
+        try:
+            _rename_directory_noreplace(temporary, output)
+        except OSError as exc:
+            unsupported = {
+                errno.EINVAL,
+                errno.ENOSYS,
+                getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+                getattr(errno, "ENOTSUP", errno.EINVAL),
+            }
+            if exc.errno not in unsupported:
+                raise
+            _claim_directory_with_mkdir(temporary, output)
         claimed = True
         _fsync_directory(parent)
     except Exception:

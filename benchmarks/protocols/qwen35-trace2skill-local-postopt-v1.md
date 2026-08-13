@@ -211,6 +211,10 @@ gate after any code change.
 Require the output path to be absent, then launch exactly once without
 `--resume`:
 
+The launcher claims the absent output without replacement. It uses
+`renameat2(RENAME_NOREPLACE)` where supported and an exclusive `mkdir` claim
+on filesystems that reject that flag; neither path can replace an existing run.
+
 ```bash
 test ! -e benchmarks/results/qwen36-local-postopt-eval16-v3-bare-ours-v24-seed41
 

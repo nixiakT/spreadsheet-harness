@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import json
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -347,6 +349,49 @@ def test_fresh_pilot_output_claim_never_replaces_existing_directory(
     output.mkdir()
     marker = output / "belongs-to-another-run"
     marker.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(HarnessError, match="must not already exist"):
+        cli._claim_fresh_pilot_output(output, b"fixed run spec")
+
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert not (output / "run-spec.json").exists()
+    assert not list(tmp_path.glob(".pilot.claim-*"))
+
+
+def test_fresh_pilot_output_claim_falls_back_when_renameat2_is_unsupported(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    output = tmp_path / "pilot"
+    raw = b"fixed run spec"
+
+    def unsupported(*_: Any, **__: Any) -> None:
+        raise OSError(errno.EINVAL, "renameat2 unsupported")
+
+    monkeypatch.setattr(cli, "_rename_directory_noreplace", unsupported)
+
+    cli._claim_fresh_pilot_output(output, raw)
+
+    assert output.is_dir()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    assert (output / "run-spec.json").read_bytes() == raw
+    assert stat.S_IMODE((output / "run-spec.json").stat().st_mode) == 0o600
+    assert not list(tmp_path.glob(".pilot.claim-*"))
+
+
+def test_fresh_pilot_output_mkdir_fallback_never_replaces_existing_directory(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    output = tmp_path / "pilot"
+    output.mkdir()
+    marker = output / "belongs-to-another-run"
+    marker.write_text("keep", encoding="utf-8")
+
+    def unsupported(*_: Any, **__: Any) -> None:
+        raise OSError(errno.EINVAL, "renameat2 unsupported")
+
+    monkeypatch.setattr(cli, "_rename_directory_noreplace", unsupported)
 
     with pytest.raises(HarnessError, match="must not already exist"):
         cli._claim_fresh_pilot_output(output, b"fixed run spec")
