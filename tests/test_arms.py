@@ -325,8 +325,8 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         "code_interpreter",
     )
     assert ours_call["forced_tool_prefix"] == (
-        "list_sheets",
-        "inspect_range",
+        "code_interpreter",
+        "code_interpreter",
     )
     assert bare_call["required_tool_termination"] is True
     assert bare_call["require_workbook_change"] is True

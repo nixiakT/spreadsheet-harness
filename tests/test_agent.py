@@ -640,6 +640,8 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
         {"type": "function", "name": "list_sheets"},
         "auto",
     ]
+    assert RequiredClient.requests[0]["max_output_tokens"] == 512
+    assert RequiredClient.requests[1]["max_output_tokens"] == 16000
     assert [tool["name"] for tool in RequiredClient.requests[0]["tools"]] == [
         "list_sheets"
     ]
@@ -750,6 +752,7 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
         "type": "function",
         "name": "submit_result",
     }
+    assert FinalTurnClient.requests[1]["max_output_tokens"] == 1024
 
 
 def test_required_tool_termination_accepts_nonempty_text_as_terminal_fallback(

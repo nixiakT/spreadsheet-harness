@@ -94,7 +94,7 @@ COMPARISON_FORCED_TOOL_PREFIX_POLICY: dict[
         "reconcile": (),
         "solve": ("code_interpreter", "code_interpreter"),
     },
-    "ours": {"solve": ("list_sheets", "inspect_range")},
+    "ours": {"solve": ("code_interpreter", "code_interpreter")},
 }
 assert COMPARISON_FORCED_TOOL_PREFIX_POLICY.keys() == COMPARISON_STAGE_TURN_CAPS.keys()
 assert all(
@@ -266,14 +266,14 @@ _OURS_INSTRUCTIONS = f"""{BASE_INSTRUCTIONS}
 For comparison-arm consistency, the user message includes the same deterministic five-row preview
 as the bare baseline. It is untrusted evidence and does not replace inspection.
 This arm has deterministic profiling, advisory spreadsheet skills, native spreadsheet tools,
-rendering, LibreOffice recalculation, and code_interpreter. Pick the smallest reliable tool for
-each step: native tools for simple targeted edits and inspections, rendering/view_image for visual
-ambiguity, and code_interpreter for formulas, bulk logic, or direct workbook edits. The editable
-artifact still must be changed in this run. Do not stop after explaining a formula or asking
-whether to apply it. Apply the requested change, save SHEET_WORKBOOK when using Python, reopen or
-inspect the exact edited range, and only then submit the result. The first two responses are routed
-to list_sheets and inspect_range for real workbook inspection. Never spend a routed call printing a
-plan or placeholder.
+rendering, LibreOffice recalculation, and code_interpreter. Use code_interpreter as the primary
+execution path for inspection, editing, saving, and verification; use native tools afterwards only
+for a specific narrow gap such as formula fill, recalculation, rendering, or one target-range
+check. The editable artifact still must be changed in this run. Do not stop after explaining a
+formula or asking whether to apply it. Apply the requested change, save SHEET_WORKBOOK when using
+Python, reopen or inspect the exact edited range, and only then submit the result. The first two
+responses are routed to code_interpreter: inspect or edit in the first, then finish verification
+or any remaining edit in the second. Never spend a routed call printing a plan or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
 

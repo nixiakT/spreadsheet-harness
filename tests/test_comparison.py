@@ -122,7 +122,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
             "reconcile": [],
             "solve": ["code_interpreter", "code_interpreter"],
         },
-        "ours": {"solve": ["list_sheets", "inspect_range"]},
+        "ours": {"solve": ["code_interpreter", "code_interpreter"]},
     }
     assert manifest["post_prefix_routing"] == {
         "tool_choice": "auto",

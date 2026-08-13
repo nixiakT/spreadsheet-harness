@@ -76,6 +76,8 @@ _RAW_TOOL_OUTPUT_MAX_CHARS = 24_000
 _RAW_TOOL_TURN_MAX_CHARS = 24_000
 _IMAGE_TURN_MAX_BYTES = 20 * 1024 * 1024
 _WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 3
+_FORCED_TOOL_MAX_OUTPUT_TOKENS = 512
+_FINAL_TOOL_MAX_OUTPUT_TOKENS = 1_024
 OVERLOAD_RETRY_MIN_SECONDS = 15.0
 CONNECT_RETRY_MIN_SECONDS = 30.0
 RETRY_BACKOFF_MAX_SECONDS = 60.0
@@ -2226,6 +2228,7 @@ class SpreadsheetAgent:
                 if tool_schemas:
                     tool_choice: str | dict[str, str] = "auto"
                     request_tool_schemas = tool_schemas
+                    request_max_output_tokens = self.max_output_tokens
                     forced_tool = (
                         self.forced_tool_prefix[forced_prefix_index]
                         if forced_prefix_index < len(self.forced_tool_prefix)
@@ -2241,6 +2244,10 @@ class SpreadsheetAgent:
                             "type": "function",
                             "name": forced_tool,
                         }
+                        request_max_output_tokens = min(
+                            request_max_output_tokens,
+                            _FORCED_TOOL_MAX_OUTPUT_TOKENS,
+                        )
                     elif self.required_tool_termination and turn_number == self.max_turns:
                         request_tool_schemas = [
                             schema
@@ -2251,8 +2258,13 @@ class SpreadsheetAgent:
                             "type": "function",
                             "name": TERMINAL_TOOL_NAME,
                         }
+                        request_max_output_tokens = min(
+                            request_max_output_tokens,
+                            _FINAL_TOOL_MAX_OUTPUT_TOKENS,
+                        )
                     elif self.required_tool_termination:
                         tool_choice = "auto"
+                    payload["max_output_tokens"] = request_max_output_tokens
                     payload.update(
                         {
                             "tools": request_tool_schemas,
@@ -2307,6 +2319,7 @@ class SpreadsheetAgent:
                         "available_tool_names": [
                             str(tool.get("name", "")) for tool in payload.get("tools", [])
                         ],
+                        "max_output_tokens": payload.get("max_output_tokens"),
                         "generation": self.config.generation_dict(),
                         **context_metrics,
                     },
