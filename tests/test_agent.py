@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from openpyxl import load_workbook
 
 from spreadsheet_harness.agent import (
     ChatCompletionsClient,
@@ -730,6 +731,143 @@ def test_forced_code_interpreter_keeps_full_output_token_budget(
 
     assert CodePrefixClient.requests[0]["max_output_tokens"] == 4096
     assert CodePrefixClient.requests[1]["max_output_tokens"] == 4096
+
+
+def test_agent_forces_code_recovery_after_stalled_edit(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    code_schema = {
+        "type": "function",
+        "name": "code_interpreter",
+        "description": "run code",
+        "parameters": {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    }
+
+    class StalledEditTools:
+        schemas = [code_schema]
+
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+            self.invocations: list[dict[str, Any]] = []
+
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            self.invocations.append({"name": name, "arguments": dict(arguments)})
+            if "sheet_harness.save_workbook" in str(arguments.get("code", "")):
+                workbook = load_workbook(self.session.workbook_path)
+                workbook.active["A1"] = "edited"
+                workbook.save(self.session.workbook_path)
+                workbook.close()
+                return ToolOutcome({"ok": True, "workbook_changed": True})
+            return ToolOutcome({"ok": True, "workbook_changed": False})
+
+    def code_turn(turn: int, code: str) -> ResponseTurn:
+        return ResponseTurn(
+            f"response-{turn}",
+            [
+                {
+                    "type": "function_call",
+                    "call_id": f"call-{turn}",
+                    "name": "code_interpreter",
+                    "arguments": json.dumps({"code": code}),
+                }
+            ],
+            "",
+            {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
+
+    class StalledEditClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> StalledEditClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn <= 3:
+                return code_turn(self.turn, "print('inspect only')")
+            if self.turn == 4:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
+                assert [tool["name"] for tool in payload["tools"]] == [
+                    "code_interpreter"
+                ]
+                return code_turn(self.turn, "print('still inspect only')")
+            if self.turn == 5:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
+                return code_turn(
+                    self.turn,
+                    "import sheet_harness\n"
+                    "wb = sheet_harness.load_workbook()\n"
+                    "wb.active['A1'] = 'edited'\n"
+                    "sheet_harness.save_workbook(wb)\n",
+                )
+            assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": json.dumps({"result": "edited and verified"}),
+                    }
+                ],
+                "",
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", StalledEditClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "stalled-edit-run")
+    tools = StalledEditTools(session)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    result = SpreadsheetAgent(
+        config,
+        tools,  # type: ignore[arg-type]
+        forced_tool_prefix=("code_interpreter", "code_interpreter"),
+        required_tool_termination=True,
+        require_workbook_change=True,
+        force_code_on_stalled_edit=True,
+        max_turns=6,
+    ).run("Edit the workbook")
+
+    assert result.final_text == "edited and verified"
+    assert result.tool_trace[3] == {"name": "code_interpreter", "ok": False}
+    assert len(tools.invocations) == 4
+    assert tools.invocations[-1]["arguments"]["code"].count("save_workbook") == 1
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    reminders = [
+        event
+        for event in events
+        if event["event"] == "agent.unchanged_workbook_progress_reminded"
+    ]
+    assert reminders[0]["payload"]["edit_recovery_forced_next_turn"] is True
+    continued = [
+        event
+        for event in events
+        if event["event"] == "agent.unchanged_workbook_recovery_continued"
+    ]
+    assert continued[0]["payload"]["turn"] == 4
 
 
 def test_required_tool_termination_forces_submit_only_on_final_turn(

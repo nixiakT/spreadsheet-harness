@@ -76,8 +76,21 @@ _RAW_TOOL_OUTPUT_MAX_CHARS = 24_000
 _RAW_TOOL_TURN_MAX_CHARS = 24_000
 _IMAGE_TURN_MAX_BYTES = 20 * 1024 * 1024
 _WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 3
+_WORKBOOK_CHANGE_RECOVERY_AFTER_TURNS = 3
 _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS = 512
 _FINAL_TOOL_MAX_OUTPUT_TOKENS = 1_024
+_CODE_EDIT_WRITE_MARKERS = (
+    ".save(",
+    ".value =",
+    "sheet_harness.save_workbook",
+    "sheet_harness.editable_workbook",
+    "write_range(",
+    "fill_formula(",
+    "format_range(",
+    "clear_range(",
+    "delete_rows(",
+    "delete_columns(",
+)
 OVERLOAD_RETRY_MIN_SECONDS = 15.0
 CONNECT_RETRY_MIN_SECONDS = 30.0
 RETRY_BACKOFF_MAX_SECONDS = 60.0
@@ -2020,6 +2033,11 @@ def _safe_file_sha256(path: Any) -> str | None:
         return None
 
 
+def _code_appears_to_edit_workbook(code: str) -> bool:
+    normalized = code.replace(" ", "").lower()
+    return any(marker.lower().replace(" ", "") in normalized for marker in _CODE_EDIT_WRITE_MARKERS)
+
+
 class SpreadsheetAgent:
     def __init__(
         self,
@@ -2037,6 +2055,7 @@ class SpreadsheetAgent:
         forced_tool_prefix: tuple[str, ...] | None = None,
         required_tool_termination: bool = False,
         require_workbook_change: bool = False,
+        force_code_on_stalled_edit: bool = False,
         pacer: RelayPacer | None = None,
     ) -> None:
         self.config = config
@@ -2060,6 +2079,7 @@ class SpreadsheetAgent:
         )
         self.required_tool_termination = required_tool_termination
         self.require_workbook_change = require_workbook_change
+        self.force_code_on_stalled_edit = force_code_on_stalled_edit
         self.pacer = pacer
         if len(self.forced_tool_prefix) >= self.max_turns:
             raise ValueError(
@@ -2183,6 +2203,7 @@ class SpreadsheetAgent:
         observed_first_tool: str | None = None
         observed_forced_tool_prefix: list[str] = []
         forced_prefix_index = 0
+        stalled_edit_recovery_active = False
         session.recorder.record(
             "agent.started",
             {
@@ -2234,6 +2255,8 @@ class SpreadsheetAgent:
                         if forced_prefix_index < len(self.forced_tool_prefix)
                         else None
                     )
+                    if forced_tool is None and stalled_edit_recovery_active:
+                        forced_tool = "code_interpreter"
                     if forced_tool is not None:
                         request_tool_schemas = [
                             schema
@@ -2426,6 +2449,8 @@ class SpreadsheetAgent:
                     if forced_prefix_index < len(self.forced_tool_prefix)
                     else None
                 )
+                if expected_forced_tool is None and stalled_edit_recovery_active:
+                    expected_forced_tool = "code_interpreter"
                 if expected_forced_tool is not None:
                     observed_forced_tools = [
                         str(function_call.get("name", ""))
@@ -2486,8 +2511,9 @@ class SpreadsheetAgent:
                     assert observed_forced_tool is not None
                     if forced_prefix_index == 0:
                         observed_first_tool = observed_forced_tool
-                    observed_forced_tool_prefix.append(observed_forced_tool)
-                    forced_prefix_index += 1
+                    if forced_prefix_index < len(self.forced_tool_prefix):
+                        observed_forced_tool_prefix.append(observed_forced_tool)
+                        forced_prefix_index += 1
                 if self.required_tool_termination and len(function_calls) > 1:
                     observed_names = [
                         str(function_call.get("name", ""))
@@ -2793,8 +2819,29 @@ class SpreadsheetAgent:
                         summary_arguments: Any = raw_arguments
                     else:
                         parsed_arguments = arguments
-                        outcome = self.tools.invoke(name, arguments)
-                        outcome_data = outcome.data
+                        if (
+                            stalled_edit_recovery_active
+                            and name == "code_interpreter"
+                            and not _code_appears_to_edit_workbook(
+                                str(arguments.get("code", ""))
+                            )
+                        ):
+                            outcome = None
+                            outcome_data = {
+                                "ok": False,
+                                "error": (
+                                    "Edit-recovery mode is active: this code_interpreter call "
+                                    "appears to inspect only and does not contain an obvious "
+                                    "workbook write/save operation. Send one complete script "
+                                    "that loads SHEET_WORKBOOK, performs the smallest correct "
+                                    "edit, saves it, reopens the workbook, and prints a compact "
+                                    "verification of the changed range."
+                                ),
+                                "workbook_changed": False,
+                            }
+                        else:
+                            outcome = self.tools.invoke(name, arguments)
+                            outcome_data = outcome.data
                         summary_arguments = arguments
                     next_recent_items.append(
                         _replayed_function_call(
@@ -2926,15 +2973,58 @@ class SpreadsheetAgent:
                         )
                     )
                 next_recent_items.extend(pending_image_items)
+                was_stalled_edit_recovery_active = stalled_edit_recovery_active
                 changed_after_tools = refresh_workbook_changed()
+                stalled_edit_recovery_active = False
+                can_recover_with_code = (
+                    self.force_code_on_stalled_edit
+                    and "code_interpreter" in tool_names
+                    and turn_number >= _WORKBOOK_CHANGE_RECOVERY_AFTER_TURNS
+                    and turn_number < self.max_turns - 1
+                )
+                if (
+                    self.require_workbook_change
+                    and was_stalled_edit_recovery_active
+                    and not changed_after_tools
+                    and can_recover_with_code
+                ):
+                    stalled_edit_recovery_active = True
+                    next_recent_items.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "The workbook is still unchanged after the edit-recovery "
+                                        "attempt. The next response remains restricted to "
+                                        "code_interpreter. Send one complete script that performs "
+                                        "the edit, saves SHEET_WORKBOOK, reopens it, and prints "
+                                        "only a compact verification of the target range."
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    session.recorder.record(
+                        "agent.unchanged_workbook_recovery_continued",
+                        {
+                            "stage": self.stage,
+                            "turn": turn_number,
+                            "tool_calls": calls,
+                            "initial_workbook_sha256": initial_workbook_sha256,
+                        },
+                    )
                 if (
                     self.require_workbook_change
                     and not changed_after_tools
+                    and not stalled_edit_recovery_active
                     and turn_number >= _WORKBOOK_CHANGE_REMINDER_AFTER_TURNS
                     and turn_number <= self.max_turns - 2
                     and turn_number - last_workbook_change_reminder_turn >= 2
                 ):
                     last_workbook_change_reminder_turn = turn_number
+                    stalled_edit_recovery_active = can_recover_with_code
                     next_recent_items.append(
                         {
                             "role": "user",
@@ -2944,11 +3034,21 @@ class SpreadsheetAgent:
                                     "text": (
                                         "Progress check: the managed workbook file has not "
                                         "changed after the recent tool calls. This benchmark "
-                                        "requires a saved workbook edit. On your next call, use "
-                                        "a mutation tool or code_interpreter unless a specific "
-                                        "missing fact makes editing impossible. For formulas, "
-                                        "write one source formula, fill/translate it across the "
-                                        "target range, then inspect only that range."
+                                        "requires a saved workbook edit. "
+                                        + (
+                                            "The next response is restricted to code_interpreter. "
+                                            "Use one complete Python script: load SHEET_WORKBOOK, "
+                                            "perform the smallest correct edit, save it back to "
+                                            "SHEET_WORKBOOK, reopen it, and print a compact "
+                                            "verification of the changed range. Do not submit and "
+                                            "do not send another inspect-only script."
+                                            if can_recover_with_code
+                                            else "On your next call, use a mutation tool or "
+                                            "code_interpreter unless a specific missing fact makes "
+                                            "editing impossible. For formulas, write one source "
+                                            "formula, fill/translate it across the target range, "
+                                            "then inspect only that range."
+                                        )
                                     ),
                                 }
                             ],
@@ -2961,6 +3061,7 @@ class SpreadsheetAgent:
                             "turn": turn_number,
                             "tool_calls": calls,
                             "initial_workbook_sha256": initial_workbook_sha256,
+                            "edit_recovery_forced_next_turn": can_recover_with_code,
                         },
                     )
                 recent_items = next_recent_items

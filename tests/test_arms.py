@@ -330,6 +330,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     )
     assert bare_call["required_tool_termination"] is True
     assert bare_call["require_workbook_change"] is True
+    assert bare_call["force_code_on_stalled_edit"] is False
     assert [call["required_tool_termination"] for call in paper_calls] == [
         True,
         True,
@@ -339,6 +340,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     ]
     assert ours_call["required_tool_termination"] is True
     assert ours_call["require_workbook_change"] is True
+    assert ours_call["force_code_on_stalled_edit"] is True
     assert _preview(bare_call["prompt"]) == _preview(paper_calls[-1]["prompt"])
     assert _preview(bare_call["prompt"]) == _preview(ours_call["prompt"])
     preview_lines = _preview(bare_call["prompt"]).splitlines()
@@ -457,6 +459,7 @@ def test_ours_consumes_deterministic_profile_with_skills(
     assert ours_call["tools"].allowed_tools is None
     assert ours_call["skills"] is skills
     assert ours_call["require_workbook_change"] is True
+    assert ours_call["force_code_on_stalled_edit"] is True
     assert "<deterministic_workbook_profile_json>" in ours_call["prompt"]
     assert '"schema_version":"deterministic-workbook-profile-v1"' in ours_call["prompt"]
     assert result.arm == "ours"  # type: ignore[attr-defined]
