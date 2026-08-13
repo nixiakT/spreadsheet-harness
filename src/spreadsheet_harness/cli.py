@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ctypes
+import errno
 import json
+import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -31,7 +35,17 @@ from .benchmark import (
     trace2skill_heldout_manifest,
     trace2skill_split_provenance,
 )
-from .comparison import AVAILABLE_COMPARISON_ARMS, COMPARISON_ARMS, ComparisonBenchmarkRunner
+from .comparison import (
+    AVAILABLE_COMPARISON_ARMS,
+    COMPARISON_ARMS,
+    PILOT_RUN_SPEC_FILENAME,
+    PILOT_RUN_SPEC_ID,
+    RUN_SPEC_COPY_FILENAME,
+    ComparisonBenchmarkRunner,
+    comparison_execution_contract,
+    load_pilot_run_spec,
+    verify_pilot_run_spec_contract,
+)
 from .config import API_PROTOCOLS, REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
 from .errors import HarnessError
 from .evolution import generate_candidate, promote_candidate
@@ -101,6 +115,194 @@ def _skills(args: argparse.Namespace) -> SkillRegistry:
     roots = [_default_skill_root()]
     roots.extend(Path(item).expanduser().resolve() for item in getattr(args, "skills", []) or [])
     return SkillRegistry(roots)
+
+
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _lexical_absolute(path: str | Path) -> Path:
+    """Make a path absolute without following symlinks."""
+
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
+def _reject_repository_path_symlinks(
+    repository_root: Path, target: Path, *, label: str
+) -> None:
+    try:
+        relative = target.relative_to(repository_root)
+    except ValueError as exc:
+        raise HarnessError(f"Pilot {label} path escapes the repository") from exc
+
+    current = repository_root
+    missing_component = False
+    for component in relative.parts:
+        current /= component
+        if missing_component:
+            continue
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            missing_component = True
+            continue
+        except OSError as exc:
+            raise HarnessError(f"Unable to inspect pilot {label} path: {current}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise HarnessError(f"Pilot {label} path must not contain symlinks: {current}")
+
+
+def _repository_relative_pilot_path(
+    repository_root: Path, value: Any, *, label: str
+) -> Path:
+    if not isinstance(value, str) or not value:
+        raise HarnessError(f"Pilot run spec {label} path is invalid")
+    relative = Path(value)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise HarnessError(f"Pilot run spec {label} path must be repository-relative")
+    target = _lexical_absolute(repository_root / relative)
+    if target == repository_root or repository_root not in target.parents:
+        raise HarnessError(f"Pilot run spec {label} path escapes the repository")
+    _reject_repository_path_symlinks(repository_root, target, label=label)
+    return target
+
+
+def _require_exact_pilot_cli_path(
+    supplied: str | Path, expected: Path, *, repository_root: Path, label: str
+) -> None:
+    actual = _lexical_absolute(supplied)
+    if actual != expected:
+        raise HarnessError(f"Pilot {label} path differs from the run spec")
+    _reject_repository_path_symlinks(repository_root, actual, label=label)
+
+
+def _pilot_repository_paths(
+    args: argparse.Namespace,
+    document: dict[str, Any],
+    *,
+    output_argument: str | Path,
+) -> tuple[Path, Path, Path]:
+    repository_root = _repository_root()
+    repository_paths = document.get("repository_relative_paths")
+    required = {"dataset", "split_manifest", "output"}
+    if not isinstance(repository_paths, dict) or set(repository_paths) != required:
+        raise HarnessError("Pilot run spec repository paths are invalid")
+
+    dataset = _repository_relative_pilot_path(
+        repository_root, repository_paths["dataset"], label="dataset"
+    )
+    split = _repository_relative_pilot_path(
+        repository_root, repository_paths["split_manifest"], label="split manifest"
+    )
+    output = _repository_relative_pilot_path(
+        repository_root, repository_paths["output"], label="output"
+    )
+    _require_exact_pilot_cli_path(
+        args.dataset, dataset, repository_root=repository_root, label="dataset"
+    )
+    _require_exact_pilot_cli_path(
+        args.split_manifest,
+        split,
+        repository_root=repository_root,
+        label="split manifest",
+    )
+    _require_exact_pilot_cli_path(
+        output_argument, output, repository_root=repository_root, label="output"
+    )
+    return dataset, split, output
+
+
+def _load_pilot_run_spec_from_repository(
+    path: str | Path,
+) -> tuple[dict[str, Any], dict[str, str], bytes]:
+    repository_root = _repository_root()
+    expected = _repository_relative_pilot_path(
+        repository_root,
+        f"benchmarks/protocols/{PILOT_RUN_SPEC_FILENAME}",
+        label="run spec",
+    )
+    _require_exact_pilot_cli_path(
+        path, expected, repository_root=repository_root, label="run spec"
+    )
+    return load_pilot_run_spec(expected)
+
+
+def _write_private_bytes(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        offset = 0
+        while offset < len(content):
+            offset += os.write(descriptor, content[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _rename_directory_noreplace(source: Path, destination: Path) -> None:
+    """Atomically claim an absent destination without replacing another run."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise HarnessError("Atomic no-replace directory rename is unavailable")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    rename_noreplace = 1
+    if (
+        renameat2(
+            at_fdcwd,
+            os.fsencode(source),
+            at_fdcwd,
+            os.fsencode(destination),
+            rename_noreplace,
+        )
+        == 0
+    ):
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise HarnessError("Fresh pilot output path must not already exist")
+    raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _claim_fresh_pilot_output(output: Path, run_spec_bytes: bytes) -> None:
+    """Publish a complete copy-only pilot directory in one no-replace rename."""
+
+    parent = output.parent
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{output.name}.claim-", dir=parent)
+    )
+    claimed = False
+    try:
+        _write_private_bytes(temporary / RUN_SPEC_COPY_FILENAME, run_spec_bytes)
+        _fsync_directory(temporary)
+        _rename_directory_noreplace(temporary, output)
+        claimed = True
+        _fsync_directory(parent)
+    except Exception:
+        cleanup = output if claimed else temporary
+        shutil.rmtree(cleanup, ignore_errors=True)
+        try:
+            _fsync_directory(parent)
+        except OSError:
+            pass
+        raise
 
 
 @contextmanager
@@ -350,25 +552,56 @@ def cmd_benchmark_summary(args: argparse.Namespace) -> int:
 
 
 def cmd_benchmark_compare(args: argparse.Namespace) -> int:
+    run_spec_document: dict[str, Any] | None = None
+    run_spec_provenance: dict[str, str] | None = None
+    run_spec_bytes: bytes | None = None
+    config: ProviderConfig | None = None
+    skills: SkillRegistry | None = None
+    arms = tuple(args.arm or COMPARISON_ARMS)
+    if args.run_spec:
+        if args.api_key is not None or not args.api_key_file:
+            raise HarnessError(
+                "Pilot run spec requires only --api-key-file for credential injection"
+            )
+        if not args.split_manifest or not args.dataset or not args.output:
+            raise HarnessError(
+                "Pilot run spec requires explicit --dataset, --split-manifest, and --output"
+            )
+        run_spec_document, run_spec_provenance, run_spec_bytes = (
+            _load_pilot_run_spec_from_repository(args.run_spec)
+        )
+        pilot_root, pilot_split_path, pilot_output = _pilot_repository_paths(
+            args, run_spec_document, output_argument=args.output
+        )
+        config = _provider(args)
+        skills = _skills(args).freeze()
+    requested_ids = list(args.task_id or [])
+    if args.split_manifest and (
+        args.offset != 0
+        or args.limit is not None
+        or requested_ids
+        or args.task_id_file
+    ):
+        raise HarnessError(
+            "--split-manifest selects a frozen task set; use a derivative manifest "
+            "instead of additional task selectors"
+        )
     root = (
-        Path(args.dataset).expanduser().resolve() if args.dataset else download_verified(args.cache)
+        pilot_root
+        if args.run_spec
+        else Path(args.dataset).expanduser().resolve()
+        if args.dataset
+        else download_verified(args.cache)
     )
     tasks = load_verified_tasks(root)
-    requested_ids = list(args.task_id or [])
     frozen_ids: list[str] = []
     split_provenance: dict[str, Any] | None = None
     if args.split_manifest:
-        if (
-            args.offset != 0
-            or args.limit is not None
-            or requested_ids
-            or args.task_id_file
-        ):
-            raise HarnessError(
-                "--split-manifest selects a frozen task set; use a derivative manifest "
-                "instead of additional task selectors"
-            )
-        split_path = Path(args.split_manifest).expanduser().resolve()
+        split_path = (
+            pilot_split_path
+            if args.run_spec
+            else Path(args.split_manifest).expanduser().resolve()
+        )
         split_report = load_and_verify_trace2skill_split_manifest(root, split_path)
         frozen_ids = [str(task_id) for task_id in split_report["task_ids"]]
         split_provenance = trace2skill_split_provenance(split_report)
@@ -399,16 +632,58 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         tasks = tasks[: args.limit]
     if not tasks:
         raise HarnessError("No comparison tasks selected")
+    if config is None:
+        config = _provider(args)
+    if skills is None:
+        skills = _skills(args).freeze()
+    if args.run_spec:
+        actual_contract = comparison_execution_contract(
+            config,
+            arms=arms,
+            max_model_calls=args.max_model_calls,
+            max_turns_per_arm=args.max_turns_per_arm,
+            max_total_tokens=args.max_total_tokens,
+            max_output_tokens=args.max_output_tokens,
+            task_timeout_seconds=args.task_timeout,
+            recalculate=not args.no_recalculate,
+            arm_order_seed=args.arm_order_seed,
+            circuit_breaker_threshold=args.circuit_breaker,
+            split_provenance=split_provenance,
+            skills=skills,
+        )
+        verify_pilot_run_spec_contract(run_spec_document, actual_contract)
+    elif args.resume:
+        raise HarnessError("--resume is supported only with --run-spec")
+    elif split_provenance and split_provenance.get("manifest_id") == (
+        "qwen35-trace2skill-local-unattempted-pilot16-v2"
+    ):
+        raise HarnessError(f"The frozen pilot split requires run spec {PILOT_RUN_SPEC_ID}")
     output = (
-        Path(args.output).expanduser().resolve()
+        pilot_output
+        if args.run_spec
+        else Path(args.output).expanduser().resolve()
         if args.output
         else Path("benchmarks/results") / ("comparison-" + _now_id())
     )
+    if args.run_spec:
+        if args.resume:
+            if not output.is_dir():
+                raise HarnessError("--resume requires an existing comparison directory")
+        elif output.exists():
+            raise HarnessError("Fresh pilot output path must not already exist")
+        copy_path = output / RUN_SPEC_COPY_FILENAME
+        if args.resume:
+            if (
+                not copy_path.is_file()
+                or copy_path.is_symlink()
+                or copy_path.read_bytes() != run_spec_bytes
+            ):
+                raise HarnessError("Existing comparison has a missing or different run spec")
     runner = ComparisonBenchmarkRunner(
-        _provider(args),
+        config,
         output,
-        skill_registry=_skills(args),
-        arms=tuple(args.arm or COMPARISON_ARMS),
+        skill_registry=skills,
+        arms=arms,
         max_model_calls=args.max_model_calls,
         max_turns_per_arm=args.max_turns_per_arm,
         max_total_tokens=args.max_total_tokens,
@@ -418,11 +693,92 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         arm_order_seed=args.arm_order_seed,
         circuit_breaker_threshold=args.circuit_breaker,
         split_provenance=split_provenance,
+        run_spec_document=run_spec_document,
+        run_spec_provenance=run_spec_provenance,
+        run_spec_bytes=run_spec_bytes,
     )
-    summary = runner.run(tasks)
+    if args.run_spec:
+        runner.preflight(tasks)
+        if not args.resume:
+            _claim_fresh_pilot_output(output, run_spec_bytes)
+    summary = (
+        runner.run(tasks, resume=args.resume)
+        if args.run_spec
+        else runner.run(tasks)
+    )
     _json_print(summary)
     errors = sum(int(item["errors"]) for item in summary["arms"].values())
     return 0 if summary["missing_arm_tasks"] == 0 and errors == 0 else 2
+
+
+def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
+    if args.api_key is not None or not args.api_key_file:
+        raise HarnessError(
+            "Pilot interruption sealing requires only --api-key-file for credentials"
+        )
+    run_spec_document, run_spec_provenance, run_spec_bytes = (
+        _load_pilot_run_spec_from_repository(args.run_spec)
+    )
+    root, split_path, output = _pilot_repository_paths(
+        args, run_spec_document, output_argument=args.results
+    )
+    if not output.is_dir():
+        raise HarnessError("Pilot interruption sealing requires the existing output directory")
+    split_report = load_and_verify_trace2skill_split_manifest(root, split_path)
+    split_provenance = trace2skill_split_provenance(split_report)
+    tasks_by_id = {task.task_id: task for task in load_verified_tasks(root)}
+    missing = [
+        str(task_id)
+        for task_id in split_report["task_ids"]
+        if str(task_id) not in tasks_by_id
+    ]
+    if missing:
+        raise HarnessError(
+            "Verified split references unavailable task IDs: " + ", ".join(missing)
+        )
+    tasks = [tasks_by_id[str(task_id)] for task_id in split_report["task_ids"]]
+    config = _provider(args)
+    skills = _skills(args).freeze()
+    execution = run_spec_document["execution"]
+    resources = execution["resources"]
+    verify_pilot_run_spec_contract(
+        run_spec_document,
+        comparison_execution_contract(
+            config,
+            arms=tuple(execution["arms"]),
+            max_model_calls=resources["max_model_calls"],
+            max_turns_per_arm=resources["max_turns_per_arm"],
+            max_total_tokens=resources["max_total_tokens"],
+            max_output_tokens=resources["max_output_tokens_per_call"],
+            task_timeout_seconds=resources["task_timeout_seconds"],
+            recalculate=resources["recalculate"],
+            arm_order_seed=resources["arm_order_seed"],
+            circuit_breaker_threshold=resources["circuit_breaker_threshold"],
+            split_provenance=split_provenance,
+            skills=skills,
+        ),
+    )
+    runner = ComparisonBenchmarkRunner(
+        config,
+        output,
+        skill_registry=skills,
+        arms=tuple(execution["arms"]),
+        max_model_calls=resources["max_model_calls"],
+        max_turns_per_arm=resources["max_turns_per_arm"],
+        max_total_tokens=resources["max_total_tokens"],
+        max_output_tokens=resources["max_output_tokens_per_call"],
+        task_timeout_seconds=resources["task_timeout_seconds"],
+        recalculate=resources["recalculate"],
+        arm_order_seed=resources["arm_order_seed"],
+        circuit_breaker_threshold=resources["circuit_breaker_threshold"],
+        split_provenance=split_provenance,
+        run_spec_document=run_spec_document,
+        run_spec_provenance=run_spec_provenance,
+        run_spec_bytes=run_spec_bytes,
+    )
+    seal = runner.seal_interrupted_inflight(tasks)
+    _json_print({"sealed": True, "seal": seal})
+    return 0
 
 
 def cmd_benchmark_audit(args: argparse.Namespace) -> int:
@@ -649,6 +1005,16 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--dataset", type=Path, help="Extracted dataset root")
     compare.add_argument("--cache", type=Path, default=Path("benchmarks/data"))
     compare.add_argument("--output", type=Path)
+    compare.add_argument(
+        "--run-spec",
+        type=Path,
+        help="Enforce the code-anchored local pilot execution contract",
+    )
+    compare.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an existing run-spec comparison after exact preflight validation",
+    )
     compare.add_argument("--task-id", action="append")
     compare.add_argument(
         "--split-manifest",
@@ -679,6 +1045,18 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--circuit-breaker", type=int, default=3)
     _add_provider_flags(compare)
     compare.set_defaults(handler=cmd_benchmark_compare)
+
+    seal_interrupted = benchmark_commands.add_parser(
+        "seal-interrupted",
+        help="Seal one ambiguous pilot arm-task without replaying it",
+    )
+    seal_interrupted.add_argument("results", type=Path)
+    seal_interrupted.add_argument("--dataset", type=Path, required=True)
+    seal_interrupted.add_argument("--split-manifest", type=Path, required=True)
+    seal_interrupted.add_argument("--run-spec", type=Path, required=True)
+    seal_interrupted.add_argument("--skills", action="append", default=[])
+    _add_provider_flags(seal_interrupted)
+    seal_interrupted.set_defaults(handler=cmd_benchmark_seal_interrupted)
 
     audit = benchmark_commands.add_parser(
         "audit", help="Read-only fresh-rescore audit of a comparison directory"

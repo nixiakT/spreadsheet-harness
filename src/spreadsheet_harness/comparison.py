@@ -8,6 +8,8 @@ import json
 import math
 import os
 import random
+import stat
+import subprocess
 import uuid
 from collections import Counter
 from collections.abc import Iterator
@@ -47,11 +49,11 @@ from .benchmark import (
     VERIFIED_SHA256,
     SpreadsheetTask,
     _atomic_write_json,
+    _reject_duplicate_json_keys,
     _runtime_fingerprint,
     _sha256,
     _source_fingerprint,
     _text_sha256,
-    _valid_jsonl_rows,
     compare_workbooks,
     comparison_evidence,
     verify_trace2skill_split_provenance,
@@ -87,8 +89,22 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v22"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 11
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v23"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 12
+PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
+PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
+PILOT_RUN_SPEC_FILENAME = "qwen35-trace2skill-local-pilot16-run-spec-v1.json"
+PILOT_RUN_SPEC_SHA256 = (
+    "8dc1583b96a76209023586c8ebafde9dfa1a55cb31778e88247da595bdd60086"
+)
+RUN_SPEC_COPY_FILENAME = "run-spec.json"
+INFLIGHT_FILENAME = ".inflight-arm-task.json"
+INTERRUPTED_SEALS_FILENAME = "interrupted-arm-tasks.json"
+CONTINUATION_SOURCE_FILENAME = "continuation-source.json"
+PILOT_SPLIT_MANIFEST_ID = "qwen35-trace2skill-local-unattempted-pilot16-v2"
+LEGACY_PILOT_MANIFEST_SHA256 = (
+    "7eee847bc9880ec112ac78eefaac0c97d350da31c6e045c1d5c924e95b0b04c1"
+)
 COMPARISON_CONFIGURATION_POLICIES = {
     "code_workbook_formula_gate": (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -97,9 +113,314 @@ COMPARISON_CONFIGURATION_POLICIES = {
     "spreadsheet_skill_policy": "pre-evaluation-baseline-frozen-v1",
     "edit_recovery_prompt_policy": "self-contained-request-scoped-verification-v1",
     "result_manifest_binding_policy": "exact-manifest-sha256-v1",
-    "resume_journal_policy": "fail-closed-strict-utf8-no-repair-or-resample-v2",
+    "resume_journal_policy": "durable-inflight-fail-closed-no-replay-v3",
     "request_attempt_audit_policy": "exact-attempt-history-per-response-v1",
 }
+
+
+def _strict_json_document(raw: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HarnessError(f"{label} must be valid UTF-8") from exc
+    try:
+        value = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HarnessError(f"Invalid {label} JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise HarnessError(f"{label} must be a JSON object")
+    return value
+
+
+def _strict_jsonl_rows(path: Path) -> tuple[list[dict[str, Any]], int]:
+    if not path.is_file():
+        return [], 0
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return [], 1
+    rows: list[dict[str, Any]] = []
+    invalid = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line, object_pairs_hook=_reject_duplicate_json_keys)
+        except (json.JSONDecodeError, ValueError):
+            invalid += 1
+            continue
+        if not isinstance(row, dict):
+            invalid += 1
+            continue
+        rows.append(row)
+    return rows, invalid
+
+
+def _regular_file_bytes(path: Path, *, label: str) -> bytes:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise HarnessError(f"Unable to read {label}: {path}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        raise HarnessError(f"{label} must be a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise HarnessError(f"Unable to read {label}: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise HarnessError(f"{label} must be a regular file: {path}")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_bytes(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            offset = 0
+            while offset < len(value):
+                offset += os.write(descriptor, value[offset:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def parse_pilot_run_spec_bytes(
+    raw: bytes,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Parse exact bytes for the one code-anchored pilot execution contract."""
+
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != PILOT_RUN_SPEC_SHA256:
+        raise HarnessError("Pilot run spec checksum does not match its code anchor")
+    document = _strict_json_document(raw, label="pilot run spec")
+    if set(document) != {
+        "schema_version",
+        "run_spec_id",
+        "phase",
+        "repository_relative_paths",
+        "execution",
+    }:
+        raise HarnessError("Pilot run spec top-level fields do not match its schema")
+    if (
+        document.get("schema_version") != PILOT_RUN_SPEC_SCHEMA_VERSION
+        or document.get("run_spec_id") != PILOT_RUN_SPEC_ID
+        or document.get("phase") != "exploratory_development_pilot"
+        or not isinstance(document.get("repository_relative_paths"), dict)
+        or not isinstance(document.get("execution"), dict)
+    ):
+        raise HarnessError("Pilot run spec identity does not match its code anchors")
+    provenance = {
+        "run_spec_id": PILOT_RUN_SPEC_ID,
+        "schema_version": PILOT_RUN_SPEC_SCHEMA_VERSION,
+        "run_spec_sha256": digest,
+    }
+    return document, provenance
+
+
+def load_pilot_run_spec(path: str | Path) -> tuple[dict[str, Any], dict[str, str], bytes]:
+    """Load the one code-anchored pilot contract without accepting path aliases."""
+
+    candidate = Path(path).expanduser()
+    if candidate.name != PILOT_RUN_SPEC_FILENAME:
+        raise HarnessError(f"Pilot run spec must be named {PILOT_RUN_SPEC_FILENAME}")
+    raw = _regular_file_bytes(candidate, label="pilot run spec")
+    document, provenance = parse_pilot_run_spec_bytes(raw)
+    return document, provenance, raw
+
+
+def verify_pilot_run_spec_provenance(value: Any) -> bool:
+    return value == {
+        "run_spec_id": PILOT_RUN_SPEC_ID,
+        "schema_version": PILOT_RUN_SPEC_SCHEMA_VERSION,
+        "run_spec_sha256": PILOT_RUN_SPEC_SHA256,
+    }
+
+
+def verify_repository_source_state(
+    repository_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Prove a clean committed checkout matches local ``origin/main`` state."""
+
+    root = (
+        Path(repository_root).expanduser().resolve()
+        if repository_root is not None
+        else Path(__file__).resolve().parents[2]
+    )
+
+    def git(*arguments: str, timeout: int = 15) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise HarnessError("Unable to verify the repository source state") from exc
+        if completed.returncode != 0:
+            raise HarnessError("Unable to verify the repository source state")
+        return completed.stdout.strip()
+
+    top_level = Path(git("rev-parse", "--show-toplevel")).resolve()
+    if top_level != root:
+        raise HarnessError("Harness source is not running from the expected repository root")
+    commit = git("rev-parse", "--verify", "HEAD^{commit}")
+    tree = git("rev-parse", "--verify", "HEAD^{tree}")
+    upstream_ref = "refs/remotes/origin/main"
+    upstream_commit = git("rev-parse", "--verify", f"{upstream_ref}^{{commit}}")
+    if commit != upstream_commit:
+        raise HarnessError("Harness HEAD does not match the local origin/main tracking ref")
+    if git("status", "--porcelain=v1", "--untracked-files=normal"):
+        raise HarnessError("Harness repository must be clean before a frozen pilot launch")
+    remote_name = "origin"
+    remote_ref = "refs/heads/main"
+    remote_lines = git(
+        "ls-remote",
+        "--exit-code",
+        remote_name,
+        remote_ref,
+        timeout=30,
+    ).splitlines()
+    expected_remote_line = f"{commit}\t{remote_ref}"
+    if remote_lines != [expected_remote_line] or any(
+        character not in "0123456789abcdef" for character in commit
+    ) or len(commit) != 40:
+        raise HarnessError("Harness HEAD does not match the observed origin/main remote head")
+    source = _source_fingerprint()
+    return {
+        "schema_version": 1,
+        "git_commit": commit,
+        "git_tree": tree,
+        "remote_tracking_ref": upstream_ref,
+        "remote_tracking_commit": upstream_commit,
+        "remote_name": remote_name,
+        "remote_ref": remote_ref,
+        "remote_observed_commit": commit,
+        "source_fingerprint": source,
+    }
+
+
+def comparison_execution_contract(
+    config: ProviderConfig,
+    *,
+    arms: tuple[str, ...],
+    max_model_calls: int,
+    max_turns_per_arm: int,
+    max_total_tokens: int,
+    max_output_tokens: int,
+    task_timeout_seconds: float,
+    recalculate: bool,
+    arm_order_seed: int,
+    circuit_breaker_threshold: int,
+    split_provenance: dict[str, Any] | None,
+    skills: SkillRegistry,
+) -> dict[str, Any]:
+    return {
+        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+        "comparison_manifest_schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "split_provenance": split_provenance,
+        "arms": list(arms),
+        "provider": {
+            "base_url": config.base_url,
+            "model": config.model,
+            "api_protocol": config.api_protocol,
+            "requested_reasoning_effort": (
+                config.requested_reasoning_effort or config.reasoning_effort
+            ),
+            "reasoning_effort": config.reasoning_effort,
+            "request_timeout_seconds": config.timeout_seconds,
+            "request_retries": config.max_retries,
+            "request_interval_seconds": config.request_interval_seconds,
+            "litellm_timeout_seconds": config.litellm_timeout_seconds,
+            "store_responses": config.store_responses,
+            "generation": config.generation_dict(),
+        },
+        "resources": {
+            "max_model_calls": max_model_calls,
+            "max_turns_per_arm": max_turns_per_arm,
+            "max_total_tokens": max_total_tokens,
+            "max_output_tokens_per_call": max_output_tokens,
+            "task_timeout_seconds": float(task_timeout_seconds),
+            "recalculate": recalculate,
+            "task_retries": 0,
+            "circuit_breaker_threshold": circuit_breaker_threshold,
+            "arm_order_seed": arm_order_seed,
+        },
+        "skills_for_ours_only": [
+            {"name": skill.name, "sha256": skill.sha256}
+            for skill in skills.discover()
+        ],
+    }
+
+
+def verify_pilot_run_spec_contract(
+    document: dict[str, Any], actual: dict[str, Any]
+) -> None:
+    if document.get("execution") != actual:
+        raise HarnessError("Pilot run spec does not match the resolved execution contract")
+
+
+def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
+    configuration = manifest.get("configuration")
+    if not isinstance(configuration, dict):
+        return {}
+    return {
+        "comparison_protocol_version": manifest.get("comparison_protocol_version"),
+        "comparison_manifest_schema_version": manifest.get("schema_version"),
+        "split_provenance": manifest.get("split_provenance"),
+        "arms": manifest.get("arms"),
+        "provider": {
+            "base_url": configuration.get("provider_base_url"),
+            "model": configuration.get("model"),
+            "api_protocol": configuration.get("api_protocol"),
+            "requested_reasoning_effort": configuration.get(
+                "requested_reasoning_effort"
+            ),
+            "reasoning_effort": configuration.get("reasoning_effort"),
+            "request_timeout_seconds": configuration.get("request_timeout_seconds"),
+            "request_retries": configuration.get("request_retries"),
+            "request_interval_seconds": configuration.get("request_interval_seconds"),
+            "litellm_timeout_seconds": configuration.get("litellm_timeout_seconds"),
+            "store_responses": configuration.get("store_responses"),
+            "generation": configuration.get("generation"),
+        },
+        "resources": {
+            "max_model_calls": configuration.get("max_model_calls"),
+            "max_turns_per_arm": configuration.get("max_turns_per_arm"),
+            "max_total_tokens": configuration.get("max_total_tokens"),
+            "max_output_tokens_per_call": configuration.get(
+                "max_output_tokens_per_call"
+            ),
+            "task_timeout_seconds": configuration.get("task_timeout_seconds"),
+            "recalculate": configuration.get("recalculate"),
+            "task_retries": configuration.get("task_retries"),
+            "circuit_breaker_threshold": configuration.get(
+                "circuit_breaker_threshold"
+            ),
+            "arm_order_seed": manifest.get("arm_order_seed"),
+        },
+        "skills_for_ours_only": configuration.get("skills_for_ours_only"),
+    }
 
 
 def _run_key(task_id: str, arm: str) -> str:
@@ -532,7 +853,9 @@ def comparison_summary(
     arms: tuple[str, ...] = COMPARISON_ARMS,
     bootstrap_seed: int = 20260811,
     collection_tasks: list[SpreadsheetTask] | None = None,
+    interrupted_keys: set[str] | None = None,
 ) -> dict[str, Any]:
+    interrupted_keys = set() if interrupted_keys is None else set(interrupted_keys)
     collection_tasks = tasks if collection_tasks is None else collection_tasks
     task_ids = [task.task_id for task in tasks]
     collection_task_ids = [task.task_id for task in collection_tasks]
@@ -542,7 +865,7 @@ def comparison_summary(
         raise ValueError("collection task IDs must be unique")
     if not set(task_ids).issubset(collection_task_ids):
         raise ValueError("analysis tasks must be a subset of collection tasks")
-    rows, invalid = _valid_jsonl_rows(Path(results_path))
+    rows, invalid = _strict_jsonl_rows(Path(results_path))
     expected_task_ids = set(collection_task_ids)
     expected_arms = set(arms)
     identity_counts: Counter[str] = Counter()
@@ -589,6 +912,9 @@ def comparison_summary(
         if row.get("task_id") is not None and row.get("arm") in arms
     }
     expected_keys = [_run_key(task.task_id, arm) for task in tasks for arm in arms]
+    unknown_interrupted_keys = sorted(interrupted_keys - set(expected_keys))
+    if unknown_interrupted_keys:
+        raise ValueError("interrupted arm-task keys must belong to the analysis set")
     by_arm: dict[str, dict[str, Any]] = {}
     passes: dict[str, dict[str, bool]] = {}
     for arm in arms:
@@ -600,6 +926,27 @@ def comparison_summary(
             for task in tasks
         }
         arm_summary = _arm_subset_summary(tasks, arm, latest, passes[arm])
+        arm_interrupted = sorted(
+            key for key in interrupted_keys if key.endswith(f"::{arm}")
+        )
+        known_tasks = [
+            task for task in tasks if _run_key(task.task_id, arm) not in interrupted_keys
+        ]
+        known_passed = sum(passes[arm][task.task_id] for task in known_tasks)
+        if arm_interrupted:
+            arm_summary["end_to_end_accuracy"] = None
+            arm_summary["wilson_95"] = None
+        arm_summary["interrupted_unknown_outcomes"] = len(arm_interrupted)
+        arm_summary["interrupted_unknown_keys"] = arm_interrupted
+        arm_summary["known_outcome_descriptive"] = {
+            "tasks": len(known_tasks),
+            "passed": known_passed,
+            "accuracy": known_passed / len(known_tasks) if known_tasks else None,
+            "wilson_95": _wilson(known_passed, len(known_tasks)) if known_tasks else None,
+            "primary": False,
+        }
+        arm_summary["attempted"] += len(arm_interrupted)
+        arm_summary["missing"] -= len(arm_interrupted)
         strata = {
             stratum: _arm_subset_summary(
                 [task for task in tasks if _task_stratum(task) == stratum],
@@ -609,6 +956,32 @@ def comparison_summary(
             )
             for stratum in ("cell", "sheet", "other")
         }
+        for stratum, stratum_summary in strata.items():
+            stratum_tasks = [task for task in tasks if _task_stratum(task) == stratum]
+            stratum_interrupted = [
+                task
+                for task in stratum_tasks
+                if _run_key(task.task_id, arm) in interrupted_keys
+            ]
+            stratum_known = [task for task in stratum_tasks if task not in stratum_interrupted]
+            stratum_passed = sum(passes[arm][task.task_id] for task in stratum_known)
+            if stratum_interrupted:
+                stratum_summary["end_to_end_accuracy"] = None
+                stratum_summary["wilson_95"] = None
+            stratum_summary["interrupted_unknown_outcomes"] = len(stratum_interrupted)
+            stratum_summary["known_outcome_descriptive"] = {
+                "tasks": len(stratum_known),
+                "passed": stratum_passed,
+                "accuracy": (
+                    stratum_passed / len(stratum_known) if stratum_known else None
+                ),
+                "wilson_95": (
+                    _wilson(stratum_passed, len(stratum_known))
+                    if stratum_known
+                    else None
+                ),
+                "primary": False,
+            }
         arm_summary["strata"] = strata
         # Retain the original field names while making their contents complete.
         arm_summary["cell_level"] = strata["cell"]
@@ -648,6 +1021,29 @@ def comparison_summary(
         pairwise[name]["holm_adjusted_p"] = value
     for name in pairwise:
         pairwise[name].setdefault("holm_adjusted_p", None)
+        if interrupted_keys:
+            left_arm, right_arm = name.split("_vs_", 1)
+            known_pairs = [
+                task
+                for task in tasks
+                if _run_key(task.task_id, left_arm) not in interrupted_keys
+                and _run_key(task.task_id, right_arm) not in interrupted_keys
+            ]
+            pairwise[name]["known_outcome_descriptive"] = {
+                "pairs": len(known_pairs),
+                "accuracy_delta_right_minus_left": (
+                    sum(passes[right_arm][task.task_id] for task in known_pairs)
+                    - sum(passes[left_arm][task.task_id] for task in known_pairs)
+                )
+                / len(known_pairs)
+                if known_pairs
+                else None,
+                "primary": False,
+            }
+            pairwise[name]["accuracy_delta_right_minus_left"] = None
+            _invalidate_pairwise_inference(
+                pairwise[name], ["interrupted_unknown_outcomes"]
+            )
 
     attempted_keys = set(latest)
     expected_key_set = set(expected_keys)
@@ -655,7 +1051,7 @@ def comparison_summary(
     errored_arm_tasks = sum(
         latest[key].get("status") != "completed" for key in attempted_expected
     )
-    missing_arm_tasks = len(expected_key_set - attempted_keys)
+    missing_arm_tasks = len(expected_key_set - attempted_keys - interrupted_keys)
     inference_invalid_reasons: list[str] = []
     if invalid:
         inference_invalid_reasons.append("invalid_result_rows")
@@ -678,6 +1074,8 @@ def comparison_summary(
         inference_invalid_reasons.append("missing_arm_tasks")
     if errored_arm_tasks:
         inference_invalid_reasons.append("errored_arm_tasks")
+    if interrupted_keys:
+        inference_invalid_reasons.append("interrupted_unknown_outcomes")
     if inference_invalid_reasons:
         for result in pairwise.values():
             _invalidate_pairwise_inference(result, inference_invalid_reasons)
@@ -696,10 +1094,12 @@ def comparison_summary(
         "dataset_revision": f"KAKA22/SpreadsheetBench@{VERIFIED_REVISION}",
         "task_count": len(tasks),
         "expected_arm_tasks": len(expected_keys),
-        "attempted_arm_tasks": len(attempted_expected),
+        "attempted_arm_tasks": len(attempted_expected) + len(interrupted_keys),
         "completed_arm_tasks": len(attempted_expected) - errored_arm_tasks,
         "errored_arm_tasks": errored_arm_tasks,
         "missing_arm_tasks": missing_arm_tasks,
+        "interrupted_unknown_arm_tasks": len(interrupted_keys),
+        "interrupted_unknown_keys": sorted(interrupted_keys),
         "invalid_result_rows_ignored": invalid,
         "duplicate_arm_tasks": len(duplicate_arm_task_keys),
         "duplicate_arm_task_rows": duplicate_arm_task_rows,
@@ -738,6 +1138,9 @@ class ComparisonBenchmarkRunner:
         arm_order_seed: int = 20260811,
         circuit_breaker_threshold: int = 3,
         split_provenance: dict[str, Any] | None = None,
+        run_spec_document: dict[str, Any] | None = None,
+        run_spec_provenance: dict[str, str] | None = None,
+        run_spec_bytes: bytes | None = None,
     ) -> None:
         if not arms or len(set(arms)) != len(arms) or any(
             arm not in AVAILABLE_COMPARISON_ARMS for arm in arms
@@ -770,15 +1173,60 @@ class ComparisonBenchmarkRunner:
             if split_provenance is not None
             else None
         )
+        self.repository_source_state: dict[str, Any] | None = None
+        self.continuation_source_record: dict[str, Any] | None = None
+        self.legacy_source_transition = False
+        self.run_spec_document = (
+            json.loads(json.dumps(run_spec_document))
+            if run_spec_document is not None
+            else None
+        )
+        self.run_spec_provenance = (
+            json.loads(json.dumps(run_spec_provenance))
+            if run_spec_provenance is not None
+            else None
+        )
+        self.run_spec_bytes = bytes(run_spec_bytes) if run_spec_bytes is not None else None
+        if any(
+            value is not None
+            for value in (
+                self.run_spec_document,
+                self.run_spec_provenance,
+                self.run_spec_bytes,
+            )
+        ) and any(
+            value is None
+            for value in (
+                self.run_spec_document,
+                self.run_spec_provenance,
+                self.run_spec_bytes,
+            )
+        ):
+            raise ValueError("run spec document, provenance, and bytes must be provided together")
+        if self.run_spec_bytes is not None:
+            parsed_document, parsed_provenance = parse_pilot_run_spec_bytes(
+                self.run_spec_bytes
+            )
+            if (
+                parsed_document != self.run_spec_document
+                or parsed_provenance != self.run_spec_provenance
+            ):
+                raise ValueError("run spec document or provenance does not match its bytes")
         self.relay_pacer = RelayPacer(config.request_interval_seconds)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.results_path = self.output_dir / "results.jsonl"
         self.manifest_path = self.output_dir / "comparison-manifest.json"
         self.summary_path = self.output_dir / "summary.json"
         self.lock_path = self.output_dir / ".comparison.lock"
+        self.run_spec_copy_path = self.output_dir / RUN_SPEC_COPY_FILENAME
+        self.inflight_path = self.output_dir / INFLIGHT_FILENAME
+        self.interrupted_seals_path = self.output_dir / INTERRUPTED_SEALS_FILENAME
+        self.continuation_source_path = self.output_dir / CONTINUATION_SOURCE_FILENAME
+        if self.run_spec_document is None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
     def _exclusive_lock(self) -> Iterator[None]:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             try:
@@ -791,6 +1239,24 @@ class ComparisonBenchmarkRunner:
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
+
+    def _prepare_repository_source_state(self) -> None:
+        is_pilot = (
+            self.split_provenance is not None
+            and self.split_provenance.get("manifest_id") == PILOT_SPLIT_MANIFEST_ID
+        )
+        self.repository_source_state = (
+            verify_repository_source_state() if is_pilot else None
+        )
+
+    def preflight(self, tasks: list[SpreadsheetTask]) -> dict[str, Any]:
+        """Perform every read-only launch gate and return the prospective manifest."""
+
+        if not tasks or len({task.task_id for task in tasks}) != len(tasks):
+            raise ValueError("comparison tasks must be non-empty with unique IDs")
+        self._prepare_repository_source_state()
+        ensure_strict_code_isolation((self.config.api_key,))
+        return self._manifest(tasks)
 
     def _manifest(self, tasks: list[SpreadsheetTask]) -> dict[str, Any]:
         execution_task_ids = "".join(f"{task.task_id}\n" for task in tasks)
@@ -806,6 +1272,31 @@ class ComparisonBenchmarkRunner:
             raise HarnessError(
                 "Comparison tasks or dataset do not match frozen split provenance"
             )
+        if (
+            self.split_provenance is not None
+            and self.split_provenance.get("manifest_id")
+            == PILOT_SPLIT_MANIFEST_ID
+            and self.run_spec_document is None
+        ):
+            raise HarnessError("The frozen pilot split requires its code-anchored run spec")
+        if self.run_spec_document is not None:
+            actual_contract = comparison_execution_contract(
+                self.config,
+                arms=self.arms,
+                max_model_calls=self.max_model_calls,
+                max_turns_per_arm=self.max_turns_per_arm,
+                max_total_tokens=self.max_total_tokens,
+                max_output_tokens=self.max_output_tokens,
+                task_timeout_seconds=self.task_timeout_seconds,
+                recalculate=self.recalculate,
+                arm_order_seed=self.arm_order_seed,
+                circuit_breaker_threshold=self.circuit_breaker_threshold,
+                split_provenance=self.split_provenance,
+                skills=self.skill_registry,
+            )
+            verify_pilot_run_spec_contract(self.run_spec_document, actual_contract)
+            if not verify_pilot_run_spec_provenance(self.run_spec_provenance):
+                raise HarnessError("Pilot run spec provenance does not match its code anchor")
         skills = [
             {"name": skill.name, "sha256": skill.sha256}
             for skill in self.skill_registry.discover()
@@ -837,6 +1328,8 @@ class ComparisonBenchmarkRunner:
             "task_id_set_sha256": _text_sha256(canonical_task_ids),
             "task_execution_order_sha256": _text_sha256(execution_task_ids),
             "split_provenance": self.split_provenance,
+            "run_spec_provenance": self.run_spec_provenance,
+            "repository_source": self.repository_source_state,
             "tasks": [
                 {
                     "task_id": task.task_id,
@@ -975,18 +1468,84 @@ class ComparisonBenchmarkRunner:
         expected = self._manifest(tasks)
         if self.manifest_path.is_file():
             try:
-                actual = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
+                actual = _strict_json_document(
+                    _regular_file_bytes(self.manifest_path, label="comparison manifest"),
+                    label="comparison manifest",
+                )
+            except HarnessError as exc:
                 raise HarnessError(f"Invalid comparison manifest: {self.manifest_path}") from exc
+            actual_sha256 = _manifest_file_sha256(self.manifest_path)
             if actual != expected:
-                raise HarnessError("Refusing to resume comparison with a different frozen config")
+                if actual_sha256 != LEGACY_PILOT_MANIFEST_SHA256:
+                    raise HarnessError(
+                        "Refusing to resume comparison with a different frozen config"
+                    )
+                mutable_source_fields = {"harness_source", "runtime", "repository_source"}
+                actual_static = {
+                    key: value
+                    for key, value in actual.items()
+                    if key not in mutable_source_fields
+                }
+                expected_static = {
+                    key: value
+                    for key, value in expected.items()
+                    if key not in mutable_source_fields
+                }
+                if actual_static != expected_static or actual.get("repository_source") is not None:
+                    raise HarnessError(
+                        "Legacy pilot manifest differs outside its immutable source fields"
+                    )
+                self.legacy_source_transition = True
+            if self.run_spec_document is not None:
+                verify_pilot_run_spec_contract(
+                    self.run_spec_document, manifest_execution_contract(actual)
+                )
             return
         if self.results_path.is_file() and self.results_path.stat().st_size:
             raise HarnessError("Comparison results exist without a compatibility manifest")
         _atomic_write_json(self.manifest_path, expected)
 
+    def _prepare_continuation_source(
+        self, *, comparison_manifest_sha256: str
+    ) -> dict[str, Any] | None:
+        if self.repository_source_state is None:
+            return None
+        expected = {
+            "schema_version": 1,
+            "comparison_manifest_sha256": comparison_manifest_sha256,
+            "repository_source": self.repository_source_state,
+        }
+        expected["record_sha256"] = _text_sha256(
+            json.dumps(expected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+        if self.continuation_source_path.exists():
+            actual = _strict_json_document(
+                _regular_file_bytes(
+                    self.continuation_source_path, label="continuation source record"
+                ),
+                label="continuation source record",
+            )
+            if set(actual) != set(expected) or actual != expected:
+                raise HarnessError("Continuation source record does not match this checkout")
+        else:
+            _atomic_write_json(self.continuation_source_path, expected)
+        return expected
+
+    def _prepare_run_spec_copy(self) -> None:
+        if self.run_spec_bytes is None:
+            return
+        if self.run_spec_copy_path.is_file():
+            if _regular_file_bytes(
+                self.run_spec_copy_path, label="saved pilot run spec"
+            ) != self.run_spec_bytes:
+                raise HarnessError("Saved pilot run spec does not match the current run spec")
+            return
+        if self.run_spec_copy_path.exists():
+            raise HarnessError("Saved pilot run spec is not a regular file")
+        _atomic_write_bytes(self.run_spec_copy_path, self.run_spec_bytes)
+
     def _latest(self) -> dict[str, dict[str, Any]]:
-        rows, _ = _valid_jsonl_rows(self.results_path)
+        rows, _ = _strict_jsonl_rows(self.results_path)
         latest: dict[str, dict[str, Any]] = {}
         seen_keys: set[str] = set()
         duplicate_keys: set[str] = set()
@@ -1025,6 +1584,279 @@ class ComparisonBenchmarkRunner:
             path = path.with_name(f"{arm}-{uuid.uuid4().hex[:8]}")
         return path
 
+    def _write_inflight(
+        self, task_id: str, arm: str, *, comparison_manifest_sha256: str
+    ) -> None:
+        if self.inflight_path.exists():
+            raise HarnessError(
+                "Refusing to sample with an unresolved in-flight arm-task marker"
+            )
+        _atomic_write_json(
+            self.inflight_path,
+            {
+                "schema_version": 1,
+                "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+                "comparison_manifest_sha256": comparison_manifest_sha256,
+                "run_spec_provenance": self.run_spec_provenance,
+                "task_id": task_id,
+                "arm": arm,
+            },
+        )
+
+    def _clear_inflight(self) -> None:
+        self.inflight_path.unlink()
+        directory = os.open(self.output_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def _read_valid_inflight_marker(
+        self,
+        tasks: list[SpreadsheetTask],
+        *,
+        comparison_manifest_sha256: str,
+    ) -> tuple[dict[str, Any], bytes]:
+        marker_bytes = _regular_file_bytes(self.inflight_path, label="in-flight marker")
+        marker = _strict_json_document(marker_bytes, label="in-flight marker")
+        required = {
+            "schema_version",
+            "comparison_protocol_version",
+            "comparison_manifest_sha256",
+            "run_spec_provenance",
+            "task_id",
+            "arm",
+        }
+        allowed_tasks = {task.task_id for task in tasks}
+        if (
+            set(marker) != required
+            or marker.get("schema_version") != 1
+            or marker.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION
+            or marker.get("comparison_manifest_sha256")
+            != comparison_manifest_sha256
+            or marker.get("run_spec_provenance") != self.run_spec_provenance
+            or marker.get("task_id") not in allowed_tasks
+            or marker.get("arm") not in self.arms
+        ):
+            raise HarnessError("In-flight marker does not match the frozen comparison")
+        return marker, marker_bytes
+
+    def _clear_inflight_if_terminal_row_is_durable(
+        self,
+        tasks: list[SpreadsheetTask],
+        rows: list[dict[str, Any]],
+        *,
+        comparison_manifest_sha256: str,
+    ) -> bool:
+        if not self.inflight_path.exists():
+            return False
+        marker, _ = self._read_valid_inflight_marker(
+            tasks,
+            comparison_manifest_sha256=comparison_manifest_sha256,
+        )
+        matching = [
+            row
+            for row in rows
+            if row.get("task_id") == marker["task_id"]
+            and row.get("arm") == marker["arm"]
+        ]
+        if not matching:
+            return False
+        if len(matching) != 1:
+            raise HarnessError("In-flight arm-task has duplicate terminal result rows")
+        row = matching[0]
+        if (
+            row.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION
+            or row.get("comparison_manifest_sha256") != comparison_manifest_sha256
+            or row.get("split_provenance") != self.split_provenance
+            or row.get("run_spec_provenance") != self.run_spec_provenance
+            or row.get("status") not in {"completed", "error"}
+            or not isinstance(row.get("passed"), bool)
+            or row.get("continuation_source") != self.continuation_source_record
+        ):
+            raise HarnessError("In-flight terminal row is not bound to the frozen comparison")
+        self._clear_inflight()
+        return True
+
+    def _read_interrupted_seals(self) -> list[dict[str, Any]]:
+        if not self.interrupted_seals_path.exists():
+            return []
+        document = _strict_json_document(
+            _regular_file_bytes(
+                self.interrupted_seals_path, label="interrupted arm-task seals"
+            ),
+            label="interrupted arm-task seals",
+        )
+        seals = document.get("seals")
+        if (
+            set(document) != {"schema_version", "seals"}
+            or document.get("schema_version") != 1
+            or not isinstance(seals, list)
+        ):
+            raise HarnessError("Interrupted arm-task seals document is invalid")
+        if not all(isinstance(seal, dict) for seal in seals):
+            raise HarnessError("Interrupted arm-task seal entries must be objects")
+        keys = [_run_key(str(seal.get("task_id")), str(seal.get("arm"))) for seal in seals]
+        if len(keys) != len(set(keys)):
+            raise HarnessError("Interrupted arm-task seals contain duplicate keys")
+        return seals
+
+    def _validate_interrupted_seals(
+        self,
+        tasks: list[SpreadsheetTask],
+        *,
+        comparison_manifest_sha256: str,
+    ) -> dict[str, dict[str, Any]]:
+        allowed_tasks = {task.task_id for task in tasks}
+        result: dict[str, dict[str, Any]] = {}
+        required = {
+            "schema_version",
+            "task_id",
+            "arm",
+            "comparison_protocol_version",
+            "comparison_manifest_sha256",
+            "split_provenance",
+            "run_spec_provenance",
+            "status",
+            "passed",
+            "outcome_observed",
+            "score_available",
+            "usage_observed",
+            "replay_permitted",
+            "error_retryable",
+            "error_category",
+            "sealed_at",
+            "sealed_from_inflight_marker_sha256",
+        }
+        for seal in self._read_interrupted_seals():
+            task_id = seal.get("task_id")
+            arm = seal.get("arm")
+            digest = seal.get("sealed_from_inflight_marker_sha256")
+            if (
+                set(seal) != required
+                or seal.get("schema_version") != 1
+                or task_id not in allowed_tasks
+                or arm not in self.arms
+                or seal.get("comparison_protocol_version")
+                != COMPARISON_PROTOCOL_VERSION
+                or seal.get("comparison_manifest_sha256")
+                != comparison_manifest_sha256
+                or seal.get("split_provenance") != self.split_provenance
+                or seal.get("run_spec_provenance") != self.run_spec_provenance
+                or seal.get("status") != "interrupted"
+                or seal.get("passed") is not None
+                or seal.get("outcome_observed") is not False
+                or seal.get("score_available") is not False
+                or seal.get("usage_observed") is not False
+                or seal.get("replay_permitted") is not False
+                or seal.get("error_retryable") is not False
+                or seal.get("error_category") != "interrupted_unknown_outcome"
+                or not isinstance(seal.get("sealed_at"), str)
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise HarnessError("Interrupted arm-task seal does not match the run")
+            try:
+                datetime.fromisoformat(str(seal["sealed_at"]))
+            except ValueError as exc:
+                raise HarnessError("Interrupted arm-task seal timestamp is invalid") from exc
+            result[_run_key(str(task_id), str(arm))] = seal
+        return result
+
+    def _seal_interrupted_inflight(
+        self,
+        tasks: list[SpreadsheetTask],
+        *,
+        comparison_manifest_sha256: str,
+    ) -> dict[str, Any]:
+        """Consume an ambiguous intent without ever authorizing its replay."""
+
+        if not self.inflight_path.is_file() or self.inflight_path.is_symlink():
+            raise HarnessError("No regular in-flight marker is available to seal")
+        marker, marker_bytes = self._read_valid_inflight_marker(
+            tasks,
+            comparison_manifest_sha256=comparison_manifest_sha256,
+        )
+        existing, invalid = _strict_jsonl_rows(self.results_path)
+        if invalid or (
+            self.results_path.is_file()
+            and self.results_path.stat().st_size
+            and not self.results_path.read_bytes().endswith(b"\n")
+        ):
+            raise HarnessError("Cannot seal against a damaged results journal")
+        key = _run_key(str(marker["task_id"]), str(marker["arm"]))
+        if any(
+            _run_key(str(row.get("task_id")), str(row.get("arm"))) == key
+            for row in existing
+        ):
+            raise HarnessError("In-flight arm-task already has a terminal result row")
+        existing_seals = self._read_interrupted_seals()
+        existing_seal = next(
+            (
+                seal
+                for seal in existing_seals
+                if _run_key(str(seal.get("task_id")), str(seal.get("arm"))) == key
+            ),
+            None,
+        )
+        marker_sha256 = hashlib.sha256(marker_bytes).hexdigest()
+        if existing_seal is not None:
+            if existing_seal.get("sealed_from_inflight_marker_sha256") != marker_sha256:
+                raise HarnessError("Existing interrupted seal does not match the marker")
+            self._clear_inflight()
+            return existing_seal
+        now = datetime.now(timezone.utc).isoformat()
+        seal = {
+            "schema_version": 1,
+            "task_id": marker["task_id"],
+            "arm": marker["arm"],
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "comparison_manifest_sha256": comparison_manifest_sha256,
+            "split_provenance": self.split_provenance,
+            "run_spec_provenance": self.run_spec_provenance,
+            "status": "interrupted",
+            "passed": None,
+            "outcome_observed": False,
+            "score_available": False,
+            "usage_observed": False,
+            "replay_permitted": False,
+            "error_retryable": False,
+            "error_category": "interrupted_unknown_outcome",
+            "sealed_at": now,
+            "sealed_from_inflight_marker_sha256": marker_sha256,
+        }
+        _atomic_write_json(
+            self.interrupted_seals_path,
+            {"schema_version": 1, "seals": [*existing_seals, seal]},
+        )
+        self._clear_inflight()
+        return seal
+
+    def seal_interrupted_inflight(self, tasks: list[SpreadsheetTask]) -> dict[str, Any]:
+        if not tasks or len({task.task_id for task in tasks}) != len(tasks):
+            raise ValueError("comparison tasks must be non-empty with unique IDs")
+        # Sealing changes no model-visible state, but it must be attributed to
+        # the same clean, remotely observed source identity as a continuation.
+        self._prepare_repository_source_state()
+        with self._exclusive_lock():
+            self._prepare_run_spec_copy()
+            self._prepare_manifest(tasks)
+            manifest_sha256 = _manifest_file_sha256(self.manifest_path)
+            self.continuation_source_record = self._prepare_continuation_source(
+                comparison_manifest_sha256=manifest_sha256
+            )
+            existing_seals = self._validate_interrupted_seals(
+                tasks, comparison_manifest_sha256=manifest_sha256
+            )
+            if not self.inflight_path.exists():
+                if len(existing_seals) == 1:
+                    return next(iter(existing_seals.values()))
+                raise HarnessError("No unambiguous interrupted arm-task seal is available")
+            return self._seal_interrupted_inflight(
+                tasks, comparison_manifest_sha256=manifest_sha256
+            )
+
     def _run_one(
         self,
         task: SpreadsheetTask,
@@ -1051,6 +1883,8 @@ class ComparisonBenchmarkRunner:
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "comparison_manifest_sha256": comparison_manifest_sha256,
             "split_provenance": self.split_provenance,
+            "run_spec_provenance": self.run_spec_provenance,
+            "continuation_source": self.continuation_source_record,
             "instruction_type": task.instruction_type,
             "model": self.config.model,
             "api_protocol": self.config.api_protocol,
@@ -1242,24 +2076,37 @@ class ComparisonBenchmarkRunner:
                     pass
         return row
 
-    def run(self, tasks: list[SpreadsheetTask]) -> dict[str, Any]:
+    def run(self, tasks: list[SpreadsheetTask], *, resume: bool = True) -> dict[str, Any]:
         if not tasks or len({task.task_id for task in tasks}) != len(tasks):
             raise ValueError("comparison tasks must be non-empty with unique IDs")
-        # Probe before creating a manifest, spending model budget, or writing a
-        # result row. The probe imports openpyxl inside the active venv and
-        # verifies that a sibling file is not visible in the sandbox.
-        ensure_strict_code_isolation((self.config.api_key,))
+        # Source verification and the isolation probe run before creating a
+        # manifest, spending model budget, or writing a result row.
+        self.preflight(tasks)
+        if not resume and self.output_dir.exists():
+            allowed = {RUN_SPEC_COPY_FILENAME} if self.run_spec_document is not None else set()
+            unexpected = {path.name for path in self.output_dir.iterdir()} - allowed
+            if unexpected:
+                raise HarnessError(
+                    "Refusing to start a fresh comparison in a non-empty directory"
+                )
         with self._exclusive_lock():
+            self._prepare_run_spec_copy()
             self._prepare_manifest(tasks)
             raw_results = self.results_path.read_bytes() if self.results_path.is_file() else b""
-            _, invalid_rows = _valid_jsonl_rows(self.results_path)
+            _, invalid_rows = _strict_jsonl_rows(self.results_path)
             if invalid_rows or (raw_results and not raw_results.endswith(b"\n")):
                 raise HarnessError(
                     "Refusing to resume comparison with a damaged or non-terminated "
                     "results journal"
                 )
             manifest_sha256 = _manifest_file_sha256(self.manifest_path)
-            resume_rows, _ = _valid_jsonl_rows(self.results_path)
+            self.continuation_source_record = self._prepare_continuation_source(
+                comparison_manifest_sha256=manifest_sha256
+            )
+            resume_rows, _ = _strict_jsonl_rows(self.results_path)
+            interrupted_seals = self._validate_interrupted_seals(
+                tasks, comparison_manifest_sha256=manifest_sha256
+            )
             expected_task_ids = {task.task_id for task in tasks}
             for row_number, row in enumerate(resume_rows, start=1):
                 task_id = row.get("task_id")
@@ -1289,6 +2136,28 @@ class ComparisonBenchmarkRunner:
                         "Refusing to resume comparison with split provenance that differs "
                         f"from the current manifest: {task_id}::{arm}"
                     )
+                if row.get("run_spec_provenance") != self.run_spec_provenance:
+                    raise HarnessError(
+                        "Refusing to resume comparison with run spec provenance that differs "
+                        f"from the current manifest: {task_id}::{arm}"
+                    )
+                if row.get("continuation_source") != self.continuation_source_record and not (
+                    self.legacy_source_transition
+                    and row.get("continuation_source") is None
+                ):
+                    raise HarnessError(
+                        "Refusing to resume comparison with a result row not bound to the "
+                        f"continuation source: {task_id}::{arm}"
+                    )
+            if self.inflight_path.exists() and not self._clear_inflight_if_terminal_row_is_durable(
+                tasks,
+                resume_rows,
+                comparison_manifest_sha256=manifest_sha256,
+            ):
+                raise HarnessError(
+                    "Refusing to resume after an ambiguous in-flight arm-task; seal it "
+                    "before continuing"
+                )
             latest = self._latest()
             arm_orders = _balanced_arm_orders(
                 [task.task_id for task in tasks], self.arm_order_seed, self.arms
@@ -1317,16 +2186,22 @@ class ComparisonBenchmarkRunner:
             for task in tasks:
                 for arm in arm_orders[task.task_id]:
                     key = _run_key(task.task_id, arm)
-                    if key in latest:
+                    if key in latest or key in interrupted_seals:
                         continue
                     if circuit_breaker:
                         break
+                    self._write_inflight(
+                        task.task_id,
+                        arm,
+                        comparison_manifest_sha256=manifest_sha256,
+                    )
                     row = self._run_one(
                         task,
                         arm,
                         comparison_manifest_sha256=manifest_sha256,
                     )
                     self._append(row)
+                    self._clear_inflight()
                     latest[key] = row
                     finished += 1
                     if row.get("error_category") == "provider_fatal":
@@ -1365,6 +2240,7 @@ class ComparisonBenchmarkRunner:
                 tasks,
                 arms=self.arms,
                 bootstrap_seed=self.arm_order_seed,
+                interrupted_keys=set(interrupted_seals),
             )
             summary["circuit_breaker_tripped"] = circuit_breaker
             summary["exhausted_transient_arm_tasks"] = exhausted_transient

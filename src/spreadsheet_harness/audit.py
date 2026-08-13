@@ -8,6 +8,7 @@ import os
 import stat
 from collections import Counter
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,21 @@ from .comparison import (
     COMPARISON_CONFIGURATION_POLICIES,
     COMPARISON_MANIFEST_SCHEMA_VERSION,
     COMPARISON_PROTOCOL_VERSION,
+    CONTINUATION_SOURCE_FILENAME,
+    INFLIGHT_FILENAME,
+    INTERRUPTED_SEALS_FILENAME,
+    LEGACY_PILOT_MANIFEST_SHA256,
+    PILOT_SPLIT_MANIFEST_ID,
+    RUN_SPEC_COPY_FILENAME,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
+    manifest_execution_contract,
+    parse_pilot_run_spec_bytes,
+    verify_pilot_run_spec_contract,
+    verify_pilot_run_spec_provenance,
 )
+from .errors import HarnessError
 
 
 def _add_reason(reasons: list[str], reason: str) -> None:
@@ -52,6 +64,131 @@ def _file_sha256(path: Path) -> str:
     finally:
         os.close(descriptor)
     return digest.hexdigest()
+
+
+def _regular_file_bytes_for_audit(path: Path) -> bytes:
+    if path.is_symlink():
+        raise OSError(f"symlink is not allowed: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"not a regular file: {path}")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _reject_duplicate_json_keys_for_audit(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_interrupted_seals(
+    path: Path,
+    *,
+    manifest: dict[str, Any],
+    manifest_sha256: str | None,
+    expected_keys: set[tuple[str, str]],
+    reasons: list[str],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], str | None]:
+    """Load exact non-replay seals without treating unknown outcomes as failures."""
+
+    if not path.exists():
+        return {}, None
+    seals_sha256: str | None = None
+    try:
+        raw = _regular_file_bytes_for_audit(path)
+        seals_sha256 = hashlib.sha256(raw).hexdigest()
+        document = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys_for_audit,
+        )
+        if not isinstance(document, dict) or set(document) != {
+            "schema_version",
+            "seals",
+        }:
+            raise ValueError("invalid interrupted seals document fields")
+        seals = document.get("seals")
+        if document.get("schema_version") != 1 or not isinstance(seals, list):
+            raise ValueError("invalid interrupted seals document")
+        required_fields = {
+            "schema_version",
+            "task_id",
+            "arm",
+            "comparison_protocol_version",
+            "comparison_manifest_sha256",
+            "split_provenance",
+            "run_spec_provenance",
+            "status",
+            "passed",
+            "outcome_observed",
+            "score_available",
+            "usage_observed",
+            "replay_permitted",
+            "error_retryable",
+            "error_category",
+            "sealed_at",
+            "sealed_from_inflight_marker_sha256",
+        }
+        by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        for seal in seals:
+            if not isinstance(seal, dict) or set(seal) != required_fields:
+                raise ValueError("invalid interrupted seal fields")
+            task_id = seal.get("task_id")
+            arm = seal.get("arm")
+            key = (task_id, arm)
+            marker_sha256 = seal.get("sealed_from_inflight_marker_sha256")
+            sealed_at = seal.get("sealed_at")
+            try:
+                parsed_sealed_at = datetime.fromisoformat(sealed_at)
+            except (TypeError, ValueError):
+                raise ValueError("invalid interrupted seal timestamp") from None
+            if (
+                not isinstance(task_id, str)
+                or not isinstance(arm, str)
+                or key not in expected_keys
+                or key in by_key
+                or seal.get("schema_version") != 1
+                or seal.get("comparison_protocol_version")
+                != COMPARISON_PROTOCOL_VERSION
+                or seal.get("comparison_manifest_sha256") != manifest_sha256
+                or seal.get("split_provenance") != manifest.get("split_provenance")
+                or seal.get("run_spec_provenance")
+                != manifest.get("run_spec_provenance")
+                or seal.get("status") != "interrupted"
+                or seal.get("passed") is not None
+                or seal.get("outcome_observed") is not False
+                or seal.get("score_available") is not False
+                or seal.get("usage_observed") is not False
+                or seal.get("replay_permitted") is not False
+                or seal.get("error_retryable") is not False
+                or seal.get("error_category") != "interrupted_unknown_outcome"
+                or parsed_sealed_at.tzinfo is None
+                or parsed_sealed_at.utcoffset() is None
+                or not isinstance(marker_sha256, str)
+                or len(marker_sha256) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in marker_sha256
+                )
+            ):
+                raise ValueError("invalid interrupted seal")
+            by_key[key] = seal
+        return by_key, seals_sha256
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        _add_reason(reasons, "interrupted_arm_task_seals_invalid")
+        return {}, seals_sha256
 
 
 def _scoring_metadata_sha256(task: SpreadsheetTask) -> str:
@@ -95,11 +232,15 @@ def _has_symlink(root: Path, target: Path) -> bool:
 
 def _load_manifest(path: Path, reasons: list[str]) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw = _regular_file_bytes_for_audit(path)
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys_for_audit,
+        )
     except FileNotFoundError:
         _add_reason(reasons, "comparison_manifest_missing")
         return {}
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         _add_reason(reasons, "comparison_manifest_invalid")
         return {}
     if not isinstance(value, dict):
@@ -110,7 +251,7 @@ def _load_manifest(path: Path, reasons: list[str]) -> dict[str, Any]:
 
 def _load_result_rows(path: Path, reasons: list[str]) -> list[dict[str, Any]]:
     try:
-        raw = path.read_bytes()
+        raw = _regular_file_bytes_for_audit(path)
     except FileNotFoundError:
         _add_reason(reasons, "results_file_missing")
         return []
@@ -131,8 +272,11 @@ def _load_result_rows(path: Path, reasons: list[str]) -> list[dict[str, Any]]:
         if not line.strip():
             continue
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
+            row = json.loads(
+                line,
+                object_pairs_hook=_reject_duplicate_json_keys_for_audit,
+            )
+        except (json.JSONDecodeError, ValueError):
             _add_reason(reasons, f"invalid_jsonl_line:{line_number}")
             continue
         if not isinstance(row, dict):
@@ -247,7 +391,102 @@ def _valid_source_fingerprint(value: Any) -> bool:
     return combined.hexdigest() == aggregate
 
 
-def _audit_manifest_contract(manifest: dict[str, Any], reasons: list[str]) -> None:
+def _valid_git_object_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _load_continuation_source(
+    path: Path,
+    *,
+    manifest_sha256: str | None,
+    required: bool,
+    reasons: list[str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not path.exists():
+        if required:
+            _add_reason(reasons, "continuation_source_missing")
+        return None, None
+    record_sha256: str | None = None
+    try:
+        raw = _regular_file_bytes_for_audit(path)
+        file_sha256 = hashlib.sha256(raw).hexdigest()
+        record = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys_for_audit,
+        )
+        if not isinstance(record, dict) or set(record) != {
+            "schema_version",
+            "comparison_manifest_sha256",
+            "repository_source",
+            "record_sha256",
+        }:
+            raise ValueError("invalid continuation source fields")
+        repository_source = record.get("repository_source")
+        if not isinstance(repository_source, dict) or set(repository_source) != {
+            "schema_version",
+            "git_commit",
+            "git_tree",
+            "remote_tracking_ref",
+            "remote_tracking_commit",
+            "remote_name",
+            "remote_ref",
+            "remote_observed_commit",
+            "source_fingerprint",
+        }:
+            raise ValueError("invalid repository source fields")
+        unsigned = {
+            "schema_version": record.get("schema_version"),
+            "comparison_manifest_sha256": record.get(
+                "comparison_manifest_sha256"
+            ),
+            "repository_source": repository_source,
+        }
+        record_sha256 = _text_sha256(
+            json.dumps(
+                unsigned,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        if (
+            record.get("schema_version") != 1
+            or record.get("comparison_manifest_sha256") != manifest_sha256
+            or record.get("record_sha256") != record_sha256
+            or repository_source.get("schema_version") != 1
+            or not _valid_git_object_id(repository_source.get("git_commit"))
+            or not _valid_git_object_id(repository_source.get("git_tree"))
+            or repository_source.get("remote_tracking_ref")
+            != "refs/remotes/origin/main"
+            or repository_source.get("remote_tracking_commit")
+            != repository_source.get("git_commit")
+            or repository_source.get("remote_name") != "origin"
+            or repository_source.get("remote_ref") != "refs/heads/main"
+            or repository_source.get("remote_observed_commit")
+            != repository_source.get("git_commit")
+            or not _valid_source_fingerprint(
+                repository_source.get("source_fingerprint")
+            )
+            or repository_source.get("source_fingerprint") != _source_fingerprint()
+        ):
+            raise ValueError("invalid continuation source")
+        return record, file_sha256
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        _add_reason(reasons, "continuation_source_invalid")
+        return None, record_sha256
+
+
+def _audit_manifest_contract(
+    manifest: dict[str, Any],
+    reasons: list[str],
+    *,
+    results_root: Path,
+    manifest_sha256: str | None,
+) -> None:
     configuration = manifest.get("configuration")
     required_configuration = {
         "model",
@@ -275,7 +514,10 @@ def _audit_manifest_contract(manifest: dict[str, Any], reasons: list[str]) -> No
         _add_reason(reasons, "comparison_manifest_policy_mismatch")
     if not _valid_source_fingerprint(manifest.get("harness_source")):
         _add_reason(reasons, "comparison_manifest_source_fingerprint_invalid")
-    elif manifest.get("harness_source") != _source_fingerprint():
+    elif (
+        manifest_sha256 != LEGACY_PILOT_MANIFEST_SHA256
+        and manifest.get("harness_source") != _source_fingerprint()
+    ):
         _add_reason(reasons, "comparison_manifest_source_checkout_mismatch")
     runtime = manifest.get("runtime")
     if not isinstance(runtime, dict) or not runtime.get("python"):
@@ -320,6 +562,29 @@ def _audit_manifest_contract(manifest: dict[str, Any], reasons: list[str]) -> No
             or not verify_trace2skill_split_provenance(split_provenance)
         ):
             _add_reason(reasons, "comparison_manifest_split_provenance_invalid")
+    run_spec_provenance = manifest.get("run_spec_provenance")
+    if (
+        isinstance(split_provenance, dict)
+        and split_provenance.get("manifest_id")
+        == "qwen35-trace2skill-local-unattempted-pilot16-v2"
+        and run_spec_provenance is None
+    ):
+        _add_reason(reasons, "comparison_manifest_run_spec_missing_for_pilot")
+    if run_spec_provenance is not None:
+        if not verify_pilot_run_spec_provenance(run_spec_provenance):
+            _add_reason(reasons, "comparison_manifest_run_spec_provenance_invalid")
+        try:
+            raw_spec = _regular_file_bytes_for_audit(
+                results_root / RUN_SPEC_COPY_FILENAME
+            )
+            document, provenance = parse_pilot_run_spec_bytes(raw_spec)
+            if provenance != run_spec_provenance:
+                _add_reason(reasons, "comparison_manifest_run_spec_copy_mismatch")
+            verify_pilot_run_spec_contract(
+                document, manifest_execution_contract(manifest)
+            )
+        except (HarnessError, OSError):
+            _add_reason(reasons, "comparison_manifest_run_spec_contract_invalid")
     for field in (
         "stage_turn_caps",
         "forced_tool_prefix_routing",
@@ -372,6 +637,8 @@ def _audit_row_contract(
         _add_reason(reasons, "manifest_sha256_binding_mismatch")
     if row.get("split_provenance") != manifest.get("split_provenance"):
         _add_reason(reasons, "row_manifest_mismatch:split_provenance")
+    if row.get("run_spec_provenance") != manifest.get("run_spec_provenance"):
+        _add_reason(reasons, "row_manifest_mismatch:run_spec_provenance")
     expected_fields = {
         "model": configuration.get("model"),
         "api_protocol": configuration.get("api_protocol"),
@@ -653,9 +920,10 @@ def audit_comparison(
 ) -> dict[str, Any]:
     """Audit a comparison directory without modifying its journal or artifacts.
 
-    The returned result is deliberately fail-closed: every selected task/arm must
-    have exactly one completed row, a contained immutable artifact, a matching
-    recorded hash, and a fresh score identical to the journaled score.
+    Integrity is deliberately fail-closed. A selected task/arm must have either
+    one freshly verified completed row or one exact non-replay interruption seal.
+    A valid seal can preserve journal integrity, but never study completeness or
+    inferential validity because its outcome is unknown.
     """
 
     root = Path(os.path.abspath(Path(results_dir).expanduser()))
@@ -663,16 +931,22 @@ def audit_comparison(
     results_path = root / "results.jsonl"
     reasons: list[str] = []
     manifest = _load_manifest(manifest_path, reasons)
-    if manifest.get("schema_version") != COMPARISON_MANIFEST_SCHEMA_VERSION:
-        _add_reason(reasons, "comparison_manifest_schema_mismatch")
-    if manifest.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION:
-        _add_reason(reasons, "comparison_manifest_protocol_mismatch")
-    _audit_manifest_contract(manifest, reasons)
     try:
         manifest_sha256 = _file_sha256(manifest_path)
     except OSError:
         manifest_sha256 = None
-
+    if manifest.get("schema_version") != COMPARISON_MANIFEST_SCHEMA_VERSION:
+        _add_reason(reasons, "comparison_manifest_schema_mismatch")
+    if manifest.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION:
+        _add_reason(reasons, "comparison_manifest_protocol_mismatch")
+    _audit_manifest_contract(
+        manifest,
+        reasons,
+        results_root=root,
+        manifest_sha256=manifest_sha256,
+    )
+    if (root / INFLIGHT_FILENAME).exists():
+        _add_reason(reasons, "ambiguous_inflight_arm_task")
     task_list = list(tasks)
     task_counts = Counter(task.task_id for task in task_list)
     duplicate_task_ids = sorted(task_id for task_id, count in task_counts.items() if count > 1)
@@ -697,6 +971,18 @@ def audit_comparison(
     if manifest and manifest.get("arms") != list(selected_arms):
         _add_reason(reasons, "manifest_arms_mismatch")
 
+    split_provenance = manifest.get("split_provenance")
+    pilot_run = (
+        isinstance(split_provenance, dict)
+        and split_provenance.get("manifest_id") == PILOT_SPLIT_MANIFEST_ID
+    )
+    continuation_source, continuation_source_file_sha256 = _load_continuation_source(
+        root / CONTINUATION_SOURCE_FILENAME,
+        manifest_sha256=manifest_sha256,
+        required=pilot_run,
+        reasons=reasons,
+    )
+
     if not root.is_dir():
         _add_reason(reasons, "results_dir_missing")
     if root.is_symlink():
@@ -708,6 +994,22 @@ def audit_comparison(
     expected_keys = {
         (task.task_id, arm) for task in unique_tasks for arm in selected_arms
     }
+    interrupted_seals, interrupted_seals_sha256 = _load_interrupted_seals(
+        root / INTERRUPTED_SEALS_FILENAME,
+        manifest=manifest,
+        manifest_sha256=manifest_sha256,
+        expected_keys=expected_keys,
+        reasons=reasons,
+    )
+    if (
+        not results_path.exists()
+        and set(interrupted_seals) == expected_keys
+        and "results_file_missing" in reasons
+    ):
+        reasons.remove("results_file_missing")
+    interrupted_keys = sorted(f"{task_id}::{arm}" for task_id, arm in interrupted_seals)
+    for key in interrupted_keys:
+        _add_reason(reasons, f"interrupted_unknown_outcome:{key}")
     for row_number, row in enumerate(raw_rows, start=1):
         if row.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION:
             _add_reason(reasons, f"result_protocol_mismatch:{row_number}")
@@ -718,6 +1020,21 @@ def audit_comparison(
         rows_by_key.setdefault(key, []).append(row)
         if key not in expected_keys:
             _add_reason(reasons, f"unexpected_result_row:{key[0]}::{key[1]}")
+        if key in interrupted_seals:
+            _add_reason(reasons, f"result_row_conflicts_with_interrupted_seal:{key[0]}::{key[1]}")
+        row_continuation_source = row.get("continuation_source")
+        if continuation_source is not None:
+            legacy_row_without_continuation = (
+                manifest_sha256 == LEGACY_PILOT_MANIFEST_SHA256
+                and row_continuation_source is None
+            )
+            if (
+                row_continuation_source != continuation_source
+                and not legacy_row_without_continuation
+            ):
+                _add_reason(reasons, f"result_continuation_source_mismatch:{row_number}")
+        elif row_continuation_source is not None:
+            _add_reason(reasons, f"result_continuation_source_without_record:{row_number}")
 
     audited_rows: list[dict[str, Any]] = []
     for task in unique_tasks:
@@ -728,9 +1045,17 @@ def audit_comparison(
                 "task_id": task.task_id,
                 "arm": arm,
                 "audit_valid": False,
+                "journal_integrity_valid": False,
+                "outcome_observed": key not in interrupted_seals,
                 "reasons": list(task_manifest_reasons.get(task.task_id, [])),
             }
-            if not candidates:
+            if key in interrupted_seals and not candidates:
+                record["status"] = "interrupted"
+                record["error_category"] = "interrupted_unknown_outcome"
+                record["seal"] = interrupted_seals[key]
+                record["journal_integrity_valid"] = not record["reasons"]
+                _add_reason(record["reasons"], "interrupted_unknown_outcome")
+            elif not candidates:
                 _add_reason(record["reasons"], "missing_result_row")
             else:
                 if len(candidates) > 1:
@@ -745,8 +1070,10 @@ def audit_comparison(
                     manifest_sha256,
                 )
             record["audit_valid"] = not record["reasons"]
-            for reason in record["reasons"]:
-                _add_reason(reasons, f"{task.task_id}::{arm}:{reason}")
+            if key not in interrupted_seals:
+                record["journal_integrity_valid"] = record["audit_valid"]
+                for reason in record["reasons"]:
+                    _add_reason(reasons, f"{task.task_id}::{arm}:{reason}")
             audited_rows.append(record)
 
     results_sha256 = None
@@ -755,18 +1082,59 @@ def audit_comparison(
     except OSError:
         pass
     valid_rows = sum(bool(row["audit_valid"]) for row in audited_rows)
-    return {
+    journal_integrity_valid = all(
+        row["journal_integrity_valid"] for row in audited_rows
+    ) and not any(
+        not reason.startswith("interrupted_unknown_outcome:") for reason in reasons
+    )
+    study_complete = journal_integrity_valid and not interrupted_seals
+    known_passed_rows = sum(
+        row.get("fresh_comparison", {}).get("passed") is True
+        for row in audited_rows
+        if row.get("outcome_observed") is True
+    )
+    known_failed_rows = sum(
+        row.get("fresh_comparison", {}).get("passed") is False
+        for row in audited_rows
+        if row.get("outcome_observed") is True
+    )
+    report = {
         "schema_version": 2,
-        "audit_valid": not reasons and valid_rows == len(audited_rows),
+        "audit_valid": journal_integrity_valid,
+        "journal_integrity_valid": journal_integrity_valid,
+        "study_complete": study_complete,
+        "inference_valid": study_complete,
+        "inference_invalid_reasons": (
+            [] if study_complete else ["interrupted_unknown_outcome"]
+            if journal_integrity_valid and interrupted_seals
+            else ["comparison_audit_failed"]
+        ),
         "reasons": reasons,
         "results_dir": str(root),
         "manifest_sha256": manifest_sha256,
         "results_sha256": results_sha256,
+        "interrupted_seals_sha256": interrupted_seals_sha256,
+        "continuation_source": continuation_source,
+        "continuation_source_file_sha256": continuation_source_file_sha256,
         "split_provenance": manifest.get("split_provenance"),
+        "run_spec_provenance": manifest.get("run_spec_provenance"),
         "task_count": len(unique_tasks),
         "arms": list(selected_arms),
         "expected_rows": len(expected_keys),
         "observed_rows": len(raw_rows),
         "valid_rows": valid_rows,
+        "interrupted_arm_tasks": len(interrupted_keys),
+        "interrupted_arm_task_keys": interrupted_keys,
+        "known_passed_rows": known_passed_rows,
+        "known_failed_rows": known_failed_rows,
         "rows": audited_rows,
     }
+    if not study_complete:
+        report.update(
+            {
+                "mcnemar_exact_p": None,
+                "stratified_bootstrap_95": None,
+                "holm_adjusted_p": None,
+            }
+        )
+    return report

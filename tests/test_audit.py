@@ -13,6 +13,9 @@ from spreadsheet_harness.audit import audit_comparison
 from spreadsheet_harness.benchmark import SpreadsheetTask, compare_workbooks
 from spreadsheet_harness.comparison import (
     COMPARISON_PROTOCOL_VERSION,
+    CONTINUATION_SOURCE_FILENAME,
+    INFLIGHT_FILENAME,
+    INTERRUPTED_SEALS_FILENAME,
     ComparisonBenchmarkRunner,
 )
 from spreadsheet_harness.config import ProviderConfig
@@ -193,6 +196,72 @@ def _row_reason(summary: dict[str, Any], reason: str) -> bool:
     return any(reason in row["reasons"] for row in summary["rows"])
 
 
+def _interrupted_seal(results: Path, task: SpreadsheetTask) -> dict[str, Any]:
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return {
+        "schema_version": 1,
+        "task_id": task.task_id,
+        "arm": "bare",
+        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+        "comparison_manifest_sha256": _sha256(manifest_path),
+        "split_provenance": manifest.get("split_provenance"),
+        "run_spec_provenance": manifest.get("run_spec_provenance"),
+        "status": "interrupted",
+        "passed": None,
+        "outcome_observed": False,
+        "score_available": False,
+        "usage_observed": False,
+        "replay_permitted": False,
+        "error_retryable": False,
+        "error_category": "interrupted_unknown_outcome",
+        "sealed_at": "2026-08-14T12:00:00+00:00",
+        "sealed_from_inflight_marker_sha256": "a" * 64,
+    }
+
+
+def _write_interrupted_seals(results: Path, seals: list[dict[str, Any]]) -> None:
+    (results / INTERRUPTED_SEALS_FILENAME).write_text(
+        json.dumps({"schema_version": 1, "seals": seals}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _continuation_source(results: Path) -> dict[str, Any]:
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "comparison_manifest_sha256": _sha256(manifest_path),
+        "repository_source": {
+            "schema_version": 1,
+            "git_commit": "1" * 40,
+            "git_tree": "2" * 40,
+            "remote_tracking_ref": "refs/remotes/origin/main",
+            "remote_tracking_commit": "1" * 40,
+            "remote_name": "origin",
+            "remote_ref": "refs/heads/main",
+            "remote_observed_commit": "1" * 40,
+            "source_fingerprint": manifest["harness_source"],
+        },
+    }
+    unsigned = json.dumps(
+        record,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    record["record_sha256"] = _text_sha256(unsigned)
+    return record
+
+
+def _write_continuation_source(results: Path, record: dict[str, Any]) -> None:
+    (results / CONTINUATION_SOURCE_FILENAME).write_text(
+        json.dumps(record) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
     results, task, _ = _fixture(tmp_path)
     before = _tree_hashes(tmp_path)
@@ -205,10 +274,202 @@ def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
     assert summary["valid_rows"] == 1
     assert summary["rows"][0]["audit_valid"] is True
     assert summary["rows"][0]["fresh_comparison"]["passed"] is True
+    assert "mcnemar_exact_p" not in summary
+    assert "stratified_bootstrap_95" not in summary
+    assert "holm_adjusted_p" not in summary
     assert summary["rows"][0]["output_sha256"] == summary["rows"][0][
         "expected_output_sha256"
     ]
     assert _tree_hashes(tmp_path) == before
+
+
+def test_audit_rejects_ambiguous_inflight_marker(tmp_path: Path) -> None:
+    results, task, _ = _fixture(tmp_path)
+    (results / INFLIGHT_FILENAME).write_text("{}\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "ambiguous_inflight_arm_task" in summary["reasons"]
+
+
+def test_audit_accepts_exact_interrupted_seal_as_integral_but_incomplete(
+    tmp_path: Path,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+    (results / "results.jsonl").write_text("", encoding="utf-8")
+    _write_interrupted_seals(results, [_interrupted_seal(results, task)])
+    before = _tree_hashes(tmp_path)
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["journal_integrity_valid"] is True
+    assert summary["study_complete"] is False
+    assert summary["inference_valid"] is False
+    assert summary["inference_invalid_reasons"] == ["interrupted_unknown_outcome"]
+    assert summary["interrupted_arm_tasks"] == 1
+    assert summary["interrupted_arm_task_keys"] == ["task-1::bare"]
+    assert summary["known_passed_rows"] == 0
+    assert summary["known_failed_rows"] == 0
+    assert summary["mcnemar_exact_p"] is None
+    assert summary["stratified_bootstrap_95"] is None
+    assert summary["holm_adjusted_p"] is None
+    assert summary["rows"][0]["journal_integrity_valid"] is True
+    assert summary["rows"][0]["audit_valid"] is False
+    assert summary["rows"][0]["outcome_observed"] is False
+    assert "missing_result_row" not in summary["rows"][0]["reasons"]
+    assert summary["reasons"] == ["interrupted_unknown_outcome:task-1::bare"]
+    assert _tree_hashes(tmp_path) == before
+
+
+def test_audit_allows_missing_empty_journal_when_every_key_is_sealed(
+    tmp_path: Path,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+    (results / "results.jsonl").unlink()
+    _write_interrupted_seals(results, [_interrupted_seal(results, task)])
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["journal_integrity_valid"] is True
+    assert summary["study_complete"] is False
+    assert "results_file_missing" not in summary["reasons"]
+
+
+def test_audit_binds_result_to_exact_continuation_source(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    continuation = _continuation_source(results)
+    _write_continuation_source(results, continuation)
+    row["continuation_source"] = continuation
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["continuation_source"] == continuation
+    assert summary["continuation_source_file_sha256"] == _sha256(
+        results / CONTINUATION_SOURCE_FILENAME
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("record", "comparison_manifest_sha256", "0" * 64),
+        ("record", "record_sha256", "0" * 64),
+        ("repository", "git_commit", "A" * 40),
+        ("repository", "git_tree", "short"),
+        ("repository", "remote_tracking_ref", "refs/remotes/origin/dev"),
+        ("repository", "remote_tracking_commit", "3" * 40),
+        ("repository", "remote_name", "upstream"),
+        ("repository", "remote_ref", "refs/heads/dev"),
+        ("repository", "remote_observed_commit", "3" * 40),
+        ("repository", "source_fingerprint", {"sha256": "0" * 64, "files": []}),
+    ],
+)
+def test_audit_rejects_invalid_continuation_source(
+    tmp_path: Path,
+    target: str,
+    field: str,
+    value: Any,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    continuation = _continuation_source(results)
+    if target == "record":
+        continuation[field] = value
+    else:
+        continuation["repository_source"][field] = value
+    _write_continuation_source(results, continuation)
+    row["continuation_source"] = continuation
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["journal_integrity_valid"] is False
+    assert "continuation_source_invalid" in summary["reasons"]
+
+
+def test_audit_rejects_result_continuation_source_mismatch(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    continuation = _continuation_source(results)
+    _write_continuation_source(results, continuation)
+    row["continuation_source"] = {**continuation, "record_sha256": "0" * 64}
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["journal_integrity_valid"] is False
+    assert "result_continuation_source_mismatch:1" in summary["reasons"]
+
+
+def test_audit_rejects_row_continuation_without_sidecar(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    row["continuation_source"] = _continuation_source(results)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["journal_integrity_valid"] is False
+    assert "result_continuation_source_without_record:1" in summary["reasons"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("passed", False),
+        ("score_available", True),
+        ("replay_permitted", True),
+        ("sealed_at", "not-a-timestamp"),
+        ("sealed_from_inflight_marker_sha256", "A" * 64),
+        ("task_id", "outside-frozen-tasks"),
+        ("arm", "ours"),
+    ],
+)
+def test_audit_rejects_malformed_interrupted_seal(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+    seal = _interrupted_seal(results, task)
+    seal[field] = value
+    _write_interrupted_seals(results, [seal])
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert summary["journal_integrity_valid"] is False
+    assert summary["study_complete"] is False
+    assert summary["inference_valid"] is False
+    assert "interrupted_arm_task_seals_invalid" in summary["reasons"]
+    assert summary["interrupted_arm_tasks"] == 0
+
+
+def test_audit_rejects_duplicate_interrupted_seal_keys(tmp_path: Path) -> None:
+    results, task, _ = _fixture(tmp_path)
+    seal = _interrupted_seal(results, task)
+    _write_interrupted_seals(results, [seal, dict(seal)])
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["journal_integrity_valid"] is False
+    assert "interrupted_arm_task_seals_invalid" in summary["reasons"]
+
+
+def test_audit_rejects_result_row_conflicting_with_interrupted_seal(
+    tmp_path: Path,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+    _write_interrupted_seals(results, [_interrupted_seal(results, task)])
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["journal_integrity_valid"] is False
+    assert "result_row_conflicts_with_interrupted_seal:task-1::bare" in summary[
+        "reasons"
+    ]
 
 
 def test_audit_rejects_split_provenance_tampering(tmp_path: Path) -> None:
@@ -331,6 +592,57 @@ def test_audit_rejects_protocol_provenance_mismatch(
         payload = dict(row)
         payload[field] = value
     path.write_text(json.dumps(payload) + ("\n" if target == "row" else ""), encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert expected_reason in summary["reasons"]
+
+
+def test_audit_rejects_duplicate_manifest_json_key(tmp_path: Path) -> None:
+    results, task, _ = _fixture(tmp_path)
+    path = results / "comparison-manifest.json"
+    raw = path.read_text(encoding="utf-8")
+    path.write_text(
+        raw[:-1] + ',"schema_version":12}',
+        encoding="utf-8",
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "comparison_manifest_invalid" in summary["reasons"]
+
+
+def test_audit_rejects_duplicate_result_json_key(tmp_path: Path) -> None:
+    results, task, _ = _fixture(tmp_path)
+    path = results / "results.jsonl"
+    raw = path.read_text(encoding="utf-8").rstrip("\n")
+    path.write_text(raw[:-1] + ',"task_id":"task-1"}\n', encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "invalid_jsonl_line:1" in summary["reasons"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_reason"),
+    [
+        ("comparison-manifest.json", "comparison_manifest_invalid"),
+        ("results.jsonl", "results_file_unreadable"),
+    ],
+)
+def test_audit_rejects_symlinked_core_document(
+    tmp_path: Path,
+    filename: str,
+    expected_reason: str,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+    path = results / filename
+    target = tmp_path / f"real-{filename}"
+    path.rename(target)
+    path.symlink_to(target)
 
     summary = audit_comparison(results, [task])
 

@@ -85,8 +85,33 @@ sheet-harness benchmark split \
 sheet-harness benchmark compare \
   --dataset benchmarks/data/spreadsheetbench_verified_400 \
   --split-manifest benchmarks/protocols/qwen35-trace2skill-local-unattempted-pilot16-v2.json \
+  --run-spec benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json \
+  --output benchmarks/results/qwen36-local-pilot16-v2-bare-ours-v23-seed41 \
+  --api-key-file /path/to/owner-only-benchmark.key \
   --arm bare --arm ours \
-  ...
+  --base-url http://101.37.174.109:8010/v1 \
+  --model qwen36-35b-a3b \
+  --api-protocol chat-completions \
+  --reasoning-effort none \
+  --request-timeout 700 \
+  --request-retries 0 \
+  --request-interval-seconds 0 \
+  --litellm-timeout 600 \
+  --temperature 1 \
+  --top-p 1 \
+  --seed 41 \
+  --presence-penalty 2 \
+  --top-k 40 \
+  --min-p 0 \
+  --repetition-penalty 1 \
+  --disable-thinking \
+  --max-model-calls 8 \
+  --max-turns-per-arm 8 \
+  --max-total-tokens 120000 \
+  --max-output-tokens 4096 \
+  --task-timeout 1200 \
+  --arm-order-seed 20260812 \
+  --circuit-breaker 3
 ```
 
 The verifier pins sibling parent paths and bytes, rejects malformed or duplicate
@@ -95,6 +120,71 @@ returns the already-verified task order to the runner. The comparison manifest,
 result rows, and fresh audit bind the verified split schema, manifest hash,
 task count/order hash, and dataset hash. A split manifest cannot be combined
 with task IDs, a task-ID file, offset, or limit.
+
+The code-anchored run spec is the launch gate for this pilot. It freezes the
+split provenance, endpoint, literal model alias, arms, decoding, budgets,
+pacing, recalculation policy, skill hashes, and output path before any model
+request. The credential path and credential remain host-local. A fresh launch
+refuses an existing output path; a continuation requires explicit `--resume`
+and exact manifest, run-spec, result-row, and source bindings.
+
+Before each arm-task, the runner durably writes an in-flight marker and removes
+it only after the terminal result row is fsynced. A surviving marker represents
+a potentially delivered request with an unknowable outcome. It permanently
+forbids replay of that arm-task, but does not require abandoning the comparison
+directory: seal the affected arm-task first, then resume only the remaining
+work.
+
+## Recorded interruption and recovery
+
+The initial formal v23 launch touched only `33157::ours`. Two model responses
+completed and a third request was sent, but its delivery outcome cannot be
+established. There is no terminal `results.jsonl` row for the arm-task, while
+`.inflight-arm-task.json` durably identifies it. Consequently, `33157::ours`
+must never be replayed or assigned a synthetic pass/fail result.
+
+After the implementation revision has passed its tests, been committed and
+pushed, and the live `origin/main` SHA has been verified equal to `HEAD`, seal
+the interruption from that clean checkout with the frozen provider contract:
+
+```bash
+sheet-harness benchmark seal-interrupted \
+  benchmarks/results/qwen36-local-pilot16-v2-bare-ours-v23-seed41 \
+  --dataset benchmarks/data/spreadsheetbench_verified_400 \
+  --split-manifest benchmarks/protocols/qwen35-trace2skill-local-unattempted-pilot16-v2.json \
+  --run-spec benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json \
+  --api-key-file /home/tongzeyuan/.config/spreadsheet-harness/benchmark.key \
+  --base-url http://101.37.174.109:8010/v1 \
+  --model qwen36-35b-a3b \
+  --api-protocol chat-completions \
+  --reasoning-effort none \
+  --request-timeout 700 \
+  --request-retries 0 \
+  --request-interval-seconds 0 \
+  --litellm-timeout 600 \
+  --temperature 1 \
+  --top-p 1 \
+  --seed 41 \
+  --presence-penalty 2 \
+  --top-k 40 \
+  --min-p 0 \
+  --repetition-penalty 1 \
+  --disable-thinking
+```
+
+This command validates the frozen contract and source provenance but must not
+make a provider/model request. It atomically records `33157::ours` as
+`interrupted_unknown_outcome` with `passed = null` and replay forbidden, then
+removes the live marker. After a successful seal and audit, rerun the exact
+frozen `benchmark compare` command above with `--resume`; the same directory
+may execute the other 31 arm-tasks, while `33157::ours` remains permanently
+skipped.
+
+The interruption makes the preregistered 16-pair primary analysis permanently
+incomplete. Even if every remaining arm-task finishes, there can be at most 15
+complete `bare`/`ours` pairs. Any analysis of those known outcomes is
+descriptive/sensitivity analysis only, never the preregistered primary result;
+the unknown outcome is counted as neither a failure nor a missing task.
 
 ## Frozen online configuration
 
