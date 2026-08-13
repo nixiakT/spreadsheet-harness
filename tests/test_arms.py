@@ -302,7 +302,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     assert arms.PAPER_EXTRACTION_TOOLS == {"list_sheets", "inspect_range"}
     assert arms.PAPER_VISION_TOOLS == {"render_workbook", "view_image"}
     assert arms.PAPER_LATEX_TOOLS == {"range_to_latex"}
-    assert ours_call["tools"].allowed_tools is None
+    assert ours_call["tools"].allowed_tools == {"code_interpreter"}
     assert [call["tools"].enable_code for call in paper_calls] == [
         False,
         False,
@@ -324,7 +324,10 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         "code_interpreter",
         "code_interpreter",
     )
-    assert ours_call["forced_tool_prefix"] == ("list_sheets", "inspect_range")
+    assert ours_call["forced_tool_prefix"] == (
+        "code_interpreter",
+        "code_interpreter",
+    )
     assert bare_call["required_tool_termination"] is True
     assert [call["required_tool_termination"] for call in paper_calls] == [
         True,

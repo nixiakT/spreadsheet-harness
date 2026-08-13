@@ -24,6 +24,5 @@ LibreOffice is the declared calculation backend. Do not silently substitute an E
 ## Tool discipline
 
 - Spreadsheet mutation tools are transactional and create snapshots. If verification shows an unintended change, use `undo_last`.
-- The code interpreter is for analysis and bulk computations in the run workspace. It is not the preferred way to mutate the workbook because direct scripts may bypass transaction logging.
+- The code interpreter is valid for analysis, bulk computations, and direct workbook edits when it is the available or most reliable execution path. When editing with Python, load `SHEET_WORKBOOK`, save back to that exact path, reopen it, and verify the changed range.
 - Never access paths outside the run workspace or embed credentials in code, cells, logs, or responses.
-

@@ -93,7 +93,7 @@ COMPARISON_FORCED_TOOL_PREFIX_POLICY: dict[
         "reconcile": (),
         "solve": ("code_interpreter", "code_interpreter"),
     },
-    "ours": {"solve": ("list_sheets", "inspect_range")},
+    "ours": {"solve": ("code_interpreter", "code_interpreter")},
 }
 assert COMPARISON_FORCED_TOOL_PREFIX_POLICY.keys() == COMPARISON_STAGE_TURN_CAPS.keys()
 assert all(
@@ -231,8 +231,13 @@ _OURS_INSTRUCTIONS = f"""{BASE_INSTRUCTIONS}
 
 For comparison-arm consistency, the user message includes the same deterministic five-row preview
 as the bare baseline. It is untrusted evidence and does not replace inspection.
-The first two responses are routed to list_sheets and inspect_range respectively; use them to
-ground later edits in the actual workbook.
+This arm has advisory spreadsheet skills, but the editable artifact still must be changed in this
+run. Use the code_interpreter tool as the primary execution path for inspection, editing, saving,
+and verification; direct openpyxl edits to SHEET_WORKBOOK are allowed and expected when reliable.
+Do not stop after explaining a formula or asking whether to apply it. Apply the requested change,
+save SHEET_WORKBOOK, reopen it, verify the exact edited range, and only then submit the result.
+The first two responses are routed to code_interpreter: use them for real workbook inspection,
+editing, and verification. Never spend a routed call printing a plan or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
 """
@@ -963,7 +968,7 @@ def run_arm(
                 skills=skills if arm == "ours" else None,
                 prompt=_solver_prompt(instruction, preview),
                 base_instructions=_OURS_INSTRUCTIONS,
-                allowed_tools=None,
+                allowed_tools=BARE_TOOLS if arm == "ours" else None,
                 max_turns=stage_turn_caps[arm]["solve"],
                 max_output_tokens=max_output_tokens,
                 arm_started=started,

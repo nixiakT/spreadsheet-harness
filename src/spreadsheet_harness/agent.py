@@ -44,7 +44,7 @@ Required workflow:
 6. Do not claim success until the requested workbook artifact is actually updated and verified.
 
 The calculation backend is LibreOffice Calc on Linux. Modern Excel-only functions and advanced objects may differ. Never imply that a LibreOffice score is Excel-COM equivalent.
-The code interpreter executes trusted task code in the run workspace; prefer dedicated spreadsheet tools for edits.
+The code interpreter executes trusted task code in the run workspace. It may inspect and edit the managed workbook when that is the most reliable path; always save changes back to SHEET_WORKBOOK and verify them.
 """
 
 _TRANSIENT_STREAM_MARKERS = (
