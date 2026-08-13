@@ -95,6 +95,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook as _openpyxl_load_workbook
+from openpyxl.formula.translate import Translator
 from openpyxl.utils import range_boundaries
 
 
@@ -199,6 +200,31 @@ def copy_cell_format(source: Any, target: Any) -> None:
         target.alignment = copy(source.alignment)
     if source.protection:
         target.protection = copy(source.protection)
+
+
+def fill_formula(
+    worksheet: Any,
+    source_cell: str,
+    target_range: str,
+    *,
+    copy_format: bool = False,
+) -> int:
+    formula = worksheet[source_cell].value
+    if not isinstance(formula, str) or not formula.startswith("="):
+        raise ValueError(f"{source_cell} does not contain a formula")
+    min_col, min_row, max_col, max_row = range_boundaries(target_range.replace("$", ""))
+    count = 0
+    for row in range(min_row, max_row + 1):
+        for column in range(min_col, max_col + 1):
+            destination = worksheet.cell(row=row, column=column)
+            destination.value = Translator(
+                formula,
+                origin=source_cell.replace("$", ""),
+            ).translate_formula(destination.coordinate)
+            if copy_format:
+                copy_cell_format(worksheet[source_cell], destination)
+            count += 1
+    return count
 
 
 def save_workbook(workbook: Any, path: str | Path | None = None) -> Path:

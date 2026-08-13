@@ -70,3 +70,34 @@ def test_inspect_range_reports_tables(sample_workbook: Path, tmp_path: Path) -> 
     inspected = session.inspect_range("Sales", "A1:D3")
 
     assert inspected["tables"] == [{"name": "SalesTable", "ref": "A1:D3"}]
+
+
+def test_fill_formula_reports_sample_formulas_and_drifting_ranges(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+
+    session.write_range("Sales", "H6", [["=SUM($E6:G6)"]])
+    result = session.fill_formula("Sales", "H6", "H6:J7")
+
+    assert result["sample_formulas"] == [
+        {"cell": "H6", "formula": "=SUM($E6:G6)"},
+        {"cell": "I6", "formula": "=SUM($E6:H6)"},
+        {"cell": "H7", "formula": "=SUM($E7:G7)"},
+        {"cell": "J7", "formula": "=SUM($E7:I7)"},
+    ]
+    assert result["warnings"][0]["type"] == "possible_expanding_or_drifting_range"
+    assert result["warnings"][0]["source_range"] == "$E6:G6"
+    assert "$E6:$G6" in result["warnings"][0]["message"]
+
+
+def test_fill_formula_does_not_warn_when_range_endpoints_are_anchored(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+
+    session.write_range("Sales", "H6", [["=SUM($E6:$G6)"]])
+    result = session.fill_formula("Sales", "H6", "H6:J7")
+
+    assert result["warnings"] == []
+    assert result["sample_formulas"][1] == {"cell": "I6", "formula": "=SUM($E6:$G6)"}

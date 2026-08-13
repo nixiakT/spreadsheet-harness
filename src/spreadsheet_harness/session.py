@@ -29,6 +29,13 @@ from .trajectory import TrajectoryRecorder
 
 SUPPORTED_EDIT_FORMATS = {".xlsx", ".xlsm"}
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+_FORMULA_RANGE_RE = re.compile(
+    r"(?P<sheet>(?:'[^']+'|[A-Za-z_][A-Za-z0-9_ .]*)!)?"
+    r"(?P<start>\$?[A-Za-z]{1,3}\$?\d+):(?P<end>\$?[A-Za-z]{1,3}\$?\d+)"
+)
+_CELL_REF_RE = re.compile(
+    r"(?P<col_abs>\$?)(?P<col>[A-Za-z]{1,3})(?P<row_abs>\$?)(?P<row>\d+)\Z"
+)
 
 
 def _sha256(path: Path) -> str:
@@ -47,6 +54,93 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
     return str(value)
+
+
+def _cell_ref_parts(ref: str) -> dict[str, Any] | None:
+    match = _CELL_REF_RE.fullmatch(ref)
+    if match is None:
+        return None
+    return {
+        "column_absolute": bool(match.group("col_abs")),
+        "row_absolute": bool(match.group("row_abs")),
+    }
+
+
+def _formula_sample_coordinates(
+    source_cell: str,
+    bounds: tuple[int, int, int, int],
+) -> list[str]:
+    min_col, min_row, max_col, max_row = bounds
+    candidates = [
+        source_cell.replace("$", ""),
+        f"{get_column_letter(min_col)}{min_row}",
+        f"{get_column_letter(min(min_col + 1, max_col))}{min_row}",
+        f"{get_column_letter(min_col)}{min(min_row + 1, max_row)}",
+        f"{get_column_letter(max_col)}{max_row}",
+    ]
+    return list(dict.fromkeys(candidates))
+
+
+def _fill_formula_warnings(
+    source_formula: str,
+    source_cell: str,
+    bounds: tuple[int, int, int, int],
+    samples: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    min_col, min_row, max_col, max_row = bounds
+    fills_horizontally = max_col > min_col
+    fills_vertically = max_row > min_row
+    if not fills_horizontally and not fills_vertically:
+        return []
+
+    sample_cells = [
+        str(sample["cell"])
+        for sample in samples
+        if sample.get("cell") != source_cell.replace("$", "")
+    ]
+    warnings: list[dict[str, Any]] = []
+    for match in _FORMULA_RANGE_RE.finditer(source_formula):
+        start = _cell_ref_parts(match.group("start"))
+        end = _cell_ref_parts(match.group("end"))
+        if start is None or end is None:
+            continue
+        issues: list[str] = []
+        if fills_horizontally and start["column_absolute"] != end["column_absolute"]:
+            issues.append("mixed column anchors")
+        if fills_vertically and start["row_absolute"] != end["row_absolute"]:
+            issues.append("mixed row anchors")
+        if not issues:
+            continue
+
+        translated_examples: list[dict[str, str]] = []
+        for destination in sample_cells:
+            translated = Translator(
+                "=" + match.group(0),
+                origin=source_cell,
+            ).translate_formula(destination)[1:]
+            if translated != match.group(0):
+                translated_examples.append(
+                    {"cell": destination, "translated_range": translated}
+                )
+            if len(translated_examples) >= 3:
+                break
+        if not translated_examples:
+            continue
+        warnings.append(
+            {
+                "type": "possible_expanding_or_drifting_range",
+                "source_range": match.group(0),
+                "issues": issues,
+                "examples": translated_examples,
+                "message": (
+                    "This range changes during fill_formula because one endpoint is "
+                    "absolute and the other is relative. If the range should stay fixed "
+                    "across the fill direction, lock both endpoints, e.g. use $E6:$G6 "
+                    "instead of $E6:G6, then refill and verify cached values."
+                ),
+            }
+        )
+    return warnings
 
 
 def _color_value(color: Any) -> str | None:
@@ -480,14 +574,33 @@ class WorkbookSession:
                 raise ToolInputError(f"Source {sheet}!{source_cell} does not contain a formula")
             min_col, min_row, max_col, max_row = bounds
             count = 0
+            samples: list[dict[str, Any]] = []
+            sample_coordinates = set(_formula_sample_coordinates(source_cell, bounds))
             for row in range(min_row, max_row + 1):
                 for column in range(min_col, max_col + 1):
                     destination = f"{get_column_letter(column)}{row}"
-                    worksheet[destination] = Translator(
+                    translated = Translator(
                         formula, origin=source_cell
                     ).translate_formula(destination)
+                    worksheet[destination] = translated
+                    if destination in sample_coordinates:
+                        samples.append({"cell": destination, "formula": translated})
                     count += 1
-            return {"ok": True, "sheet": sheet, "range": target_range, "cells_filled": count}
+            warnings = _fill_formula_warnings(
+                formula,
+                source_cell.replace("$", ""),
+                bounds,
+                samples,
+            )
+            return {
+                "ok": True,
+                "sheet": sheet,
+                "range": target_range,
+                "cells_filled": count,
+                "source_formula": formula,
+                "sample_formulas": samples,
+                "warnings": warnings,
+            }
 
         return self._mutate(
             "fill_formula",

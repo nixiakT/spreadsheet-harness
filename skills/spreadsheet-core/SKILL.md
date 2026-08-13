@@ -13,8 +13,9 @@ Work on the smallest range that satisfies the instruction. Start with `list_shee
 - Prefer formulas for values that should update when inputs change. Write literal values only for constants or when explicitly requested.
 - Do not rebuild a sheet to make one local change. Avoid deleting rows or columns unless the instruction explicitly requires structural deletion.
 - Extend an adjacent formula with `fill_formula`; it translates relative references more reliably than manually composing each formula.
+- Before filling formulas, lock any range that must remain fixed in the fill direction on both endpoints. For example, use `SUM($E6:$G6)` for a fixed actuals range, not `SUM($E6:G6)`, because the latter expands to `SUM($E6:H6)` when filled right.
 - Match nearby formatting by inspecting it first. Use `format_range` only for requested properties.
-- When only `code_interpreter` is available, use the preloaded `sheet_harness` module. It provides `load_workbook()`, `save_workbook()`, `workbook_overview()`, `table_refs()`, `defined_name_refs()`, and `copy_cell_format()`, and it patches common openpyxl table/defined-name API differences.
+- When only `code_interpreter` is available, use the preloaded `sheet_harness` module. It provides `load_workbook()`, `save_workbook()`, `workbook_overview()`, `table_refs()`, `defined_name_refs()`, `copy_cell_format()`, and `fill_formula()`, and it patches common openpyxl table/defined-name API differences.
 
 ## Verify
 

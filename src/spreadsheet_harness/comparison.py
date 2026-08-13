@@ -79,7 +79,7 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v12"
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v13"
 
 
 def _run_key(task_id: str, arm: str) -> str:

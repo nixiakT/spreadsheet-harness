@@ -200,6 +200,7 @@ _CODE_INTERPRETER_RUNTIME_GUIDE = """The code_interpreter preloads a helper modu
 - `sheet_harness.workbook_overview(wb)`, `sheet_harness.table_refs(ws)`, and
   `sheet_harness.defined_name_refs(wb)` for structure.
 - `sheet_harness.copy_cell_format(source, target)` when extending adjacent cells.
+- `sheet_harness.fill_formula(ws, "H6", "H6:P9")` for Excel-style relative formula fill.
 Avoid version-fragile openpyxl internals such as `defined_names.definedName`,
 `ws._tableparts`, or assuming `for t in ws.tables` yields table objects."""
 

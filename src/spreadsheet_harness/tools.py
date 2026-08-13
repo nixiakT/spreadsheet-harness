@@ -279,7 +279,11 @@ class SpreadsheetToolRegistry:
             ),
             self._schema(
                 "fill_formula",
-                "Translate one source formula into every cell of a target range, preserving relative references.",
+                (
+                    "Translate one source formula into every cell of a target range, preserving "
+                    "relative references. Returns sample translated formulas and warnings for "
+                    "ranges that may drift during fill."
+                ),
                 _object_schema(
                     {"sheet": sheet, "source_cell": {"type": "string"}, "target_range": a1},
                     ["sheet", "source_cell", "target_range"],

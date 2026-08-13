@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from openpyxl import load_workbook
 
 from spreadsheet_harness import code_interpreter
 from spreadsheet_harness.code_interpreter import LocalCodeInterpreter
@@ -191,6 +192,41 @@ wb.close()
     assert result["workbook_changed"] is True
     assert result["helper_module"] == "sheet_harness.py"
     assert "Sales" in result["stdout"]
+
+
+def test_code_interpreter_helper_fills_formula(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "fill-helper-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+ws["H6"] = "=SUM($E6:$G6)"
+count = sheet_harness.fill_formula(ws, "H6", "H6:J7")
+sheet_harness.save_workbook(wb)
+wb.close()
+print(count)
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert result["workbook_changed"] is True
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["I6"].value == "=SUM($E6:$G6)"
+        assert workbook["Sales"]["H7"].value == "=SUM($E7:$G7)"
+    finally:
+        workbook.close()
 
 
 def test_code_interpreter_rejects_compressed_code_placeholder(
