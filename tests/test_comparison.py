@@ -107,6 +107,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["task_count"] == 2
     assert manifest["schema_version"] == 10
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
+    assert manifest["configuration"]["code_workbook_formula_gate"] == (
+        "rollback-new-unambiguous-invalid-a1-references-v1"
+    )
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
         "bare": "bare",

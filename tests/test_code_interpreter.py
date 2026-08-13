@@ -194,6 +194,85 @@ wb.close()
     assert "Sales" in result["stdout"]
 
 
+def test_code_interpreter_rolls_back_new_invalid_formula_references(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-gate-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+ws["E2"] = "=SUMIFS(B:B,A:A,$55)"
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert result["workbook_rolled_back"] is True
+    assert result["formula_validation"]["introduced_invalid_reference_count"] == 1
+    assert result["formula_validation"]["examples"] == [
+        {
+            "sheet": "Sales",
+            "cell": "E2",
+            "invalid_reference": "$55",
+            "formula": "=SUMIFS(B:B,A:A,$55)",
+        }
+    ]
+    assert "E$5" in result["error"]
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["E2"].value is None
+    finally:
+        workbook.close()
+
+
+def test_code_interpreter_preserves_preexisting_invalid_formula_reference(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    workbook = load_workbook(sample_workbook)
+    workbook["Sales"]["E2"] = "=SUMIFS(B:B,A:A,$55)"
+    workbook.save(sample_workbook)
+    workbook.close()
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-gate-existing-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["F2"] = 42
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True
+    assert result["workbook_changed"] is True
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["E2"].value == "=SUMIFS(B:B,A:A,$55)"
+        assert workbook["Sales"]["F2"].value == 42
+    finally:
+        workbook.close()
+
+
 def test_code_interpreter_helper_fills_formula(
     sample_workbook: Path,
     tmp_path: Path,

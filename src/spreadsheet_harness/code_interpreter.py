@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import re
 import resource
 import shutil
 import subprocess
@@ -21,6 +22,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from openpyxl import load_workbook
+from openpyxl.formula import Tokenizer
+
 from .errors import CodeIsolationError, ToolInputError
 
 STRICT_ISOLATION_POLICY = "bubblewrap-strict-workspace-v1"
@@ -30,6 +34,7 @@ _PROBE_LOCK = threading.Lock()
 _PROBE_SUCCESSES: set[tuple[str, ...]] = set()
 _RUNTIME_HELPER_NAME = "sheet_harness.py"
 _COMPRESSED_PLACEHOLDER_MARKERS = ("[compressed]", "[truncated]")
+_INVALID_ABSOLUTE_ROW_REFERENCE = re.compile(r"^\$\d+$")
 
 
 _OPENPYXL_COMPAT_SHIM = r"""
@@ -609,6 +614,94 @@ def _file_sha256(path: Path) -> str | None:
         return None
 
 
+def _invalid_formula_references(path: Path) -> set[tuple[str, str, str, str]]:
+    """Find unambiguous malformed A1 references without rejecting valid named ranges."""
+
+    workbook = load_workbook(
+        path,
+        read_only=True,
+        data_only=False,
+        keep_vba=path.suffix.lower() == ".xlsm",
+        keep_links=True,
+    )
+    issues: set[tuple[str, str, str, str]] = set()
+    try:
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    formula = cell.value
+                    if not isinstance(formula, str) or not formula.startswith("="):
+                        continue
+                    try:
+                        tokens = Tokenizer(formula).items
+                    except Exception:
+                        # The outer gate targets references that are certainly invalid. Some
+                        # valid modern formulas are beyond openpyxl's tokenizer grammar.
+                        continue
+                    for token in tokens:
+                        if (
+                            token.type == "OPERAND"
+                            and token.subtype == "RANGE"
+                            and _INVALID_ABSOLUTE_ROW_REFERENCE.fullmatch(token.value)
+                        ):
+                            issues.add(
+                                (
+                                    worksheet.title,
+                                    cell.coordinate,
+                                    token.value,
+                                    formula,
+                                )
+                            )
+    finally:
+        workbook.close()
+    return issues
+
+
+def _restore_workbook(snapshot: Path | None, workbook: Path) -> None:
+    if snapshot is None:
+        workbook.unlink(missing_ok=True)
+        return
+    temporary = workbook.with_name(
+        f".{workbook.stem}.code-rollback-{uuid.uuid4().hex}{workbook.suffix}"
+    )
+    try:
+        shutil.copy2(snapshot, temporary)
+        temporary.replace(workbook)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _formula_validation_failure(
+    issues: set[tuple[str, str, str, str]],
+) -> tuple[str, dict[str, Any]]:
+    ordered = sorted(issues)
+    examples = [
+        {
+            "sheet": sheet,
+            "cell": cell,
+            "invalid_reference": reference,
+            "formula": formula,
+        }
+        for sheet, cell, reference, formula in ordered[:20]
+    ]
+    locations = ", ".join(
+        f"{sheet}!{cell} ({reference})" for sheet, cell, reference, _ in ordered[:8]
+    )
+    if len(ordered) > 8:
+        locations += f", and {len(ordered) - 8} more"
+    error = (
+        "Workbook edit rolled back because it introduced invalid A1 formula references: "
+        f"{locations}. Use a column letter in cell references (for example E$5), save again, "
+        "and verify the recalculated target range."
+    )
+    return error, {
+        "ok": False,
+        "introduced_invalid_reference_count": len(ordered),
+        "examples": examples,
+        "truncated": len(ordered) > len(examples),
+    }
+
+
 def _run_strict_probe(bubblewrap: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="sheet-code-isolation-") as temporary:
         root = Path(temporary)
@@ -828,6 +921,12 @@ class LocalCodeInterpreter:
         script = self.code_dir / f"snippet_{identifier}.py"
         script.write_text(code, encoding="utf-8")
         launcher = self.code_dir / f".launcher_{identifier}.py"
+        rollback_snapshot: Path | None = None
+        if self.workbook.is_file():
+            rollback_snapshot = (
+                self.code_dir / f".workbook_before_{identifier}{self.workbook.suffix}"
+            )
+            shutil.copy2(self.workbook, rollback_snapshot)
         marker: Path | None = None
         launcher.write_text(
             f"""import resource
@@ -894,6 +993,84 @@ runpy.run_path(
             stdout = completed.stdout
             stderr = completed.stderr
             after_sha256 = _file_sha256(self.workbook)
+            workbook_changed = bool(
+                before_sha256 is not None
+                and after_sha256 is not None
+                and before_sha256 != after_sha256
+            )
+            if completed.returncode == 0 and workbook_changed:
+                try:
+                    introduced_invalid_references = (
+                        _invalid_formula_references(self.workbook)
+                        - (
+                            _invalid_formula_references(rollback_snapshot)
+                            if rollback_snapshot is not None
+                            else set()
+                        )
+                    )
+                except Exception as exc:
+                    rejected_sha256 = after_sha256
+                    _restore_workbook(rollback_snapshot, self.workbook)
+                    restored_sha256 = _file_sha256(self.workbook)
+                    return {
+                        "ok": False,
+                        "exit_code": completed.returncode,
+                        "error": (
+                            "Workbook edit rolled back because the saved artifact could not "
+                            f"pass formula validation: {type(exc).__name__}: {exc}"
+                        ),
+                        "stdout": stdout[: self.max_output_chars],
+                        "stderr": stderr[: self.max_output_chars],
+                        "truncated": (
+                            len(stdout) > self.max_output_chars
+                            or len(stderr) > self.max_output_chars
+                        ),
+                        "sandbox": sandbox,
+                        "bubblewrap_error": bubblewrap_error,
+                        "script": str(script.relative_to(self.workspace)),
+                        "workbook_sha256_before": before_sha256,
+                        "workbook_sha256_rejected": rejected_sha256,
+                        "workbook_sha256_after": restored_sha256,
+                        "workbook_changed": False,
+                        "workbook_rolled_back": True,
+                        "helper_module": _RUNTIME_HELPER_NAME,
+                        "message": (
+                            "The invalid workbook edit was rolled back. Save a valid workbook "
+                            "artifact, reopen it, and verify the target range."
+                        ),
+                    }
+                if introduced_invalid_references:
+                    error, validation = _formula_validation_failure(
+                        introduced_invalid_references
+                    )
+                    rejected_sha256 = after_sha256
+                    _restore_workbook(rollback_snapshot, self.workbook)
+                    restored_sha256 = _file_sha256(self.workbook)
+                    return {
+                        "ok": False,
+                        "exit_code": completed.returncode,
+                        "error": error,
+                        "stdout": stdout[: self.max_output_chars],
+                        "stderr": stderr[: self.max_output_chars],
+                        "truncated": (
+                            len(stdout) > self.max_output_chars
+                            or len(stderr) > self.max_output_chars
+                        ),
+                        "sandbox": sandbox,
+                        "bubblewrap_error": bubblewrap_error,
+                        "script": str(script.relative_to(self.workspace)),
+                        "workbook_sha256_before": before_sha256,
+                        "workbook_sha256_rejected": rejected_sha256,
+                        "workbook_sha256_after": restored_sha256,
+                        "workbook_changed": False,
+                        "workbook_rolled_back": True,
+                        "formula_validation": validation,
+                        "helper_module": _RUNTIME_HELPER_NAME,
+                        "message": (
+                            "The invalid workbook edit was rolled back. Correct the formula "
+                            "references in one complete edit, save, recalculate, and verify."
+                        ),
+                    }
             truncated = len(stdout) > self.max_output_chars or len(stderr) > self.max_output_chars
             return {
                 "ok": completed.returncode == 0,
@@ -906,11 +1083,7 @@ runpy.run_path(
                 "script": str(script.relative_to(self.workspace)),
                 "workbook_sha256_before": before_sha256,
                 "workbook_sha256_after": after_sha256,
-                "workbook_changed": bool(
-                    before_sha256 is not None
-                    and after_sha256 is not None
-                    and before_sha256 != after_sha256
-                ),
+                "workbook_changed": workbook_changed,
                 "helper_module": _RUNTIME_HELPER_NAME,
                 "message": (
                     "Workbook changed. If your script already reopened or inspected the exact "
@@ -962,3 +1135,5 @@ runpy.run_path(
                 launcher.unlink(missing_ok=True)
             if marker is not None:
                 marker.unlink(missing_ok=True)
+            if rollback_snapshot is not None:
+                rollback_snapshot.unlink(missing_ok=True)
