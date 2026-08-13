@@ -440,6 +440,36 @@ def test_profile_is_bare_plus_deterministic_evidence_and_native_omits_skills(
     assert native.arm == "native"  # type: ignore[attr-defined]
 
 
+def test_ours_consumes_deterministic_profile_with_skills(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "ours-profile-run")
+    skills = object()
+
+    result = arms.run_arm(
+        "ours", _config(), session, skills, "edit totals", 2_000, 300, object()
+    )
+    ours_call = FakeAgent.calls[-1]
+
+    assert ours_call["tools"].allowed_tools == {"code_interpreter"}
+    assert ours_call["skills"] is skills
+    assert ours_call["require_workbook_change"] is True
+    assert "<deterministic_workbook_profile_json>" in ours_call["prompt"]
+    assert '"schema_version":"deterministic-workbook-profile-v1"' in ours_call["prompt"]
+    assert result.arm == "ours"  # type: ignore[attr-defined]
+    profile_events = [
+        event
+        for event in read_trajectory(session.paths.trajectory)
+        if event["event"] == "preprocess.profile"
+    ]
+    assert len(profile_events) == 1
+    assert profile_events[0]["payload"]["consumer_arm"] == "ours"
+    assert len(profile_events[0]["payload"]["profile_sha256"]) == 64
+
+
 def test_paper_stages_share_budget_and_aggregate_usage_and_timings(
     sample_workbook: Path,
     tmp_path: Path,

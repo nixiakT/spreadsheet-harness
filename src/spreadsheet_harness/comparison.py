@@ -79,7 +79,7 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v9"
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v10"
 
 
 def _run_key(task_id: str, arm: str) -> str:
@@ -717,11 +717,11 @@ class ComparisonBenchmarkRunner:
                 task.task_id: build_deterministic_profile(task.input_path)["profile_sha256"]
                 for task in tasks
             }
-            if "profile" in self.arms
+            if {"profile", "ours"} & set(self.arms)
             else {}
         )
         return {
-            "schema_version": 9,
+            "schema_version": 10,
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "study": "SpreadsheetAgent-style adapted small-model comparison",
             "not_paper_reproduction": True,
@@ -792,7 +792,10 @@ class ComparisonBenchmarkRunner:
                 ),
             },
             "deterministic_profile": {
-                "enabled": "profile" in self.arms,
+                "enabled": bool({"profile", "ours"} & set(self.arms)),
+                "consumed_by_arms": [
+                    arm for arm in self.arms if arm in {"profile", "ours"}
+                ],
                 "schema_version": DETERMINISTIC_PROFILE_SCHEMA_VERSION,
                 "bounds": dict(DETERMINISTIC_PROFILE_BOUNDS),
                 "task_profile_sha256": profile_evidence,
@@ -960,7 +963,7 @@ class ComparisonBenchmarkRunner:
             session.recorder.record(
                 "benchmark.configured",
                 {
-                    "schema_version": 9,
+                    "schema_version": 10,
                     "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
                     "arm": arm,
                     "api_protocol": self.config.api_protocol,

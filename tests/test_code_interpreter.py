@@ -11,7 +11,7 @@ import pytest
 
 from spreadsheet_harness import code_interpreter
 from spreadsheet_harness.code_interpreter import LocalCodeInterpreter
-from spreadsheet_harness.errors import CodeIsolationError
+from spreadsheet_harness.errors import CodeIsolationError, ToolInputError
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry
 
@@ -159,6 +159,91 @@ def test_strict_execution_never_falls_back_when_launcher_did_not_start(
     with pytest.raises(CodeIsolationError, match="refusing unsandboxed fallback"):
         interpreter.run("print('must not run')")
     assert calls == 1
+
+
+def test_code_interpreter_preloads_openpyxl_helper_and_reports_workbook_change(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "helper-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+from openpyxl import load_workbook
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+print(sheet_harness.workbook_overview(wb)[0]["name"])
+print(sheet_harness.table_refs(ws))
+print(sheet_harness.defined_name_refs(wb))
+ws["E1"] = "helper wrote"
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert result["workbook_changed"] is True
+    assert result["helper_module"] == "sheet_harness_runtime.py"
+    assert "Sales" in result["stdout"]
+
+
+def test_code_interpreter_rejects_compressed_code_placeholder(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "placeholder-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    with pytest.raises(ToolInputError, match="complete runnable Python"):
+        interpreter.run("print('start')\n# ...[compressed]\n")
+
+
+def test_code_interpreter_openpyxl_compat_shim_supports_legacy_table_access(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import Workbook
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workbook_path = workspace / "table.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["A", "B"])
+    sheet.append([1, 2])
+    table = Table(displayName="DataTable", ref="A1:B2")
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9")
+    sheet.add_table(table)
+    workbook.save(workbook_path)
+    workbook.close()
+
+    interpreter = LocalCodeInterpreter(workspace, workbook_path, require_isolation=False)
+    result = interpreter.run(
+        """
+from openpyxl import load_workbook
+wb = load_workbook(sheet_harness.workbook_path())
+ws = wb["Data"]
+print([table.name for table in ws.tables])
+print([table.ref for table in ws._tableparts])
+print([(name, table.ref) for name, table in ws.tables.items()])
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert "DataTable" in result["stdout"]
+    assert "A1:B2" in result["stdout"]
 
 
 def test_tool_registry_propagates_required_isolation_failure(

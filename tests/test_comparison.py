@@ -105,7 +105,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 9
+    assert manifest["schema_version"] == 10
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
@@ -151,8 +151,12 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["turn_cap_policy"]["paper_scaling_version"] == (
         "constrained_largest_remainder_v1"
     )
-    assert manifest["deterministic_profile"]["enabled"] is False
-    assert manifest["deterministic_profile"]["task_profile_sha256"] == {}
+    assert manifest["deterministic_profile"]["enabled"] is True
+    assert manifest["deterministic_profile"]["consumed_by_arms"] == ["ours"]
+    assert set(manifest["deterministic_profile"]["task_profile_sha256"]) == {
+        "cell-1",
+        "sheet-1",
+    }
     assert "TOP_SECRET" not in encoded
     assert all("scoring_metadata_sha256" in task for task in manifest["tasks"])
     assert manifest["configuration"]["circuit_breaker_threshold"] == 3
@@ -233,6 +237,7 @@ def test_optional_ablation_arms_are_available_without_changing_default_manifest(
     assert manifest["arms"] == ["bare", "profile", "native", "ours"]
     contract = manifest["deterministic_profile"]
     assert contract["enabled"] is True
+    assert contract["consumed_by_arms"] == ["profile", "ours"]
     assert contract["schema_version"] == "deterministic-workbook-profile-v1"
     assert contract["task_independent"] is True
     assert contract["model_calls"] == 0

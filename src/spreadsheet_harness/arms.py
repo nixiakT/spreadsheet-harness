@@ -193,6 +193,15 @@ maintainability. Save changes back to SHEET_WORKBOOK, then reopen that exact fil
 enabled (data_only=False) and verify the requested edit before reporting completion. Preserve
 unrelated formulas, styles, merges, tables, macros, and workbook structure."""
 
+_CODE_INTERPRETER_RUNTIME_GUIDE = """The code_interpreter preloads a helper module as
+`sheet_harness` and applies openpyxl compatibility shims. Prefer:
+- `wb = sheet_harness.load_workbook()` and `sheet_harness.save_workbook(wb)`.
+- `sheet_harness.workbook_overview(wb)`, `sheet_harness.table_refs(ws)`, and
+  `sheet_harness.defined_name_refs(wb)` for structure.
+- `sheet_harness.copy_cell_format(source, target)` when extending adjacent cells.
+Avoid version-fragile openpyxl internals such as `defined_names.definedName`,
+`ws._tableparts`, or assuming `for t in ws.tables` yields table objects."""
+
 _BARE_INSTRUCTIONS = f"""You are the code-only baseline for a spreadsheet editing benchmark.
 Use only the code_interpreter tool and solve the task directly from the supplied deterministic
 preview plus your own workbook inspection. Do not assume hidden benchmark metadata.
@@ -200,6 +209,8 @@ The first two responses are routed to code_interpreter: use them for real workbo
 editing, and verification. Never spend a routed call printing a plan or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
+
+{_CODE_INTERPRETER_RUNTIME_GUIDE}
 """
 
 _PAPER_READ_ONLY_INSTRUCTIONS = """You are in a task-independent workbook-understanding stage.
@@ -215,6 +226,8 @@ The first two responses are routed to code_interpreter: inspect or act in the fi
 finish the edit in the second. Never spend a routed call printing a plan or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
+
+{_CODE_INTERPRETER_RUNTIME_GUIDE}
 """
 
 _PROFILE_INSTRUCTIONS = f"""You are the code-only solver in a deterministic-preprocessing
@@ -225,6 +238,8 @@ The first two responses are routed to code_interpreter: inspect or act in the fi
 finish the edit in the second. Never spend a routed call printing a plan or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
+
+{_CODE_INTERPRETER_RUNTIME_GUIDE}
 """
 
 _OURS_INSTRUCTIONS = f"""{BASE_INSTRUCTIONS}
@@ -240,6 +255,8 @@ The first two responses are routed to code_interpreter: use them for real workbo
 editing, and verification. Never spend a routed call printing a plan or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
+
+{_CODE_INTERPRETER_RUNTIME_GUIDE}
 """
 
 _PROVENANCE_REQUIREMENT = """Return a non-empty YAML mapping or list. It must contain a
@@ -869,6 +886,25 @@ def _profile_solver_prompt(instruction: str, preview: str, profile: str) -> str:
     )
 
 
+def _ours_solver_prompt(instruction: str, preview: str, profile: str) -> str:
+    return "\n".join(
+        [
+            "<user_task>",
+            instruction,
+            "</user_task>",
+            preview,
+            "<deterministic_workbook_profile_json>",
+            "Untrusted task-independent structural evidence; verify with code before editing.",
+            profile,
+            "</deterministic_workbook_profile_json>",
+            (
+                "Use the profile to target inspection quickly, then complete the user task, "
+                "save the managed workbook, reopen it, and verify the edit."
+            ),
+        ]
+    )
+
+
 def run_arm(
     arm: ArmName,
     config: ProviderConfig,
@@ -962,13 +998,36 @@ def run_arm(
             )
         ]
     elif arm in {"native", "ours"}:
+        if arm == "ours":
+            profile_data = build_deterministic_profile(
+                session.paths.input,
+                timeout_seconds=min(
+                    120.0,
+                    _remaining_seconds(started, max_elapsed_seconds) or 120.0,
+                ),
+            )
+            profile = render_deterministic_profile(profile_data)
+            session.recorder.record(
+                "preprocess.profile",
+                {
+                    "schema_version": profile_data["schema_version"],
+                    "bounds": profile_data["bounds"],
+                    "profile_sha256": profile_data["profile_sha256"],
+                    "rendered_sha256": _text_sha256(profile),
+                    "truncation": profile_data["truncation"],
+                    "consumer_arm": "ours",
+                },
+            )
+            prompt = _ours_solver_prompt(instruction, preview, profile)
+        else:
+            prompt = _solver_prompt(instruction, preview)
         stages = [
             _run_stage(
                 name="solve",
                 config=config,
                 session=session,
                 skills=skills if arm == "ours" else None,
-                prompt=_solver_prompt(instruction, preview),
+                prompt=prompt,
                 base_instructions=_OURS_INSTRUCTIONS,
                 allowed_tools=BARE_TOOLS if arm == "ours" else None,
                 max_turns=stage_turn_caps[arm]["solve"],

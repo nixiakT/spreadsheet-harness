@@ -374,7 +374,12 @@ class SpreadsheetToolRegistry:
             schemas.append(
                 self._schema(
                     "code_interpreter",
-                    "Run trusted Python in the task workspace for analysis. Use SHEET_WORKBOOK for the current workbook. Prefer spreadsheet tools for edits.",
+                    (
+                        "Run trusted Python in the task workspace for analysis and direct "
+                        "workbook edits. Use SHEET_WORKBOOK for the current workbook; "
+                        "sheet_harness helper functions and openpyxl compatibility shims are "
+                        "preloaded."
+                    ),
                     _object_schema(
                         {
                             "code": {"type": "string"},

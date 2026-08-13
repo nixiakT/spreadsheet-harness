@@ -14,6 +14,7 @@ Work on the smallest range that satisfies the instruction. Start with `list_shee
 - Do not rebuild a sheet to make one local change. Avoid deleting rows or columns unless the instruction explicitly requires structural deletion.
 - Extend an adjacent formula with `fill_formula`; it translates relative references more reliably than manually composing each formula.
 - Match nearby formatting by inspecting it first. Use `format_range` only for requested properties.
+- When only `code_interpreter` is available, use the preloaded `sheet_harness` module. It provides `load_workbook()`, `save_workbook()`, `workbook_overview()`, `table_refs()`, `defined_name_refs()`, and `copy_cell_format()`, and it patches common openpyxl table/defined-name API differences.
 
 ## Verify
 
@@ -25,4 +26,5 @@ LibreOffice is the declared calculation backend. Do not silently substitute an E
 
 - Spreadsheet mutation tools are transactional and create snapshots. If verification shows an unintended change, use `undo_last`.
 - The code interpreter is valid for analysis, bulk computations, and direct workbook edits when it is the available or most reliable execution path. When editing with Python, load `SHEET_WORKBOOK`, save back to that exact path, reopen it, and verify the changed range.
+- Do not rely on version-fragile openpyxl internals such as `defined_names.definedName`, `ws._tableparts`, or assuming `for t in ws.tables` yields table objects. Use `sheet_harness.table_refs(ws)` and `sheet_harness.defined_name_refs(wb)` instead.
 - Never access paths outside the run workspace or embed credentials in code, cells, logs, or responses.

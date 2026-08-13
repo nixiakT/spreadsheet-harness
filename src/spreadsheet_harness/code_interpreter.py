@@ -8,6 +8,7 @@ an unsandboxed process.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import resource
@@ -27,6 +28,199 @@ _PROBE_SENTINEL = "SHEET_STRICT_ISOLATION_OK"
 _MAX_SANDBOX_PROCESSES = 64
 _PROBE_LOCK = threading.Lock()
 _PROBE_SUCCESSES: set[tuple[str, ...]] = set()
+_RUNTIME_HELPER_NAME = "sheet_harness_runtime.py"
+_COMPRESSED_PLACEHOLDER_MARKERS = ("[compressed]", "[truncated]")
+
+
+_OPENPYXL_COMPAT_SHIM = r"""
+def _sheet_harness_install_openpyxl_compat():
+    try:
+        from openpyxl.workbook.defined_name import DefinedNameDict
+        if not hasattr(DefinedNameDict, "definedName"):
+            DefinedNameDict.definedName = property(lambda self: list(self.values()))
+
+        from openpyxl.worksheet.table import TableList
+        if getattr(TableList, "_sheet_harness_iterates_values", False) is not True:
+            TableList.__iter__ = lambda self: iter(dict.values(self))
+            TableList.items = lambda self: dict.items(self)
+            TableList._sheet_harness_iterates_values = True
+
+        from openpyxl.workbook.workbook import Workbook
+        if getattr(Workbook, "_sheet_harness_duplicate_name_compat", False) is not True:
+            def _duplicate_name(self, name):
+                candidate = str(name).lower()
+                for sheet in self.worksheets:
+                    for table in getattr(sheet, "tables", []):
+                        table_name = getattr(table, "name", table)
+                        if candidate == str(table_name).lower():
+                            return True
+                return candidate in getattr(self, "defined_names", {})
+            Workbook._duplicate_name = _duplicate_name
+            Workbook._sheet_harness_duplicate_name_compat = True
+
+        from openpyxl.worksheet.worksheet import Worksheet
+        if not hasattr(Worksheet, "_tableparts"):
+            Worksheet._tableparts = property(
+                lambda self: list(getattr(self, "tables", {}).values())
+            )
+    except Exception as exc:
+        import sys
+        print(
+            "[sheet_harness] openpyxl compatibility shim failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
+_sheet_harness_install_openpyxl_compat()
+"""
+
+
+_RUNTIME_HELPER_SOURCE = (
+    _OPENPYXL_COMPAT_SHIM
+    + r'''
+"""Small runtime helpers available inside spreadsheet-harness code_interpreter."""
+
+import hashlib
+import os
+from contextlib import contextmanager
+from copy import copy
+from pathlib import Path
+from typing import Any
+
+from openpyxl import load_workbook as _openpyxl_load_workbook
+from openpyxl.utils import get_column_letter, range_boundaries
+
+
+def workbook_path() -> Path:
+    return Path(os.environ["SHEET_WORKBOOK"])
+
+
+def workbook_sha256(path: str | Path | None = None) -> str:
+    target = Path(path) if path is not None else workbook_path()
+    digest = hashlib.sha256()
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_workbook(path: str | Path | None = None, *, data_only: bool = False, **kwargs: Any):
+    target = Path(path) if path is not None else workbook_path()
+    kwargs.setdefault("keep_vba", target.suffix.lower() == ".xlsm")
+    kwargs.setdefault("keep_links", True)
+    return _openpyxl_load_workbook(target, data_only=data_only, **kwargs)
+
+
+def table_map(worksheet: Any) -> dict[str, Any]:
+    tables = getattr(worksheet, "tables", {})
+    if isinstance(tables, dict):
+        return {
+            str(name): dict.__getitem__(tables, name)
+            for name in dict.keys(tables)
+        }
+    result: dict[str, Any] = {}
+    for table in tables or []:
+        result[str(getattr(table, "name", len(result) + 1))] = table
+    return result
+
+
+def table_refs(worksheet: Any) -> dict[str, str]:
+    return {
+        name: str(getattr(table, "ref", table))
+        for name, table in table_map(worksheet).items()
+    }
+
+
+def defined_name_refs(workbook: Any) -> dict[str, str]:
+    names = getattr(workbook, "defined_names", {})
+    if isinstance(names, dict):
+        return {
+            str(name): str(getattr(value, "attr_text", value))
+            for name, value in dict.items(names)
+        }
+    return {
+        str(getattr(value, "name", index)): str(getattr(value, "attr_text", value))
+        for index, value in enumerate(getattr(names, "definedName", []) or [])
+    }
+
+
+def workbook_overview(workbook: Any) -> list[dict[str, Any]]:
+    overview: list[dict[str, Any]] = []
+    for index, worksheet in enumerate(workbook.worksheets):
+        overview.append(
+            {
+                "index": index,
+                "name": worksheet.title,
+                "dimension": worksheet.calculate_dimension(),
+                "max_row": worksheet.max_row,
+                "max_column": worksheet.max_column,
+                "tables": table_refs(worksheet),
+                "merged_ranges": [str(item) for item in worksheet.merged_cells.ranges],
+            }
+        )
+    return overview
+
+
+def copy_cell_format(source: Any, target: Any) -> None:
+    if source.has_style:
+        target._style = copy(source._style)
+    if source.number_format:
+        target.number_format = source.number_format
+    if source.alignment:
+        target.alignment = copy(source.alignment)
+    if source.protection:
+        target.protection = copy(source.protection)
+
+
+def save_workbook(workbook: Any, path: str | Path | None = None) -> Path:
+    target = Path(path) if path is not None else workbook_path()
+    calculation = getattr(workbook, "calculation", None)
+    if calculation is not None:
+        calculation.fullCalcOnLoad = True
+        calculation.forceFullCalc = True
+        calculation.calcMode = "auto"
+    workbook.save(target)
+    validator = _openpyxl_load_workbook(
+        target,
+        read_only=True,
+        data_only=False,
+        keep_vba=target.suffix.lower() == ".xlsm",
+        keep_links=True,
+    )
+    validator.close()
+    return target
+
+
+@contextmanager
+def editable_workbook(path: str | Path | None = None):
+    workbook = load_workbook(path, data_only=False)
+    try:
+        yield workbook
+        save_workbook(workbook, path)
+    finally:
+        workbook.close()
+
+
+def range_values(worksheet: Any, range_ref: str) -> list[list[Any]]:
+    min_col, min_row, max_col, max_row = range_boundaries(range_ref.replace("$", ""))
+    return [
+        [
+            worksheet.cell(row=row, column=column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        for row in range(min_row, max_row + 1)
+    ]
+
+
+def print_workbook_overview(workbook: Any) -> None:
+    for item in workbook_overview(workbook):
+        print(item)
+    refs = defined_name_refs(workbook)
+    if refs:
+        print({"defined_names": refs})
+'''
+)
 
 
 def _limits(*, include_process_limit: bool = True) -> None:
@@ -209,6 +403,17 @@ def _diagnostic(stderr: str) -> str:
     return cleaned or "no diagnostic output"
 
 
+def _file_sha256(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 def _run_strict_probe(bubblewrap: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="sheet-code-isolation-") as temporary:
         root = Path(temporary)
@@ -335,6 +540,8 @@ class LocalCodeInterpreter:
             ensure_strict_code_isolation()
         self.code_dir = self.workspace / "code"
         self.code_dir.mkdir(exist_ok=True)
+        self._runtime_helper = self.workspace / _RUNTIME_HELPER_NAME
+        self._runtime_helper.write_text(_RUNTIME_HELPER_SOURCE, encoding="utf-8")
 
     def _limits(self) -> None:
         _limits()
@@ -343,11 +550,11 @@ class LocalCodeInterpreter:
         self,
         script: Path,
         *,
-        launcher: Path | None = None,
+        launcher: Path,
         marker: Path | None = None,
     ) -> tuple[list[str], str]:
         if self.require_isolation:
-            if launcher is None or marker is None:
+            if marker is None:
                 raise CodeIsolationError("Strict sandbox launcher was not prepared")
             return (
                 _strict_command(
@@ -363,7 +570,7 @@ class LocalCodeInterpreter:
                 f"{STRICT_ISOLATION_POLICY}: writable workspace, runtime allowlist, no network",
             )
 
-        base = [sys.executable, "-I", str(script)]
+        base = [sys.executable, "-I", str(launcher), str(script)]
         bubblewrap = shutil.which("bwrap") if platform.system() == "Linux" else None
         if not bubblewrap:
             return base, "cwd+rlimit (trusted code only)"
@@ -414,35 +621,50 @@ class LocalCodeInterpreter:
             raise ToolInputError("code must not be empty")
         if len(code) > 30_000:
             raise ToolInputError("code exceeds the 30,000 character limit")
+        if any(marker in code.lower() for marker in _COMPRESSED_PLACEHOLDER_MARKERS):
+            raise ToolInputError(
+                "code contains a compressed/truncated placeholder; send complete runnable Python"
+            )
         timeout = timeout_seconds or self.default_timeout
         if timeout < 1 or timeout > 60:
             raise ToolInputError("timeout_seconds must be between 1 and 60")
+        before_sha256 = _file_sha256(self.workbook)
         identifier = uuid.uuid4().hex
         script = self.code_dir / f"snippet_{identifier}.py"
         script.write_text(code, encoding="utf-8")
-        launcher: Path | None = None
+        launcher = self.code_dir / f".launcher_{identifier}.py"
         marker: Path | None = None
-        if self.require_isolation:
-            launcher = self.code_dir / f".launcher_{identifier}.py"
-            marker = self.code_dir / f".sandbox_started_{identifier}"
-            launcher.write_text(
-                f"""import resource
+        launcher.write_text(
+            f"""import resource
 import runpy
 import sys
+from pathlib import Path
 
-script_path, marker_path = sys.argv[1:3]
+script_path = sys.argv[1]
+marker_path = sys.argv[2] if len(sys.argv) > 2 else None
+workspace = Path(script_path).resolve().parents[1]
+sys.path.insert(0, str(workspace))
+import {_RUNTIME_HELPER_NAME[:-3]} as sheet_harness
+
 if hasattr(resource, "RLIMIT_NPROC"):
     resource.setrlimit(
         resource.RLIMIT_NPROC,
         ({_MAX_SANDBOX_PROCESSES}, {_MAX_SANDBOX_PROCESSES}),
     )
-with open(marker_path, "xb"):
-    pass
+if marker_path is not None:
+    with open(marker_path, "xb"):
+        pass
 sys.argv = [script_path]
-runpy.run_path(script_path, run_name="__main__")
+runpy.run_path(
+    script_path,
+    run_name="__main__",
+    init_globals={{"sheet_harness": sheet_harness}},
+)
 """,
-                encoding="utf-8",
-            )
+            encoding="utf-8",
+        )
+        if self.require_isolation:
+            marker = self.code_dir / f".sandbox_started_{identifier}"
         command, sandbox = self._command(script, launcher=launcher, marker=marker)
         environment = _environment(self.workspace, self.workbook)
         try:
@@ -469,13 +691,14 @@ runpy.run_path(script_path, run_name="__main__")
             if namespace_failure:
                 bubblewrap_error = completed.stderr.strip()[:1000]
                 completed = self._execute(
-                    [sys.executable, "-I", str(script)],
+                    [sys.executable, "-I", str(launcher), str(script)],
                     environment=environment,
                     timeout=timeout,
                 )
                 sandbox = "cwd+rlimit fallback (bubblewrap unavailable; trusted code only)"
             stdout = completed.stdout
             stderr = completed.stderr
+            after_sha256 = _file_sha256(self.workbook)
             truncated = len(stdout) > self.max_output_chars or len(stderr) > self.max_output_chars
             return {
                 "ok": completed.returncode == 0,
@@ -486,8 +709,27 @@ runpy.run_path(script_path, run_name="__main__")
                 "sandbox": sandbox,
                 "bubblewrap_error": bubblewrap_error,
                 "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": bool(
+                    before_sha256 is not None
+                    and after_sha256 is not None
+                    and before_sha256 != after_sha256
+                ),
+                "helper_module": _RUNTIME_HELPER_NAME,
+                "message": (
+                    "Workbook changed; reopen SHEET_WORKBOOK and verify the target range."
+                    if before_sha256 is not None
+                    and after_sha256 is not None
+                    and before_sha256 != after_sha256
+                    else (
+                        "Workbook did not change. If this was meant to edit, save changes "
+                        "back to SHEET_WORKBOOK before submitting."
+                    )
+                ),
             }
         except subprocess.TimeoutExpired as exc:
+            after_sha256 = _file_sha256(self.workbook)
             if self.require_isolation and (marker is None or not marker.is_file()):
                 raise CodeIsolationError(
                     "Strict comparison sandbox timed out before its launcher started"
@@ -503,6 +745,14 @@ runpy.run_path(script_path, run_name="__main__")
                 else "",
                 "sandbox": sandbox,
                 "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": bool(
+                    before_sha256 is not None
+                    and after_sha256 is not None
+                    and before_sha256 != after_sha256
+                ),
+                "helper_module": _RUNTIME_HELPER_NAME,
             }
         except OSError as exc:
             if self.require_isolation:
