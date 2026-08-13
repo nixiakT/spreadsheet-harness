@@ -19,11 +19,13 @@ import sys
 import tempfile
 import threading
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
 from openpyxl.formula import Tokenizer
+from openpyxl.utils import FORMULAE, column_index_from_string, coordinate_to_tuple
 
 from .errors import CodeIsolationError, ToolInputError
 
@@ -35,6 +37,50 @@ _PROBE_SUCCESSES: set[tuple[str, ...]] = set()
 _RUNTIME_HELPER_NAME = "sheet_harness.py"
 _COMPRESSED_PLACEHOLDER_MARKERS = ("[compressed]", "[truncated]")
 _INVALID_ABSOLUTE_ROW_REFERENCE = re.compile(r"^\$\d+$")
+_FORMULA_TEXT_PREFIX = re.compile(
+    r"^(?P<function>(?:_xlfn\.)?[A-Za-z][A-Za-z0-9_.]*)\(",
+    re.IGNORECASE,
+)
+_A1_ENDPOINT = r"\$?[A-Za-z]{1,3}\$?[1-9]\d*"
+_DEFINITE_A1_REFERENCE = re.compile(
+    rf"^(?:(?P<sheet>'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!)?"
+    rf"(?P<start>{_A1_ENDPOINT})(?::(?P<end>{_A1_ENDPOINT}))?$"
+)
+_FORMULA_SIGNAL_OPERATORS = frozenset(
+    {"+", "-", "*", "/", "^", "%", "=", "<>", "<", ">", "<=", ">="}
+)
+_MODERN_FORMULA_FUNCTIONS = {
+    "AGGREGATE",
+    "CONCAT",
+    "FILTER",
+    "FORMULATEXT",
+    "IFS",
+    "ISFORMULA",
+    "LAMBDA",
+    "LET",
+    "MAXIFS",
+    "MINIFS",
+    "SEQUENCE",
+    "SORT",
+    "SORTBY",
+    "SWITCH",
+    "TEXTJOIN",
+    "UNIQUE",
+    "XLOOKUP",
+    "XMATCH",
+}
+_KNOWN_FORMULA_FUNCTIONS = frozenset(FORMULAE) | _MODERN_FORMULA_FUNCTIONS
+
+
+@dataclass(frozen=True)
+class _FormulaTextCandidate:
+    sheet: str
+    cell: str
+    value: str
+    shape: tuple[str, ...]
+    reference_operand_count: int
+    has_formula_operator: bool
+    has_absolute_or_cross_sheet_reference: bool
 
 
 _OPENPYXL_COMPAT_SHIM = r"""
@@ -332,6 +378,16 @@ def fill_formula(
 ) -> dict[str, Any]:
     formula = worksheet[source_cell].value
     if not isinstance(formula, str) or not formula.startswith("="):
+        if (
+            isinstance(formula, str)
+            and formula == formula.strip()
+            and _FORMULA_RANGE_RE.search(formula) is not None
+            and re.match(r"[A-Za-z][A-Za-z0-9_.]*\(", formula) is not None
+        ):
+            raise ValueError(
+                f"{source_cell} contains formula-like text without a leading '='; assign an "
+                "Excel formula string beginning with '=' before calling fill_formula"
+            )
         raise ValueError(f"{source_cell} does not contain a formula")
     normalized_target_range, expanded_from_endpoint = _normalize_fill_target_range(
         source_cell, target_range
@@ -614,9 +670,159 @@ def _file_sha256(path: Path) -> str | None:
         return None
 
 
-def _invalid_formula_references(path: Path) -> set[tuple[str, str, str, str]]:
-    """Find unambiguous malformed A1 references without rejecting valid named ranges."""
+def _valid_a1_endpoint(value: str) -> bool:
+    coordinate = value.replace("$", "")
+    match = re.fullmatch(r"(?P<column>[A-Za-z]{1,3})(?P<row>[1-9]\d*)", coordinate)
+    if match is None:
+        return False
+    return (
+        column_index_from_string(match.group("column")) <= 16_384
+        and int(match.group("row")) <= 1_048_576
+    )
 
+
+def _definite_a1_reference(value: str) -> tuple[str, bool, bool] | None:
+    match = _DEFINITE_A1_REFERENCE.fullmatch(value)
+    if match is None or not all(
+        _valid_a1_endpoint(endpoint)
+        for endpoint in (match.group("start"), match.group("end"))
+        if endpoint is not None
+    ):
+        return None
+    start = match.group("start")
+    end = match.group("end")
+    anchors = ":".join(
+        f"{'C' if part.startswith('$') else 'c'}{'R' if '$' in part[1:] else 'r'}"
+        for part in (start, end)
+        if part is not None
+    )
+    shape = f"REF:{'range' if end else 'cell'}:{anchors}:{bool(match.group('sheet'))}"
+    return shape, "$" in value, match.group("sheet") is not None
+
+
+def _balanced_formula_tokens(tokens: list[Any]) -> bool:
+    stack: list[str] = []
+    expect_operand = True
+    previous_kind: str | None = None
+    for token in tokens:
+        kind = token.type
+        subtype = token.subtype
+        if kind == "WHITE-SPACE":
+            continue
+        if kind in {"FUNC", "PAREN", "ARRAY"} and subtype == "OPEN":
+            if not expect_operand:
+                return False
+            stack.append(kind)
+            expect_operand = True
+        elif kind in {"FUNC", "PAREN", "ARRAY"} and subtype == "CLOSE":
+            if (
+                not stack
+                or stack.pop() != kind
+                or (expect_operand and previous_kind not in {"FUNC", "SEP"})
+            ):
+                return False
+            expect_operand = False
+        elif kind == "OPERAND":
+            if not expect_operand:
+                return False
+            expect_operand = False
+        elif kind == "OPERATOR-PREFIX":
+            if not expect_operand:
+                return False
+        elif kind == "OPERATOR-INFIX":
+            if expect_operand:
+                return False
+            expect_operand = True
+        elif kind == "OPERATOR-POSTFIX":
+            if expect_operand:
+                return False
+        elif kind == "SEP" and subtype in {"ARG", "ROW"}:
+            if expect_operand and previous_kind not in {"FUNC", "SEP"}:
+                return False
+            expect_operand = True
+        else:
+            return False
+        previous_kind = kind
+    return bool(tokens) and not stack and not expect_operand
+
+
+def _formula_text_candidate(sheet: str, cell: Any) -> _FormulaTextCandidate | None:
+    value = cell.value
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value.startswith(("=", "'"))
+        or "\n" in value
+        or "\r" in value
+        or cell.number_format == "@"
+        or bool(
+            getattr(
+                cell,
+                "quotePrefix",
+                getattr(getattr(cell, "style_array", None), "quotePrefix", False),
+            )
+        )
+    ):
+        return None
+    match = _FORMULA_TEXT_PREFIX.match(value)
+    if match is None:
+        return None
+    function = match.group("function").upper().removeprefix("_XLFN.")
+    if function not in _KNOWN_FORMULA_FUNCTIONS:
+        return None
+    try:
+        tokens = Tokenizer("=" + value).items
+    except Exception:
+        return None
+    if (
+        not tokens
+        or tokens[0].type != "FUNC"
+        or tokens[0].subtype != "OPEN"
+        or not _balanced_formula_tokens(tokens)
+    ):
+        return None
+
+    shape: list[str] = []
+    references = 0
+    has_absolute = False
+    has_cross_sheet = False
+    has_operator = False
+    for token in tokens:
+        if token.type == "WHITE-SPACE":
+            continue
+        if token.type == "OPERAND" and token.subtype == "RANGE":
+            reference = _definite_a1_reference(token.value)
+            if reference is None:
+                return None
+            reference_shape, absolute, cross_sheet = reference
+            shape.append(reference_shape)
+            references += 1
+            has_absolute = has_absolute or absolute
+            has_cross_sheet = has_cross_sheet or cross_sheet
+        else:
+            shape.append(f"{token.type}:{token.subtype}:{token.value.upper()}")
+        has_operator = has_operator or (
+            token.type == "OPERATOR-INFIX" and token.value in _FORMULA_SIGNAL_OPERATORS
+        )
+    if references == 0:
+        return None
+    return _FormulaTextCandidate(
+        sheet=sheet,
+        cell=cell.coordinate,
+        value=value,
+        shape=tuple(shape),
+        reference_operand_count=references,
+        has_formula_operator=has_operator,
+        has_absolute_or_cross_sheet_reference=has_absolute or has_cross_sheet,
+    )
+
+
+def _workbook_formula_state(
+    path: Path,
+) -> tuple[
+    set[tuple[str, str, str, str]],
+    dict[tuple[str, str], _FormulaTextCandidate],
+]:
     workbook = load_workbook(
         path,
         read_only=True,
@@ -624,37 +830,90 @@ def _invalid_formula_references(path: Path) -> set[tuple[str, str, str, str]]:
         keep_vba=path.suffix.lower() == ".xlsm",
         keep_links=True,
     )
-    issues: set[tuple[str, str, str, str]] = set()
+    invalid_references: set[tuple[str, str, str, str]] = set()
+    formula_text: dict[tuple[str, str], _FormulaTextCandidate] = {}
     try:
         for worksheet in workbook.worksheets:
             for row in worksheet.iter_rows():
                 for cell in row:
-                    formula = cell.value
-                    if not isinstance(formula, str) or not formula.startswith("="):
-                        continue
-                    try:
-                        tokens = Tokenizer(formula).items
-                    except Exception:
-                        # The outer gate targets references that are certainly invalid. Some
-                        # valid modern formulas are beyond openpyxl's tokenizer grammar.
-                        continue
-                    for token in tokens:
-                        if (
-                            token.type == "OPERAND"
-                            and token.subtype == "RANGE"
-                            and _INVALID_ABSOLUTE_ROW_REFERENCE.fullmatch(token.value)
-                        ):
-                            issues.add(
-                                (
-                                    worksheet.title,
-                                    cell.coordinate,
-                                    token.value,
-                                    formula,
+                    value = cell.value
+                    if isinstance(value, str) and value.startswith("="):
+                        try:
+                            tokens = Tokenizer(value).items
+                        except Exception:
+                            continue
+                        for token in tokens:
+                            if (
+                                token.type == "OPERAND"
+                                and token.subtype == "RANGE"
+                                and _INVALID_ABSOLUTE_ROW_REFERENCE.fullmatch(token.value)
+                            ):
+                                invalid_references.add(
+                                    (worksheet.title, cell.coordinate, token.value, value)
                                 )
-                            )
+                    else:
+                        candidate = _formula_text_candidate(worksheet.title, cell)
+                        if candidate is not None:
+                            formula_text[(worksheet.title, cell.coordinate)] = candidate
     finally:
         workbook.close()
-    return issues
+    return invalid_references, formula_text
+
+
+def _has_adjacent_cells(candidates: list[_FormulaTextCandidate]) -> bool:
+    coordinates = {coordinate_to_tuple(candidate.cell) for candidate in candidates}
+    return any(
+        (row + row_delta, column + column_delta) in coordinates
+        for row, column in coordinates
+        for row_delta, column_delta in ((0, 1), (1, 0))
+    )
+
+
+def _high_confidence_formula_text(
+    introduced: dict[tuple[str, str], _FormulaTextCandidate],
+) -> set[tuple[str, str, str]]:
+    batch_groups: dict[tuple[str, tuple[str, ...]], list[_FormulaTextCandidate]] = {}
+    for candidate in introduced.values():
+        batch_groups.setdefault((candidate.sheet, candidate.shape), []).append(candidate)
+    batch_members = {
+        (candidate.sheet, candidate.cell)
+        for candidates in batch_groups.values()
+        if len(candidates) >= 3 and _has_adjacent_cells(candidates)
+        for candidate in candidates
+    }
+    return {
+        (candidate.sheet, candidate.cell, candidate.value)
+        for key, candidate in introduced.items()
+        if candidate.reference_operand_count >= 2
+        or candidate.has_formula_operator
+        or candidate.has_absolute_or_cross_sheet_reference
+        or key in batch_members
+    }
+
+
+def validate_formula_transaction(
+    previous_path: Path | None,
+    current_path: Path,
+) -> tuple[set[tuple[str, str, str, str]], set[tuple[str, str, str]]]:
+    """Return high-confidence formula issues introduced between two workbooks."""
+
+    if previous_path is None:
+        previous_invalid_references: set[tuple[str, str, str, str]] = set()
+        previous_formula_text: dict[tuple[str, str], _FormulaTextCandidate] = {}
+    else:
+        previous_invalid_references, previous_formula_text = _workbook_formula_state(
+            previous_path
+        )
+    current_invalid_references, current_formula_text = _workbook_formula_state(current_path)
+    introduced_formula_candidates = {
+        key: candidate
+        for key, candidate in current_formula_text.items()
+        if previous_formula_text.get(key) != candidate
+    }
+    return (
+        current_invalid_references - previous_invalid_references,
+        _high_confidence_formula_text(introduced_formula_candidates),
+    )
 
 
 def _restore_workbook(snapshot: Path | None, workbook: Path) -> None:
@@ -672,33 +931,55 @@ def _restore_workbook(snapshot: Path | None, workbook: Path) -> None:
 
 
 def _formula_validation_failure(
-    issues: set[tuple[str, str, str, str]],
+    invalid_references: set[tuple[str, str, str, str]],
+    formula_text: set[tuple[str, str, str]],
 ) -> tuple[str, dict[str, Any]]:
-    ordered = sorted(issues)
-    examples = [
+    invalid_examples = [
         {
+            "type": "invalid_a1_reference",
             "sheet": sheet,
             "cell": cell,
             "invalid_reference": reference,
             "formula": formula,
         }
-        for sheet, cell, reference, formula in ordered[:20]
+        for sheet, cell, reference, formula in sorted(invalid_references)
     ]
-    locations = ", ".join(
-        f"{sheet}!{cell} ({reference})" for sheet, cell, reference, _ in ordered[:8]
-    )
-    if len(ordered) > 8:
-        locations += f", and {len(ordered) - 8} more"
-    error = (
-        "Workbook edit rolled back because it introduced invalid A1 formula references: "
-        f"{locations}. Use a column letter in cell references (for example E$5), save again, "
-        "and verify the recalculated target range."
-    )
+    text_examples = [
+        {
+            "type": "missing_formula_prefix",
+            "sheet": sheet,
+            "cell": cell,
+            "value": value,
+        }
+        for sheet, cell, value in sorted(formula_text)
+    ]
+    issues = invalid_examples + text_examples
+    details: list[str] = []
+    if invalid_references:
+        locations = ", ".join(
+            f"{sheet}!{cell} ({reference})"
+            for sheet, cell, reference, _ in sorted(invalid_references)[:8]
+        )
+        details.append(f"invalid A1 references at {locations}")
+    if formula_text:
+        locations = ", ".join(
+            f"{sheet}!{cell}" for sheet, cell, _ in sorted(formula_text)[:8]
+        )
+        details.append(f"formula-like text without a leading '=' at {locations}")
+    guidance = []
+    if invalid_references:
+        guidance.append("use a column letter in cell references (for example E$5)")
+    if formula_text:
+        guidance.append("assign intended formulas as strings beginning with '='")
+    error = "Workbook edit rolled back because it introduced " + "; ".join(details) + ". "
+    error += "; then ".join(guidance) + ", save again, recalculate, and verify the target range."
     return error, {
         "ok": False,
-        "introduced_invalid_reference_count": len(ordered),
-        "examples": examples,
-        "truncated": len(ordered) > len(examples),
+        "issue_count": len(issues),
+        "introduced_invalid_reference_count": len(invalid_references),
+        "introduced_formula_text_count": len(formula_text),
+        "issues": issues[:20],
+        "truncated": len(issues) > 20,
     }
 
 
@@ -993,19 +1274,44 @@ runpy.run_path(
             stdout = completed.stdout
             stderr = completed.stderr
             after_sha256 = _file_sha256(self.workbook)
-            workbook_changed = bool(
-                before_sha256 is not None
-                and after_sha256 is not None
-                and before_sha256 != after_sha256
-            )
+            workbook_changed = before_sha256 != after_sha256
+            if completed.returncode != 0 and workbook_changed:
+                rejected_sha256 = after_sha256
+                _restore_workbook(rollback_snapshot, self.workbook)
+                restored_sha256 = _file_sha256(self.workbook)
+                return {
+                    "ok": False,
+                    "exit_code": completed.returncode,
+                    "error": (
+                        "Code execution failed after changing the workbook; all partial edits "
+                        "were rolled back. Correct the script and apply the complete edit again."
+                    ),
+                    "stdout": stdout[: self.max_output_chars],
+                    "stderr": stderr[: self.max_output_chars],
+                    "truncated": (
+                        len(stdout) > self.max_output_chars
+                        or len(stderr) > self.max_output_chars
+                    ),
+                    "sandbox": sandbox,
+                    "bubblewrap_error": bubblewrap_error,
+                    "script": str(script.relative_to(self.workspace)),
+                    "workbook_sha256_before": before_sha256,
+                    "workbook_sha256_rejected": rejected_sha256,
+                    "workbook_sha256_after": restored_sha256,
+                    "workbook_changed": False,
+                    "workbook_rolled_back": True,
+                    "helper_module": _RUNTIME_HELPER_NAME,
+                    "message": (
+                        "The failed code transaction was rolled back. Apply one complete edit, "
+                        "save, recalculate, and verify."
+                    ),
+                }
             if completed.returncode == 0 and workbook_changed:
                 try:
-                    introduced_invalid_references = (
-                        _invalid_formula_references(self.workbook)
-                        - (
-                            _invalid_formula_references(rollback_snapshot)
-                            if rollback_snapshot is not None
-                            else set()
+                    introduced_invalid_references, introduced_formula_text = (
+                        validate_formula_transaction(
+                            rollback_snapshot,
+                            self.workbook,
                         )
                     )
                 except Exception as exc:
@@ -1039,9 +1345,10 @@ runpy.run_path(
                             "artifact, reopen it, and verify the target range."
                         ),
                     }
-                if introduced_invalid_references:
+                if introduced_invalid_references or introduced_formula_text:
                     error, validation = _formula_validation_failure(
-                        introduced_invalid_references
+                        introduced_invalid_references,
+                        introduced_formula_text,
                     )
                     rejected_sha256 = after_sha256
                     _restore_workbook(rollback_snapshot, self.workbook)
@@ -1067,8 +1374,8 @@ runpy.run_path(
                         "formula_validation": validation,
                         "helper_module": _RUNTIME_HELPER_NAME,
                         "message": (
-                            "The invalid workbook edit was rolled back. Correct the formula "
-                            "references in one complete edit, save, recalculate, and verify."
+                            "The invalid workbook edit was rolled back. Correct every reported "
+                            "formula issue in one complete edit, save, recalculate, and verify."
                         ),
                     }
             truncated = len(stdout) > self.max_output_chars or len(stderr) > self.max_output_chars
@@ -1104,9 +1411,22 @@ runpy.run_path(
                 raise CodeIsolationError(
                     "Strict comparison sandbox timed out before its launcher started"
                 ) from exc
+            workbook_changed = before_sha256 != after_sha256
+            rejected_sha256: str | None = None
+            if workbook_changed:
+                rejected_sha256 = after_sha256
+                _restore_workbook(rollback_snapshot, self.workbook)
+                after_sha256 = _file_sha256(self.workbook)
             return {
                 "ok": False,
-                "error": f"Code execution timed out after {timeout} seconds",
+                "error": (
+                    f"Code execution timed out after {timeout} seconds"
+                    + (
+                        "; partial workbook edits were rolled back"
+                        if workbook_changed
+                        else ""
+                    )
+                ),
                 "stdout": (exc.stdout or "")[: self.max_output_chars]
                 if isinstance(exc.stdout, str)
                 else "",
@@ -1116,12 +1436,10 @@ runpy.run_path(
                 "sandbox": sandbox,
                 "script": str(script.relative_to(self.workspace)),
                 "workbook_sha256_before": before_sha256,
+                "workbook_sha256_rejected": rejected_sha256,
                 "workbook_sha256_after": after_sha256,
-                "workbook_changed": bool(
-                    before_sha256 is not None
-                    and after_sha256 is not None
-                    and before_sha256 != after_sha256
-                ),
+                "workbook_changed": False,
+                "workbook_rolled_back": workbook_changed,
                 "helper_module": _RUNTIME_HELPER_NAME,
             }
         except OSError as exc:

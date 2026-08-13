@@ -24,6 +24,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
+from .code_interpreter import validate_formula_transaction
 from .errors import ToolInputError, WorkbookValidationError
 from .trajectory import TrajectoryRecorder
 
@@ -362,6 +363,23 @@ class WorkbookSession:
                 workbook.close()
                 workbook = None
                 self._validate(temporary)
+                invalid_references, formula_text = validate_formula_transaction(
+                    snapshot,
+                    temporary,
+                )
+                if invalid_references or formula_text:
+                    issue_locations = sorted(
+                        {(sheet, cell) for sheet, cell, *_ in invalid_references}
+                        | {(sheet, cell) for sheet, cell, _ in formula_text}
+                    )
+                    locations = ", ".join(
+                        f"{sheet}!{cell}" for sheet, cell in issue_locations[:8]
+                    )
+                    raise ToolInputError(
+                        "Mutation introduced invalid or high-confidence formula-like text at "
+                        f"{locations}. Excel formulas must be strings beginning with '='; "
+                        "correct every reported formula issue and retry the complete edit."
+                    )
                 after_sha256 = _sha256(temporary)
                 if isinstance(result, dict):
                     result = {
@@ -594,6 +612,17 @@ class WorkbookSession:
             worksheet = self._sheet(workbook, sheet)
             formula = worksheet[source_cell].value
             if not isinstance(formula, str) or not formula.startswith("="):
+                if (
+                    isinstance(formula, str)
+                    and formula == formula.strip()
+                    and _FORMULA_RANGE_RE.search(formula) is not None
+                    and re.match(r"[A-Za-z][A-Za-z0-9_.]*\(", formula) is not None
+                ):
+                    raise ToolInputError(
+                        f"Source {sheet}!{source_cell} contains formula-like text without a "
+                        "leading '='; assign an Excel formula string beginning with '=' before "
+                        "calling fill_formula"
+                    )
                 raise ToolInputError(f"Source {sheet}!{source_cell} does not contain a formula")
             min_col, min_row, max_col, max_row = bounds
             count = 0

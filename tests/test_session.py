@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,41 @@ def test_range_limits(sample_workbook: Path, tmp_path: Path) -> None:
         session.write_range("Sales", "A1", [[1], [2, 3]])
 
 
+def test_write_range_rejects_high_confidence_unprefixed_formula_text(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    original = session.workbook_path.read_bytes()
+
+    with pytest.raises(ToolInputError, match="strings beginning with '='"):
+        session.write_range("Sales", "H6", [["AVERAGE($B2:$D2)+$F$1"]])
+
+    assert session.workbook_path.read_bytes() == original
+
+
+def test_write_range_accepts_formula_and_explicit_or_weak_text(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+
+    result = session.write_range(
+        "Sales",
+        "H6",
+        [["=AVERAGE($B2:$D2)+$F$1", "SUM(A1:A3)", "SUM of actuals"]],
+    )
+
+    assert result["ok"] is True
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["H6"].data_type == "f"
+        assert workbook["Sales"]["I6"].value == "SUM(A1:A3)"
+        assert workbook["Sales"]["J6"].value == "SUM of actuals"
+    finally:
+        workbook.close()
+
+
 def test_inspect_range_reports_tables(sample_workbook: Path, tmp_path: Path) -> None:
     workbook = load_workbook(sample_workbook)
     sheet = workbook["Sales"]
@@ -89,6 +125,30 @@ def test_fill_formula_reports_sample_formulas_and_drifting_ranges(
     assert result["warnings"][0]["type"] == "possible_expanding_or_drifting_range"
     assert result["warnings"][0]["source_range"] == "$E6:G6"
     assert "$E6:$G6" in result["warnings"][0]["message"]
+
+
+@pytest.mark.parametrize(
+    ("source_value", "expected_error"),
+    [
+        (None, "does not contain a formula"),
+        (
+            "SUM(A1:A3)",
+            "formula-like text without a leading '='; assign an Excel formula string",
+        ),
+    ],
+)
+def test_fill_formula_explains_invalid_source(
+    sample_workbook: Path,
+    tmp_path: Path,
+    source_value: str | None,
+    expected_error: str,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    if source_value is not None:
+        session.write_range("Sales", "H6", [[source_value]])
+
+    with pytest.raises(ToolInputError, match=re.escape(expected_error)):
+        session.fill_formula("Sales", "H6", "H6:J6")
 
 
 def test_fill_formula_warns_on_relative_horizontal_range_drift(

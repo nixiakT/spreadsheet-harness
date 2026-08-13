@@ -221,8 +221,10 @@ wb.close()
     assert result["workbook_changed"] is False
     assert result["workbook_rolled_back"] is True
     assert result["formula_validation"]["introduced_invalid_reference_count"] == 1
-    assert result["formula_validation"]["examples"] == [
+    assert result["formula_validation"]["introduced_formula_text_count"] == 0
+    assert result["formula_validation"]["issues"] == [
         {
+            "type": "invalid_a1_reference",
             "sheet": "Sales",
             "cell": "E2",
             "invalid_reference": "$55",
@@ -273,6 +275,441 @@ wb.close()
         workbook.close()
 
 
+def test_code_interpreter_rolls_back_unprefixed_formula_text_atomically(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-text-gate-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+    before = session.workbook_path.read_bytes()
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+ws["H6"] = "AVERAGE($B2:$D2)+$F$1"
+ws["I6"] = 99
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert result["workbook_rolled_back"] is True
+    assert result["workbook_sha256_before"] == result["workbook_sha256_after"]
+    assert result["workbook_sha256_rejected"] != result["workbook_sha256_after"]
+    assert result["formula_validation"] == {
+        "ok": False,
+        "issue_count": 1,
+        "introduced_invalid_reference_count": 0,
+        "introduced_formula_text_count": 1,
+        "issues": [
+            {
+                "type": "missing_formula_prefix",
+                "sheet": "Sales",
+                "cell": "H6",
+                "value": "AVERAGE($B2:$D2)+$F$1",
+            }
+        ],
+        "truncated": False,
+    }
+    assert "leading '='" in result["error"]
+    assert session.workbook_path.read_bytes() == before
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["H6"].value is None
+        assert workbook["Sales"]["I6"].value is None
+    finally:
+        workbook.close()
+
+
+def test_code_interpreter_rolls_back_formula_text_after_script_failure(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "failed-formula-text-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+    before = session.workbook_path.read_bytes()
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["H6"] = "AVERAGE($B2:$D2)+$F$1"
+sheet_harness.save_workbook(wb)
+wb.close()
+raise RuntimeError("verification failed after save")
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["exit_code"] != 0
+    assert result["workbook_changed"] is False
+    assert result["workbook_rolled_back"] is True
+    assert "all partial edits were rolled back" in result["error"]
+    assert "verification failed after save" in result["stderr"]
+    assert session.workbook_path.read_bytes() == before
+
+
+def test_code_interpreter_rolls_back_any_partial_edit_after_script_failure(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "failed-partial-edit-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+    before = session.workbook_path.read_bytes()
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["A1"] = "partial edit"
+sheet_harness.save_workbook(wb)
+wb.close()
+raise RuntimeError("failure after save")
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert result["workbook_rolled_back"] is True
+    assert "all partial edits were rolled back" in result["error"]
+    assert session.workbook_path.read_bytes() == before
+
+
+def test_code_interpreter_rolls_back_partial_workbook_after_timeout(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "timed-out-workbook-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+    before = session.workbook_path.read_bytes()
+
+    result = interpreter.run(
+        """
+import time
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["H6"] = "partial edit"
+sheet_harness.save_workbook(wb)
+wb.close()
+time.sleep(5)
+""",
+        timeout_seconds=1,
+    )
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert result["workbook_rolled_back"] is True
+    assert result["workbook_sha256_before"] == result["workbook_sha256_after"]
+    assert result["workbook_sha256_rejected"] != result["workbook_sha256_after"]
+    assert "partial workbook edits were rolled back" in result["error"]
+    assert session.workbook_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("termination", ["return", "timeout"])
+def test_code_interpreter_restores_deleted_workbook(
+    sample_workbook: Path,
+    tmp_path: Path,
+    termination: str,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "deleted-workbook-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+    before = session.workbook_path.read_bytes()
+    suffix = "\nimport time; time.sleep(5)" if termination == "timeout" else ""
+
+    result = interpreter.run(
+        f"""
+import sheet_harness
+
+sheet_harness.workbook_path().unlink()
+{suffix}
+""",
+        timeout_seconds=1,
+    )
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert result["workbook_rolled_back"] is True
+    assert session.workbook_path.read_bytes() == before
+
+
+def test_code_interpreter_accepts_prefixed_formula(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "valid-formula-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["H6"] = "=AVERAGE($B2:$D2)+$F$1"
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["H6"].value == "=AVERAGE($B2:$D2)+$F$1"
+        assert workbook["Sales"]["H6"].data_type == "f"
+    finally:
+        workbook.close()
+
+
+def test_code_interpreter_preserves_preexisting_formula_text(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    workbook = load_workbook(sample_workbook)
+    workbook["Sales"]["H6"] = "AVERAGE($B2:$D2)+$F$1"
+    workbook.save(sample_workbook)
+    workbook.close()
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-text-existing-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["F2"] = 42
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["H6"].value == "AVERAGE($B2:$D2)+$F$1"
+        assert workbook["Sales"]["F2"].value == 42
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "SUM(A1:A3)",
+        "SUM of actuals",
+        "SUM (Actuals by month)",
+        "Forecast = SUM(A1:A3)",
+        "SUM(A1:A3) formula",
+        "SUM(Actuals)",
+        "TODAY()",
+        "UNKNOWNMODERN(A1:A3)",
+        "SUM(Table1[Amount])",
+        "SUM(A1,Rate)",
+        " SUM(A1:A3,B1:B3)",
+        "SUM(A1:A3,B1:B3) ",
+        "SUM(A1)/",
+        "SUM(A1)+(B1",
+    ],
+)
+def test_code_interpreter_accepts_weak_or_non_formula_text(
+    sample_workbook: Path,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-text-negative-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        f"""
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["H6"] = {value!r}
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert workbook["Sales"]["H6"].value == value
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("explicit_text", ["apostrophe", "quote_prefix", "text_format"])
+def test_code_interpreter_accepts_explicit_formula_text(
+    sample_workbook: Path,
+    tmp_path: Path,
+    explicit_text: str,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "explicit-formula-text-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+    assignment = {
+        "apostrophe": 'cell.value = "\'SUM(A1:A3,B1:B3)"',
+        "quote_prefix": (
+            'cell.value = "SUM(A1:A3,B1:B3)"\ncell.quotePrefix = True'
+        ),
+        "text_format": (
+            'cell.value = "SUM(A1:A3,B1:B3)"\ncell.number_format = "@"'
+        ),
+    }[explicit_text]
+
+    result = interpreter.run(
+        f"""
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+cell = wb["Sales"]["H6"]
+{assignment}
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+
+
+def test_code_interpreter_rolls_back_adjacent_same_shape_formula_text(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-text-batch-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+ws["H6"] = "SUM(A1:A3)"
+ws["I6"] = "SUM(B1:B3)"
+ws["J6"] = "SUM(C1:C3)"
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["formula_validation"]["introduced_formula_text_count"] == 3
+    assert all(
+        issue["type"] == "missing_formula_prefix"
+        for issue in result["formula_validation"]["issues"]
+    )
+
+
+def test_code_interpreter_rolls_back_valid_conditional_formula_text(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-text-conditional-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+wb["Sales"]["H6"] = 'IF(A1="",,B1)'
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["formula_validation"]["introduced_formula_text_count"] == 1
+    assert result["formula_validation"]["issues"][0]["type"] == (
+        "missing_formula_prefix"
+    )
+
+
+def test_code_interpreter_reports_all_formula_issues_in_one_rollback(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "combined-formula-gate-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+ws["E2"] = "=SUMIFS(B:B,A:A,$55)"
+ws["H6"] = "AVERAGE($B2:$D2)+$F$1"
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is False
+    assert result["workbook_rolled_back"] is True
+    assert result["formula_validation"]["issue_count"] == 2
+    assert result["formula_validation"]["introduced_invalid_reference_count"] == 1
+    assert result["formula_validation"]["introduced_formula_text_count"] == 1
+    assert [issue["type"] for issue in result["formula_validation"]["issues"]] == [
+        "invalid_a1_reference",
+        "missing_formula_prefix",
+    ]
+
+
 def test_code_interpreter_helper_fills_formula(
     sample_workbook: Path,
     tmp_path: Path,
@@ -308,6 +745,44 @@ print(result)
         assert workbook["Sales"]["H7"].value == "=SUM($E7:$G7)"
     finally:
         workbook.close()
+
+
+@pytest.mark.parametrize(
+    ("source_value", "expected_error"),
+    [
+        (None, "does not contain a formula"),
+        (
+            "SUM(A1:A3)",
+            "formula-like text without a leading '='; assign an Excel formula string",
+        ),
+    ],
+)
+def test_code_interpreter_helper_explains_invalid_formula_source(
+    sample_workbook: Path,
+    tmp_path: Path,
+    source_value: str | None,
+    expected_error: str,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "fill-helper-error-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        f"""
+import sheet_harness
+
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+ws["H6"] = {source_value!r}
+sheet_harness.fill_formula(ws, "H6", "H6:J6")
+"""
+    )
+
+    assert result["ok"] is False
+    assert expected_error in result["stderr"]
 
 
 def test_code_interpreter_helper_warns_on_drifting_formula_fill(

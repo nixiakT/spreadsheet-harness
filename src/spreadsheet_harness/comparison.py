@@ -79,7 +79,7 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v17"
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v18"
 
 
 def _run_key(task_id: str, arm: str) -> str:
@@ -861,7 +861,7 @@ class ComparisonBenchmarkRunner:
                 "skills_for_ours_only": skills,
                 "code_isolation": STRICT_ISOLATION_POLICY,
                 "code_workbook_formula_gate": (
-                    "rollback-new-unambiguous-invalid-a1-references-v1"
+                    "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
                 ),
             },
         }
