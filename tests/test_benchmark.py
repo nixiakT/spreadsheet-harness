@@ -86,6 +86,7 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
     postopt_ids = list(benchmark_module.TRACE2SKILL_POSTOPT_TASK_IDS)
     confirm_ids = list(benchmark_module.TRACE2SKILL_CONFIRM_TASK_IDS)
     v26_confirm_ids = list(benchmark_module.TRACE2SKILL_V26_CONFIRM_TASK_IDS)
+    v27_reserve_ids = list(benchmark_module.TRACE2SKILL_V27_RESERVE_TASK_IDS)
 
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization([pilot_ids[0]])
@@ -95,6 +96,8 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
         require_evaluation_task_authorization([confirm_ids[0]])
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization([v26_confirm_ids[0]])
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        require_evaluation_task_authorization([v27_reserve_ids[0]])
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization(
             postopt_ids[:-1],
@@ -117,6 +120,11 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
         )
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization(
+            v27_reserve_ids[:-1],
+            authorized_manifest_id=benchmark_module.TRACE2SKILL_V27_RESERVE_MANIFEST_ID,
+        )
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        require_evaluation_task_authorization(
             [*confirm_ids, postopt_ids[0]],
             authorized_manifest_id=benchmark_module.TRACE2SKILL_CONFIRM_MANIFEST_ID,
         )
@@ -132,6 +140,10 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
     require_evaluation_task_authorization(
         v26_confirm_ids,
         authorized_manifest_id=benchmark_module.TRACE2SKILL_V26_CONFIRM_MANIFEST_ID,
+    )
+    require_evaluation_task_authorization(
+        v27_reserve_ids,
+        authorized_manifest_id=benchmark_module.TRACE2SKILL_V27_RESERVE_MANIFEST_ID,
     )
 
 
@@ -363,6 +375,9 @@ DERIVATIVE_CONFIRM_MANIFEST = Path(
 DERIVATIVE_V26_CONFIRM_MANIFEST = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-v26-confirm16-v1.json"
 )
+DERIVATIVE_V27_RESERVE_MANIFEST = Path(
+    "benchmarks/protocols/qwen35-trace2skill-local-v27-reserve79-v1.json"
+)
 LOCAL_EXPOSURE_EVIDENCE = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-exposure-evidence-v1.json"
 )
@@ -398,6 +413,7 @@ def _copy_derivative_manifest_tree(destination: Path) -> dict[str, Path]:
         "postopt": DERIVATIVE_POSTOPT_MANIFEST,
         "confirm": DERIVATIVE_CONFIRM_MANIFEST,
         "v26_confirm": DERIVATIVE_V26_CONFIRM_MANIFEST,
+        "v27_reserve": DERIVATIVE_V27_RESERVE_MANIFEST,
         "evidence": LOCAL_EXPOSURE_EVIDENCE,
     }
     copies: dict[str, Path] = {}
@@ -479,6 +495,7 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         DERIVATIVE_POSTOPT_MANIFEST,
         DERIVATIVE_CONFIRM_MANIFEST,
         DERIVATIVE_V26_CONFIRM_MANIFEST,
+        DERIVATIVE_V27_RESERVE_MANIFEST,
         LOCAL_EXPOSURE_EVIDENCE,
     ]
     before = {path: _file_state(path) for path in watched}
@@ -497,6 +514,9 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
     )
     v26_confirm = benchmark_module.verify_trace2skill_derivative_manifest(
         dataset, DERIVATIVE_V26_CONFIRM_MANIFEST
+    )
+    v27_reserve = benchmark_module.verify_trace2skill_derivative_manifest(
+        dataset, DERIVATIVE_V27_RESERVE_MANIFEST
     )
 
     assert pool["valid"] is True
@@ -531,6 +551,14 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
     assert v26_confirm["task_ids_sha256"] == (
         "f735283a19d2d464f46b10387764cc600598bb15f00a767ff4df17d154629d27"
     )
+    assert v27_reserve["valid"] is True
+    assert v27_reserve["manifest_id"] == (
+        "qwen35-trace2skill-local-v27-reserve79-v1"
+    )
+    assert v27_reserve["usable_tasks"] == 79
+    assert v27_reserve["task_ids_sha256"] == (
+        "40e4491074477ddb2bd11a0e4dc7e5513447b1e1efb90b2a169b4026fc839e7b"
+    )
     assert {path: _file_state(path) for path in watched} == before
 
 
@@ -543,6 +571,7 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         DERIVATIVE_POSTOPT_MANIFEST,
         DERIVATIVE_CONFIRM_MANIFEST,
         DERIVATIVE_V26_CONFIRM_MANIFEST,
+        DERIVATIVE_V27_RESERVE_MANIFEST,
     ],
 )
 def test_trace2skill_verified_reports_produce_canonical_provenance(
@@ -575,6 +604,7 @@ def test_trace2skill_verified_reports_produce_canonical_provenance(
         DERIVATIVE_POSTOPT_MANIFEST,
         DERIVATIVE_CONFIRM_MANIFEST,
         DERIVATIVE_V26_CONFIRM_MANIFEST,
+        DERIVATIVE_V27_RESERVE_MANIFEST,
     ],
 )
 def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys(
@@ -604,7 +634,7 @@ def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys
 
 @pytest.mark.parametrize(
     "manifest_name",
-    ["v1", "pool", "pilot", "postopt", "confirm", "v26_confirm"],
+    ["v1", "pool", "pilot", "postopt", "confirm", "v26_confirm", "v27_reserve"],
 )
 def test_trace2skill_split_manifest_rejects_noncanonical_bytes(
     manifest_name: str,
@@ -628,6 +658,7 @@ def test_trace2skill_split_manifest_rejects_noncanonical_bytes(
         ("postopt", "pool"),
         ("confirm", "pool"),
         ("v26_confirm", "pool"),
+        ("v27_reserve", "pool"),
     ],
 )
 def test_trace2skill_derivative_manifest_binds_parent_file_sha256(
@@ -673,7 +704,8 @@ def test_trace2skill_local_pool_requires_exact_regular_evidence_sibling(
 
 
 @pytest.mark.parametrize(
-    "manifest_name", ["pool", "pilot", "postopt", "confirm", "v26_confirm"]
+    "manifest_name",
+    ["pool", "pilot", "postopt", "confirm", "v26_confirm", "v27_reserve"],
 )
 @pytest.mark.parametrize("parent_path", ["../parent.json", "/tmp/parent.json"])
 def test_trace2skill_derivative_manifest_rejects_non_sibling_parent_path(
@@ -694,7 +726,8 @@ def test_trace2skill_derivative_manifest_rejects_non_sibling_parent_path(
 
 
 @pytest.mark.parametrize(
-    "manifest_name", ["pool", "pilot", "postopt", "confirm", "v26_confirm"]
+    "manifest_name",
+    ["pool", "pilot", "postopt", "confirm", "v26_confirm", "v27_reserve"],
 )
 def test_trace2skill_derivative_manifest_rejects_tampered_parent_hash_field(
     manifest_name: str,
@@ -1253,6 +1286,137 @@ def test_trace2skill_v26_confirmation_rejects_self_consistent_tampering(
     with pytest.raises(ValueError, match="anchors|prior"):
         benchmark_module.verify_trace2skill_derivative_manifest(
             dataset, copies["v26_confirm"]
+        )
+
+
+def test_trace2skill_v27_reserve_exhausts_parent_ordered_fresh_difference() -> None:
+    _require_pinned_derivative_manifests()
+    pool = _load_derivative_manifest(DERIVATIVE_POOL_MANIFEST)
+    v27_reserve = _load_derivative_manifest(DERIVATIVE_V27_RESERVE_MANIFEST)
+    prior_manifests = [
+        _load_derivative_manifest(path)
+        for path in (
+            DERIVATIVE_PILOT_MANIFEST,
+            DERIVATIVE_POSTOPT_MANIFEST,
+            DERIVATIVE_CONFIRM_MANIFEST,
+            DERIVATIVE_V26_CONFIRM_MANIFEST,
+        )
+    ]
+    prior_sets = [set(manifest["task_ids"]) for manifest in prior_manifests]
+    prior_ids = set().union(*prior_sets)
+    expected = [task_id for task_id in pool["task_ids"] if task_id not in prior_ids]
+
+    assert all(len(cohort) == 16 for cohort in prior_sets)
+    assert sum(map(len, prior_sets)) == len(prior_ids) == 64
+    assert len(expected) == 79
+    assert prior_manifests[-1]["remaining_reserve"]["task_count"] == len(expected)
+    assert prior_manifests[-1]["remaining_reserve"]["task_ids_sha256"] == (
+        _ordered_ids_sha256(expected)
+    )
+    assert v27_reserve["task_ids"] == expected
+    assert v27_reserve["task_ids"] == list(
+        benchmark_module.TRACE2SKILL_V27_RESERVE_TASK_IDS
+    )
+    assert v27_reserve["candidate_pool"] == {
+        "ordering": "parent_manifest_order_minus_all_four_prior_frozen_cohorts",
+        "task_count": 79,
+        "task_ids_sha256": _ordered_ids_sha256(expected),
+    }
+    assert v27_reserve["selection"] == {
+        "ordering": "parent_manifest_order",
+        "task_count": 79,
+        "task_ids_sha256": _ordered_ids_sha256(expected),
+    }
+    assert v27_reserve["remaining_reserve"] == {
+        "ordering": "parent_manifest_order_minus_all_five_frozen_cohorts",
+        "task_count": 0,
+        "task_ids_sha256": hashlib.sha256(b"").hexdigest(),
+    }
+    assert not prior_ids & set(v27_reserve["task_ids"])
+    assert prior_ids | set(v27_reserve["task_ids"]) == set(pool["task_ids"])
+    assert hashlib.sha256(DERIVATIVE_V27_RESERVE_MANIFEST.read_bytes()).hexdigest() == (
+        benchmark_module.TRACE2SKILL_V27_RESERVE_MANIFEST_SHA256
+    )
+
+
+@pytest.mark.parametrize("prior_name", ["pilot", "postopt", "confirm", "v26_confirm"])
+@pytest.mark.parametrize("failure_mode", ["missing", "tampered", "symlink"])
+def test_trace2skill_v27_reserve_requires_all_prior_cohort_siblings(
+    tmp_path: Path,
+    prior_name: str,
+    failure_mode: str,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    sibling = copies[prior_name]
+    if failure_mode == "missing":
+        sibling.unlink()
+    elif failure_mode == "tampered":
+        sibling.write_bytes(sibling.read_bytes() + b"\n")
+    else:
+        outside = tmp_path / f"outside-{sibling.name}"
+        shutil.copy2(sibling, outside)
+        sibling.unlink()
+        try:
+            sibling.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(ValueError, match="prior|checksum"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies["v27_reserve"]
+        )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "membership",
+        "order",
+        "candidate",
+        "selection",
+        "remaining",
+        "prior",
+        "derivation",
+    ],
+)
+def test_trace2skill_v27_reserve_rejects_self_consistent_tampering(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    frozen = _load_derivative_manifest(copies["v27_reserve"])
+    if target == "membership":
+        frozen["task_ids"][0] = _load_derivative_manifest(copies["pilot"])[
+            "task_ids"
+        ][0]
+        task_hash = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["task_ids_sha256"] = task_hash
+        frozen["candidate_pool"]["task_ids_sha256"] = task_hash
+        frozen["selection"]["task_ids_sha256"] = task_hash
+    elif target == "order":
+        frozen["task_ids"][:2] = reversed(frozen["task_ids"][:2])
+        task_hash = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["task_ids_sha256"] = task_hash
+        frozen["candidate_pool"]["task_ids_sha256"] = task_hash
+        frozen["selection"]["task_ids_sha256"] = task_hash
+    elif target == "candidate":
+        frozen["candidate_pool"]["task_count"] -= 1
+    elif target == "selection":
+        frozen["selection"]["task_count"] -= 1
+    elif target == "remaining":
+        frozen["remaining_reserve"]["task_count"] = 1
+        frozen["remaining_reserve"]["task_ids_sha256"] = "0" * 64
+    elif target == "prior":
+        frozen["prior_quarantined_cohorts"].reverse()
+    else:
+        frozen["derivation"]["selection_count"] -= 1
+    _write_derivative_manifest(copies["v27_reserve"], frozen)
+
+    with pytest.raises(ValueError, match="anchors|prior"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies["v27_reserve"]
         )
 
 

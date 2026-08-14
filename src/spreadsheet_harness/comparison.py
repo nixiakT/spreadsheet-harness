@@ -109,8 +109,19 @@ V25_RUN_SPEC_SOURCE_CONTRACT = {
     "sha256": "3ce79390a288a039fd411e0f77f81c879a83f653a242f85ed305da64c159ad0b",
     "file_count": 21,
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v26"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 15
+V26_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v26"
+V26_COMPARISON_MANIFEST_SCHEMA_VERSION = 15
+V26_RUN_SPEC_SOURCE_CONTRACT = {
+    "schema_version": 1,
+    "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
+    "sha256": "10ead91dc5e40b5f065b09e2c0b132342350cc7afa6edd3d8d38d2edc6f4a1d3",
+    "file_count": 21,
+}
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v27"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 16
+_V26_RUNTIME_PROTOCOL_VERSIONS = frozenset(
+    {V26_COMPARISON_PROTOCOL_VERSION, COMPARISON_PROTOCOL_VERSION}
+)
 PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
 PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
 PILOT_RUN_SPEC_FILENAME = "qwen35-trace2skill-local-pilot16-run-spec-v1.json"
@@ -165,7 +176,7 @@ V25_COMPARISON_CONFIGURATION_POLICIES = {
         "workbook_unchanged",
     ],
 }
-COMPARISON_CONFIGURATION_POLICIES = {
+V26_COMPARISON_CONFIGURATION_POLICIES = {
     **V25_COMPARISON_CONFIGURATION_POLICIES,
     "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
     "terminal_submission_policy": "empty-ack-harness-final-text-v1",
@@ -174,6 +185,8 @@ COMPARISON_CONFIGURATION_POLICIES = {
     "deterministic_profile_policy": "representative-evidence-12k-v1",
     "formula_verification_skill_policy": "trajectory-local-transfer-gate-v1",
 }
+# v27 changes experiment identity only; its runtime policies remain frozen to v26.
+COMPARISON_CONFIGURATION_POLICIES = dict(V26_COMPARISON_CONFIGURATION_POLICIES)
 
 
 @dataclass(frozen=True)
@@ -240,6 +253,18 @@ RUN_SPEC_ANCHORS = (
         schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
         phase="v26_post_optimization_confirmation",
         split_manifest_id="qwen35-trace2skill-local-v26-confirm16-v1",
+        comparison_protocol_version=V26_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
+    ),
+    RunSpecAnchor(
+        run_spec_id="qwen36-local-v27-reserve79-eval-v1-bare-ours-seed41",
+        filename="qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json",
+        # Normalized out of the executable-source hash to avoid a hash cycle.
+        sha256="748fd0458e9b2c20adf5161fc9471e4f29421faecd5b4e02bdfa6b32b9342371",
+        schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
+        phase="v27_reserve79_evaluation",
+        split_manifest_id="qwen35-trace2skill-local-v27-reserve79-v1",
         comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
         comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
         launchable=True,
@@ -626,6 +651,8 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
     protocol_version = manifest.get("comparison_protocol_version")
     if protocol_version == V25_COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = dict(V25_RUN_SPEC_SOURCE_CONTRACT)
+    elif protocol_version == V26_COMPARISON_PROTOCOL_VERSION:
+        contract["source_contract"] = dict(V26_RUN_SPEC_SOURCE_CONTRACT)
     elif protocol_version == COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = _run_spec_source_fingerprint()
     return contract
@@ -649,7 +676,7 @@ def _stage_allowed_tools_policy(
             else {
                 "solve": (
                     sorted(OURS_TOOLS)
-                    if protocol_version == COMPARISON_PROTOCOL_VERSION
+                    if protocol_version in _V26_RUNTIME_PROTOCOL_VERSIONS
                     else "all"
                 )
             }
@@ -681,7 +708,7 @@ def _allowed_observed_terminals_policy(
                         if protocol_version
                         in {
                             V25_COMPARISON_PROTOCOL_VERSION,
-                            COMPARISON_PROTOCOL_VERSION,
+                            *_V26_RUNTIME_PROTOCOL_VERSIONS,
                         }
                         else []
                     ),
@@ -691,13 +718,13 @@ def _allowed_observed_terminals_policy(
                     TERMINAL_TOOL_NAME,
                     *(
                         [ASSISTANT_TEXT_TERMINAL]
-                        if protocol_version != COMPARISON_PROTOCOL_VERSION
+                        if protocol_version not in _V26_RUNTIME_PROTOCOL_VERSIONS
                         else []
                     ),
                     *(
                         [HISTORICAL_FINAL_RECOVERY_TERMINAL]
                         if stage == "solve"
-                        and protocol_version != COMPARISON_PROTOCOL_VERSION
+                        and protocol_version not in _V26_RUNTIME_PROTOCOL_VERSIONS
                         and (
                             protocol_version != LEGACY_COMPARISON_PROTOCOL_VERSION
                             or arm == "ours"
@@ -706,7 +733,7 @@ def _allowed_observed_terminals_policy(
                     ),
                     *(
                         [TERMINAL_SUBMISSION_TRUNCATED_OBSERVED]
-                        if protocol_version == COMPARISON_PROTOCOL_VERSION
+                        if protocol_version in _V26_RUNTIME_PROTOCOL_VERSIONS
                         else []
                     ),
                     *(
@@ -714,7 +741,7 @@ def _allowed_observed_terminals_policy(
                         if protocol_version
                         in {
                             V25_COMPARISON_PROTOCOL_VERSION,
-                            COMPARISON_PROTOCOL_VERSION,
+                            *_V26_RUNTIME_PROTOCOL_VERSIONS,
                         }
                         else []
                     ),

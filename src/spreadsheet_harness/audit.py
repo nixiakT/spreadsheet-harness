@@ -42,6 +42,9 @@ from .comparison import (
     V25_COMPARISON_CONFIGURATION_POLICIES,
     V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V25_COMPARISON_PROTOCOL_VERSION,
+    V26_COMPARISON_CONFIGURATION_POLICIES,
+    V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V26_COMPARISON_PROTOCOL_VERSION,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
@@ -107,9 +110,9 @@ _V25_AUDIT_CONTRACT = _AuditProtocolContract(
     require_exact_agent_evidence=True,
 )
 _V26_AUDIT_CONTRACT = _AuditProtocolContract(
-    protocol_version=COMPARISON_PROTOCOL_VERSION,
-    manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
-    configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    protocol_version=V26_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V26_COMPARISON_CONFIGURATION_POLICIES,
     allowed_model_failure_reasons=frozenset(
         {
             "budget_exhausted",
@@ -119,6 +122,19 @@ _V26_AUDIT_CONTRACT = _AuditProtocolContract(
             "workbook_unchanged",
         }
     ),
+    require_v24_outcome_fields=True,
+    strict_current_source=False,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
+    require_truncated_terminal_evidence=True,
+    require_accepted_terminal_evidence=True,
+)
+_V27_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=_V26_AUDIT_CONTRACT.allowed_model_failure_reasons,
     require_v24_outcome_fields=True,
     strict_current_source=True,
     allow_budget_exhaustion_evidence=True,
@@ -138,6 +154,11 @@ def _select_audit_contract(
         manifest.get("comparison_protocol_version"),
         manifest.get("schema_version"),
     )
+    if identity == (
+        _V27_AUDIT_CONTRACT.protocol_version,
+        _V27_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V27_AUDIT_CONTRACT
     if identity == (
         _V26_AUDIT_CONTRACT.protocol_version,
         _V26_AUDIT_CONTRACT.manifest_schema_version,
@@ -166,6 +187,7 @@ def _select_audit_contract(
         _V24_AUDIT_CONTRACT.manifest_schema_version,
         _V25_AUDIT_CONTRACT.manifest_schema_version,
         _V26_AUDIT_CONTRACT.manifest_schema_version,
+        _V27_AUDIT_CONTRACT.manifest_schema_version,
     }:
         _add_reason(reasons, "comparison_manifest_schema_mismatch")
     if manifest.get("comparison_protocol_version") not in {
@@ -173,6 +195,7 @@ def _select_audit_contract(
         _V24_AUDIT_CONTRACT.protocol_version,
         _V25_AUDIT_CONTRACT.protocol_version,
         _V26_AUDIT_CONTRACT.protocol_version,
+        _V27_AUDIT_CONTRACT.protocol_version,
     }:
         _add_reason(reasons, "comparison_manifest_protocol_mismatch")
     return None

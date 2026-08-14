@@ -27,6 +27,9 @@ from spreadsheet_harness.comparison import (
     V25_COMPARISON_CONFIGURATION_POLICIES,
     V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V25_COMPARISON_PROTOCOL_VERSION,
+    V26_COMPARISON_CONFIGURATION_POLICIES,
+    V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V26_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     _allowed_observed_terminals_policy,
     _stage_allowed_tools_policy,
@@ -1994,7 +1997,7 @@ def test_audit_rejects_manifest_continuation_repository_source_mismatch(
     assert "continuation_source_invalid" in summary["reasons"]
 
 
-def test_audit_rejects_registered_v26_manifest_not_bound_to_current_git(
+def test_audit_rejects_registered_v27_manifest_not_bound_to_current_git(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -2002,7 +2005,7 @@ def test_audit_rejects_registered_v26_manifest_not_bound_to_current_git(
     manifest_path = results / "comparison-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["split_provenance"] = {
-        "manifest_id": "qwen35-trace2skill-local-v26-confirm16-v1"
+        "manifest_id": "qwen35-trace2skill-local-v27-reserve79-v1"
     }
     manifest["repository_source"] = _continuation_source(results)[
         "repository_source"
@@ -2382,7 +2385,7 @@ def test_audit_requires_frozen_manifest_provenance(
     assert any(expected_fragment in reason for reason in summary["reasons"])
 
 
-def test_v26_audit_requires_manifest_source_to_match_active_checkout(
+def test_v27_audit_requires_manifest_source_to_match_active_checkout(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)
@@ -2404,6 +2407,39 @@ def test_v26_audit_requires_manifest_source_to_match_active_checkout(
 
     assert summary["audit_valid"] is False
     assert "comparison_manifest_source_checkout_mismatch" in summary["reasons"]
+
+
+def test_v26_audit_accepts_historical_source_fingerprint(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    path = results / "comparison-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V26_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V26_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V26_COMPARISON_CONFIGURATION_POLICIES)
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
+        manifest["stage_turn_caps"],
+        protocol_version=V26_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["stage_allowed_tools"] = _stage_allowed_tools_policy(
+        tuple(manifest["arms"]),
+        protocol_version=V26_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["harness_source"]["files"][0]["sha256"] = "0" * 64
+    combined = hashlib.sha256()
+    for entry in manifest["harness_source"]["files"]:
+        combined.update(entry["path"].encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(entry["sha256"].encode("ascii"))
+        combined.update(b"\n")
+    manifest["harness_source"]["sha256"] = combined.hexdigest()
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_protocol_version"] = V26_COMPARISON_PROTOCOL_VERSION
+    row["comparison_manifest_sha256"] = _sha256(path)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
 
 
 def test_audit_rejects_tampered_stored_passed(tmp_path: Path) -> None:

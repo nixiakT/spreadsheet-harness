@@ -25,12 +25,16 @@ from spreadsheet_harness.comparison import (
     V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V25_COMPARISON_PROTOCOL_VERSION,
     V25_RUN_SPEC_SOURCE_CONTRACT,
+    V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V26_COMPARISON_PROTOCOL_VERSION,
+    V26_RUN_SPEC_SOURCE_CONTRACT,
     ComparisonBenchmarkRunner,
     RunSpecAnchor,
     _allowed_observed_terminals_policy,
     _arm_order,
     _balanced_arm_orders,
     _stage_allowed_tools_policy,
+    comparison_execution_contract,
     comparison_summary,
     load_pilot_run_spec,
     manifest_execution_contract,
@@ -124,9 +128,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 15
-    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 15
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v26"
+    assert manifest["schema_version"] == 16
+    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 16
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v27"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -343,13 +347,19 @@ def test_historical_terminal_policies_retain_tool_stage_text_fallback(
     assert policy["paper"]["reconcile"][0] == "assistant_text"
 
 
-def test_v26_terminal_policy_requires_submit_for_tool_stages() -> None:
+@pytest.mark.parametrize(
+    "protocol_version",
+    [V26_COMPARISON_PROTOCOL_VERSION, COMPARISON_PROTOCOL_VERSION],
+)
+def test_v26_and_v27_terminal_policy_require_submit_for_tool_stages(
+    protocol_version: str,
+) -> None:
     policy = _allowed_observed_terminals_policy(
         {
             "bare": {"solve": 2},
             "paper": {"reconcile": 1, "solve": 2},
         },
-        protocol_version=COMPARISON_PROTOCOL_VERSION,
+        protocol_version=protocol_version,
     )
 
     assert policy["bare"]["solve"] == [
@@ -887,14 +897,21 @@ def test_v25_source_contract_remains_pinned_to_historical_source() -> None:
     )
 
 
-def test_v26_confirmation_run_spec_is_current_fresh_only() -> None:
+def test_v26_confirmation_run_spec_is_historical_and_read_only() -> None:
     path = Path(
         "benchmarks/protocols/"
         "qwen35-trace2skill-local-v26-confirm16-run-spec-v1.json"
     )
     document, provenance, _ = load_pilot_run_spec(path)
 
-    anchor = require_launchable_run_spec(provenance)
+    with pytest.raises(HarnessError, match="read-only"):
+        require_launchable_run_spec(provenance)
+
+    anchor = next(
+        candidate
+        for candidate in RUN_SPEC_ANCHORS
+        if candidate.run_spec_id == document["run_spec_id"]
+    )
 
     assert anchor == RunSpecAnchor(
         run_spec_id="qwen36-local-v26-confirm-eval16-v1-bare-ours-seed41",
@@ -903,13 +920,11 @@ def test_v26_confirmation_run_spec_is_current_fresh_only() -> None:
         schema_version=document["schema_version"],
         phase="v26_post_optimization_confirmation",
         split_manifest_id="qwen35-trace2skill-local-v26-confirm16-v1",
-        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
-        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
-        launchable=True,
+        comparison_protocol_version=V26_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
     )
-    assert document["execution"]["source_contract"] == (
-        benchmark_module._run_spec_source_fingerprint()
-    )
+    assert document["execution"]["source_contract"] == V26_RUN_SPEC_SOURCE_CONTRACT
     assert document["execution"]["resources"] == {
         "max_model_calls": 12,
         "max_turns_per_arm": 12,
@@ -921,35 +936,93 @@ def test_v26_confirmation_run_spec_is_current_fresh_only() -> None:
         "circuit_breaker_threshold": 3,
         "arm_order_seed": 20260812,
     }
+    with pytest.raises(HarnessError, match="read-only"):
+        require_launchable_run_spec(provenance, resume=True)
+
+
+def test_v26_source_contract_remains_pinned_to_historical_source() -> None:
+    historical_manifest = {
+        "schema_version": V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "comparison_protocol_version": V26_COMPARISON_PROTOCOL_VERSION,
+        "configuration": {},
+    }
+
+    assert manifest_execution_contract(historical_manifest)["source_contract"] == (
+        V26_RUN_SPEC_SOURCE_CONTRACT
+    )
+    assert V26_RUN_SPEC_SOURCE_CONTRACT != (
+        benchmark_module._run_spec_source_fingerprint()
+    )
+
+
+def test_v27_reserve79_run_spec_anchor_is_current_fresh_only() -> None:
+    path = Path(
+        "benchmarks/protocols/"
+        "qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json"
+    )
+    document, provenance, _ = load_pilot_run_spec(path)
+    anchor = require_launchable_run_spec(provenance)
+
+    assert anchor == RunSpecAnchor(
+        run_spec_id="qwen36-local-v27-reserve79-eval-v1-bare-ours-seed41",
+        filename=path.name,
+        sha256="748fd0458e9b2c20adf5161fc9471e4f29421faecd5b4e02bdfa6b32b9342371",
+        schema_version=document["schema_version"],
+        phase="v27_reserve79_evaluation",
+        split_manifest_id="qwen35-trace2skill-local-v27-reserve79-v1",
+        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=True,
+    )
+    assert document["execution"]["source_contract"] == (
+        benchmark_module._run_spec_source_fingerprint()
+    )
     with pytest.raises(HarnessError, match="fresh-only"):
         require_launchable_run_spec(provenance, resume=True)
 
 
-def test_v26_run_spec_matches_resolved_execution_contract(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    runner, tasks = _pilot_run_spec_runner(
-        tmp_path,
-        monkeypatch,
-        spec_filename="qwen35-trace2skill-local-v26-confirm16-run-spec-v1.json",
+def test_v27_reserve79_run_spec_matches_resolved_execution_contract() -> None:
+    document, _, _ = load_pilot_run_spec(
+        Path(
+            "benchmarks/protocols/"
+            "qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json"
+        )
+    )
+    execution = document["execution"]
+    provider = execution["provider"]
+    generation = provider["generation"]
+    resources = execution["resources"]
+    config = ProviderConfig(
+        provider["base_url"],
+        "not-a-real-key",
+        provider["model"],
+        reasoning_effort=provider["reasoning_effort"],
+        requested_reasoning_effort=provider["requested_reasoning_effort"],
+        timeout_seconds=provider["request_timeout_seconds"],
+        max_retries=provider["request_retries"],
+        store_responses=provider["store_responses"],
+        request_interval_seconds=provider["request_interval_seconds"],
+        litellm_timeout_seconds=provider["litellm_timeout_seconds"],
+        api_protocol=provider["api_protocol"],
+        **generation,
     )
 
-    manifest = runner._manifest(tasks)
-
-    assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
-    assert manifest["schema_version"] == COMPARISON_MANIFEST_SCHEMA_VERSION
-    assert manifest["task_ids"] == list(
-        benchmark_module.TRACE2SKILL_V26_CONFIRM_TASK_IDS
+    actual = comparison_execution_contract(
+        config,
+        arms=tuple(execution["arms"]),
+        max_model_calls=resources["max_model_calls"],
+        max_turns_per_arm=resources["max_turns_per_arm"],
+        max_total_tokens=resources["max_total_tokens"],
+        max_output_tokens=resources["max_output_tokens_per_call"],
+        task_timeout_seconds=resources["task_timeout_seconds"],
+        recalculate=resources["recalculate"],
+        arm_order_seed=resources["arm_order_seed"],
+        circuit_breaker_threshold=resources["circuit_breaker_threshold"],
+        split_provenance=execution["split_provenance"],
+        skills=SkillRegistry([Path("skills")]).freeze(),
     )
-    assert manifest["stage_allowed_tools"]["ours"]["solve"] == [
-        "code_interpreter",
-        "fill_formula",
-        "inspect_range",
-        "recalculate_and_read",
-        "render_workbook",
-        "view_image",
-    ]
+
+    assert actual == execution
 
 
 def test_v25_preflight_rejects_historical_run_before_isolation(

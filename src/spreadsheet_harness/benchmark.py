@@ -240,12 +240,109 @@ TRACE2SKILL_V26_CONFIRM_FIRST_EXCLUDED_RANK = (
     "32789",
     "5b6dd2234d3cb84ba55fd9900a170e275b6428fd7ccccc1d6dc9e68fec02ad73",
 )
+TRACE2SKILL_V27_RESERVE_MANIFEST_ID = "qwen35-trace2skill-local-v27-reserve79-v1"
+TRACE2SKILL_V27_RESERVE_MANIFEST_FILENAME = (
+    f"{TRACE2SKILL_V27_RESERVE_MANIFEST_ID}.json"
+)
+TRACE2SKILL_V27_RESERVE_MANIFEST_SHA256 = (
+    "28e7f5ecc4549077a8c966d2704c46fca6bc36dbad53cb2692acaf51e536105b"
+)
+TRACE2SKILL_V27_RESERVE_TASK_IDS = (
+    "32612",
+    "32789",
+    "32902",
+    "35742",
+    "36097",
+    "36764",
+    "37086",
+    "37378",
+    "40757",
+    "40892",
+    "41265",
+    "41348",
+    "41420",
+    "41589",
+    "41978",
+    "42181",
+    "42216",
+    "42354",
+    "42515",
+    "42930",
+    "43589",
+    "44296",
+    "45738",
+    "46897",
+    "48527",
+    "49857",
+    "49945",
+    "50250",
+    "50486",
+    "50811",
+    "50971",
+    "51249",
+    "51680",
+    "52220",
+    "52233",
+    "52305",
+    "52964",
+    "53117",
+    "53161",
+    "53647",
+    "54274",
+    "54638",
+    "54667",
+    "54925",
+    "55060",
+    "55085",
+    "55427",
+    "55965",
+    "55979",
+    "56378",
+    "56920",
+    "56921",
+    "57113",
+    "57590",
+    "57743",
+    "58484",
+    "58701",
+    "59595",
+    "43213",
+    "44017",
+    "44913",
+    "45707",
+    "45937",
+    "46646",
+    "47827",
+    "55468",
+    "55708",
+    "56786",
+    "56953",
+    "57354",
+    "58109",
+    "58499",
+    "58687",
+    "58942",
+    "59129",
+    "59224",
+    "59734",
+    "59794",
+    "59902",
+)
+TRACE2SKILL_V27_RESERVE_TASK_COUNT = 79
+TRACE2SKILL_V27_RESERVE_TASK_IDS_SHA256 = (
+    "40e4491074477ddb2bd11a0e4dc7e5513447b1e1efb90b2a169b4026fc839e7b"
+)
+TRACE2SKILL_V27_REMAINING_TASK_COUNT = 0
+TRACE2SKILL_V27_REMAINING_TASK_IDS_SHA256 = (
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
 
 PROTECTED_EVALUATION_COHORTS: dict[str, tuple[str, ...]] = {
     TRACE2SKILL_PILOT_MANIFEST_ID: TRACE2SKILL_PILOT_TASK_IDS,
     TRACE2SKILL_POSTOPT_MANIFEST_ID: TRACE2SKILL_POSTOPT_TASK_IDS,
     TRACE2SKILL_CONFIRM_MANIFEST_ID: TRACE2SKILL_CONFIRM_TASK_IDS,
     TRACE2SKILL_V26_CONFIRM_MANIFEST_ID: TRACE2SKILL_V26_CONFIRM_TASK_IDS,
+    TRACE2SKILL_V27_RESERVE_MANIFEST_ID: TRACE2SKILL_V27_RESERVE_TASK_IDS,
 }
 
 
@@ -1372,6 +1469,166 @@ def trace2skill_local_v26_confirmation_manifest(
     }
 
 
+def trace2skill_local_v27_reserve_manifest(
+    dataset_root: str | Path,
+) -> dict[str, Any]:
+    """Select the entire fresh reserve outside all four frozen 16-task cohorts."""
+
+    pool = trace2skill_local_unattempted_manifest(dataset_root)
+    pool_ids = [str(task_id) for task_id in pool["task_ids"]]
+    if (
+        TRACE2SKILL_V27_RESERVE_TASK_COUNT
+        != TRACE2SKILL_V26_CONFIRM_REMAINING_TASK_COUNT
+        or TRACE2SKILL_V27_RESERVE_TASK_IDS_SHA256
+        != TRACE2SKILL_V26_CONFIRM_REMAINING_TASK_IDS_SHA256
+    ):
+        raise ValueError("Frozen v27 selection no longer matches the v26 remaining reserve")
+    prior_cohorts = (
+        (
+            "pilot",
+            list(TRACE2SKILL_PILOT_TASK_IDS),
+            TRACE2SKILL_PILOT_TASK_IDS_SHA256,
+        ),
+        (
+            "post-optimization evaluation",
+            list(TRACE2SKILL_POSTOPT_TASK_IDS),
+            TRACE2SKILL_POSTOPT_TASK_IDS_SHA256,
+        ),
+        (
+            "v25 confirmation",
+            list(TRACE2SKILL_CONFIRM_TASK_IDS),
+            TRACE2SKILL_CONFIRM_TASK_IDS_SHA256,
+        ),
+        (
+            "v26 confirmation",
+            list(TRACE2SKILL_V26_CONFIRM_TASK_IDS),
+            TRACE2SKILL_V26_CONFIRM_TASK_IDS_SHA256,
+        ),
+    )
+    prior_ids: set[str] = set()
+    for label, cohort_ids, cohort_hash in prior_cohorts:
+        cohort_set = set(cohort_ids)
+        if cohort_ids != [task_id for task_id in pool_ids if task_id in cohort_set]:
+            raise ValueError(f"Frozen prior {label} is not an ordered subset of the local pool")
+        if _ordered_task_ids_sha256(cohort_ids) != cohort_hash:
+            raise ValueError(f"Frozen prior {label} task anchor hash changed")
+        if prior_ids & cohort_set:
+            raise ValueError("Frozen prior evaluation cohorts overlap")
+        prior_ids.update(cohort_set)
+
+    candidates = [task_id for task_id in pool_ids if task_id not in prior_ids]
+    if len(candidates) != TRACE2SKILL_V27_RESERVE_TASK_COUNT or (
+        _ordered_task_ids_sha256(candidates)
+        != TRACE2SKILL_V27_RESERVE_TASK_IDS_SHA256
+    ):
+        raise ValueError("Frozen v27 exhaustive candidate reserve changed")
+    if tuple(candidates) != TRACE2SKILL_V27_RESERVE_TASK_IDS:
+        raise ValueError("Frozen v27 exhaustive selection anchor changed")
+
+    selected_ids = list(TRACE2SKILL_V27_RESERVE_TASK_IDS)
+    if len(selected_ids) != TRACE2SKILL_V27_RESERVE_TASK_COUNT or (
+        _ordered_task_ids_sha256(selected_ids)
+        != TRACE2SKILL_V27_RESERVE_TASK_IDS_SHA256
+    ):
+        raise ValueError("Frozen v27 exhaustive task anchor changed")
+    if selected_ids != candidates:
+        raise ValueError("Frozen v27 selection must exhaust the candidate reserve")
+
+    selected_set = set(selected_ids)
+    remaining_ids = [
+        task_id
+        for task_id in pool_ids
+        if task_id not in prior_ids and task_id not in selected_set
+    ]
+    if len(remaining_ids) != TRACE2SKILL_V27_REMAINING_TASK_COUNT or (
+        _ordered_task_ids_sha256(remaining_ids)
+        != TRACE2SKILL_V27_REMAINING_TASK_IDS_SHA256
+    ):
+        raise ValueError("Frozen v27 remaining reserve must be empty")
+    if prior_ids & selected_set or prior_ids | selected_set != set(pool_ids):
+        raise ValueError("Frozen v27 cohorts must be disjoint and exhaust the local pool")
+
+    prior_references = (
+        (
+            TRACE2SKILL_PILOT_MANIFEST_FILENAME,
+            TRACE2SKILL_PILOT_MANIFEST_SHA256,
+            TRACE2SKILL_PILOT_TASK_IDS,
+            TRACE2SKILL_PILOT_TASK_IDS_SHA256,
+        ),
+        (
+            TRACE2SKILL_POSTOPT_MANIFEST_FILENAME,
+            TRACE2SKILL_POSTOPT_MANIFEST_SHA256,
+            TRACE2SKILL_POSTOPT_TASK_IDS,
+            TRACE2SKILL_POSTOPT_TASK_IDS_SHA256,
+        ),
+        (
+            TRACE2SKILL_CONFIRM_MANIFEST_FILENAME,
+            TRACE2SKILL_CONFIRM_MANIFEST_SHA256,
+            TRACE2SKILL_CONFIRM_TASK_IDS,
+            TRACE2SKILL_CONFIRM_TASK_IDS_SHA256,
+        ),
+        (
+            TRACE2SKILL_V26_CONFIRM_MANIFEST_FILENAME,
+            TRACE2SKILL_V26_CONFIRM_MANIFEST_SHA256,
+            TRACE2SKILL_V26_CONFIRM_TASK_IDS,
+            TRACE2SKILL_V26_CONFIRM_TASK_IDS_SHA256,
+        ),
+    )
+    return {
+        "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+        "manifest_id": TRACE2SKILL_V27_RESERVE_MANIFEST_ID,
+        "dataset": dict(pool["dataset"]),
+        "parent": {
+            "relative_path": TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME,
+            "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256,
+            "task_count": TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT,
+            "task_ids_sha256": TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256,
+        },
+        "prior_quarantined_cohorts": [
+            {
+                "relative_path": filename,
+                "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+                "manifest_sha256": manifest_hash,
+                "task_count": len(task_ids),
+                "task_ids_sha256": task_ids_hash,
+            }
+            for filename, manifest_hash, task_ids, task_ids_hash in prior_references
+        ],
+        "derivation": {
+            "operation": (
+                "exhaustive_ordered_parent_difference_after_exact_quarantine_exclusion"
+            ),
+            "purpose": "v27_exhaustive_fresh_reserve_evaluation",
+            "candidate_ordering": (
+                "parent_manifest_order_minus_all_four_prior_frozen_cohorts"
+            ),
+            "selection_rule": "select_every_remaining_candidate_exactly_once",
+            "selection_count": TRACE2SKILL_V27_RESERVE_TASK_COUNT,
+            "output_ordering": "parent_manifest_order",
+            "remaining_reserve_count": TRACE2SKILL_V27_REMAINING_TASK_COUNT,
+        },
+        "candidate_pool": {
+            "ordering": "parent_manifest_order_minus_all_four_prior_frozen_cohorts",
+            "task_count": len(candidates),
+            "task_ids_sha256": _ordered_task_ids_sha256(candidates),
+        },
+        "selection": {
+            "ordering": "parent_manifest_order",
+            "task_count": len(selected_ids),
+            "task_ids_sha256": _ordered_task_ids_sha256(selected_ids),
+        },
+        "remaining_reserve": {
+            "ordering": "parent_manifest_order_minus_all_five_frozen_cohorts",
+            "task_count": len(remaining_ids),
+            "task_ids_sha256": _ordered_task_ids_sha256(remaining_ids),
+        },
+        "task_ids": selected_ids,
+        "task_count": len(selected_ids),
+        "task_ids_sha256": _ordered_task_ids_sha256(selected_ids),
+    }
+
+
 def _resolve_derivative_sibling(
     path: Path, expected_filename: str, *, artifact_label: str
 ) -> Path:
@@ -1543,6 +1800,13 @@ def _verify_trace2skill_derivative_document(
         expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
         expected = trace2skill_local_v26_confirmation_manifest(dataset_root)
+    elif manifest_id == TRACE2SKILL_V27_RESERVE_MANIFEST_ID:
+        expected_parent_filename = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME
+        expected_parent_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
+        expected_parent_schema = TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
+        expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
+        expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
+        expected = trace2skill_local_v27_reserve_manifest(dataset_root)
     else:
         raise ValueError(f"Unsupported derivative split manifest_id: {manifest_id!r}")
     parent_reference = frozen.get("parent")
@@ -1589,6 +1853,7 @@ def _verify_trace2skill_derivative_document(
     if manifest_id in {
         TRACE2SKILL_CONFIRM_MANIFEST_ID,
         TRACE2SKILL_V26_CONFIRM_MANIFEST_ID,
+        TRACE2SKILL_V27_RESERVE_MANIFEST_ID,
     }:
         prior_references = frozen.get("prior_quarantined_cohorts")
         prior_anchors: tuple[tuple[str, str, int, str, str], ...] = (
@@ -1607,7 +1872,10 @@ def _verify_trace2skill_derivative_document(
                 "prior post-optimization evaluation",
             ),
         )
-        if manifest_id == TRACE2SKILL_V26_CONFIRM_MANIFEST_ID:
+        if manifest_id in {
+            TRACE2SKILL_V26_CONFIRM_MANIFEST_ID,
+            TRACE2SKILL_V27_RESERVE_MANIFEST_ID,
+        }:
             prior_anchors += (
                 (
                     TRACE2SKILL_CONFIRM_MANIFEST_FILENAME,
@@ -1615,6 +1883,16 @@ def _verify_trace2skill_derivative_document(
                     len(TRACE2SKILL_CONFIRM_TASK_IDS),
                     TRACE2SKILL_CONFIRM_TASK_IDS_SHA256,
                     "prior v25 confirmation",
+                ),
+            )
+        if manifest_id == TRACE2SKILL_V27_RESERVE_MANIFEST_ID:
+            prior_anchors += (
+                (
+                    TRACE2SKILL_V26_CONFIRM_MANIFEST_FILENAME,
+                    TRACE2SKILL_V26_CONFIRM_MANIFEST_SHA256,
+                    len(TRACE2SKILL_V26_CONFIRM_TASK_IDS),
+                    TRACE2SKILL_V26_CONFIRM_TASK_IDS_SHA256,
+                    "prior v26 confirmation",
                 ),
             )
         if not isinstance(prior_references, list) or len(prior_references) != len(
@@ -1687,6 +1965,11 @@ def _verify_trace2skill_derivative_document(
         and manifest_hash != TRACE2SKILL_V26_CONFIRM_MANIFEST_SHA256
     ):
         raise ValueError("Frozen v26 confirmation manifest checksum does not match its code anchor")
+    if (
+        manifest_id == TRACE2SKILL_V27_RESERVE_MANIFEST_ID
+        and manifest_hash != TRACE2SKILL_V27_RESERVE_MANIFEST_SHA256
+    ):
+        raise ValueError("Frozen v27 reserve manifest checksum does not match its code anchor")
     return {
         "valid": True,
         "manifest": str(path),
@@ -1773,6 +2056,13 @@ def _trace2skill_split_provenance_anchors() -> dict[str, dict[str, Any]]:
             "manifest_sha256": TRACE2SKILL_V26_CONFIRM_MANIFEST_SHA256,
             "task_count": len(TRACE2SKILL_V26_CONFIRM_TASK_IDS),
             "task_ids_sha256": TRACE2SKILL_V26_CONFIRM_TASK_IDS_SHA256,
+            "dataset_json_sha256": VERIFIED_DATASET_JSON_SHA256,
+        },
+        TRACE2SKILL_V27_RESERVE_MANIFEST_ID: {
+            "schema_version": TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION,
+            "manifest_sha256": TRACE2SKILL_V27_RESERVE_MANIFEST_SHA256,
+            "task_count": TRACE2SKILL_V27_RESERVE_TASK_COUNT,
+            "task_ids_sha256": TRACE2SKILL_V27_RESERVE_TASK_IDS_SHA256,
             "dataset_json_sha256": VERIFIED_DATASET_JSON_SHA256,
         },
     }
