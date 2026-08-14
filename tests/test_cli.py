@@ -522,11 +522,11 @@ def test_historical_v24_contract_is_parseable_but_current_runner_differs(
     )
 
     assert actual != document["execution"]
-    assert actual["comparison_protocol_version"] == "resource_matched_multi_arm_v25"
-    assert actual["comparison_manifest_schema_version"] == 14
+    assert actual["comparison_protocol_version"] == "resource_matched_multi_arm_v26"
+    assert actual["comparison_manifest_schema_version"] == 15
 
 
-def test_documented_v25_confirmation_command_matches_run_spec_contract(
+def test_documented_v25_confirmation_command_is_historical_and_read_only(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -622,8 +622,13 @@ def test_documented_v25_confirmation_command_matches_run_spec_contract(
         skills=skills,
     )
 
-    assert cli.require_launchable_run_spec(provenance) is not None
-    assert actual == document["execution"]
+    with pytest.raises(HarnessError, match="read-only"):
+        cli.require_launchable_run_spec(provenance)
+    assert actual != document["execution"]
+    assert document["execution"]["comparison_protocol_version"] == (
+        "resource_matched_multi_arm_v25"
+    )
+    assert document["execution"]["comparison_manifest_schema_version"] == 14
 
 
 def test_pilot_seal_calls_public_locked_runner_entrypoint(

@@ -41,16 +41,17 @@ class PreprocessError(RuntimeError):
 
 DETERMINISTIC_PROFILE_SCHEMA_VERSION = "deterministic-workbook-profile-v1"
 DETERMINISTIC_PROFILE_BOUNDS: dict[str, int] = {
-    "max_sheets": 12,
-    "max_cells_per_sheet": 512,
-    "max_regions_per_sheet": 4,
-    "max_header_rows": 3,
-    "max_columns_per_region": 10,
-    "max_sample_rows_per_region": 4,
-    "max_formula_clusters_per_sheet": 8,
-    "max_provenance_cells_per_claim": 4,
-    "max_scalar_chars": 128,
-    "max_rendered_chars": 20_000,
+    "max_sheets": 8,
+    "max_cells_per_sheet": 384,
+    "max_regions_per_sheet": 3,
+    "max_header_rows": 2,
+    "max_columns_per_region": 8,
+    "max_sample_rows_per_region": 3,
+    "max_number_formats_per_region": 6,
+    "max_formula_clusters_per_sheet": 6,
+    "max_provenance_cells_per_claim": 3,
+    "max_scalar_chars": 96,
+    "max_rendered_chars": 12_000,
 }
 
 _PROFILE_CELL_REFERENCE = re.compile(
@@ -255,6 +256,29 @@ def _style_summary(cell: Cell) -> dict[str, Any]:
     fill = cell.fill
     alignment = cell.alignment
     border = cell.border
+    fill_summary: dict[str, Any] = {
+        "type": fill.fill_type,
+        "foreground": _color_summary(getattr(fill, "fgColor", None)),
+        "background": _color_summary(getattr(fill, "bgColor", None)),
+    }
+    gradient_stops = list(getattr(fill, "stop", []) or [])
+    if gradient_stops:
+        selected_stops = gradient_stops[:4]
+        fill_summary["gradient"] = {
+            "degree": _json_value(getattr(fill, "degree", None)),
+            "edges": {
+                edge: _json_value(getattr(fill, edge, None))
+                for edge in ("left", "right", "top", "bottom")
+            },
+            "stops": [
+                {
+                    "position": _json_value(getattr(stop, "position", None)),
+                    "color": _color_summary(getattr(stop, "color", None)),
+                }
+                for stop in selected_stops
+            ],
+            "truncated": len(selected_stops) < len(gradient_stops),
+        }
     return {
         "style_id": int(cell.style_id),
         "number_format": cell.number_format,
@@ -266,11 +290,7 @@ def _style_summary(cell: Cell) -> dict[str, Any]:
             "underline": font.underline,
             "color": _color_summary(font.color),
         },
-        "fill": {
-            "type": fill.fill_type,
-            "foreground": _color_summary(fill.fgColor),
-            "background": _color_summary(fill.bgColor),
-        },
+        "fill": fill_summary,
         "alignment": {
             "horizontal": alignment.horizontal,
             "vertical": alignment.vertical,
@@ -589,6 +609,49 @@ def _bounded_profile_scalar(value: Any, *, max_chars: int) -> dict[str, Any]:
     }
 
 
+def _bounded_profile_text(value: Any, *, max_chars: int) -> tuple[str, bool]:
+    """Bound metadata text while retaining a deterministic collision-resistant marker."""
+
+    text = str(value)
+    if len(text) <= max_chars:
+        return text, False
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    suffix = f"...[chars={len(text)} sha256={digest}]"
+    if len(suffix) >= max_chars:
+        return suffix[-max_chars:], True
+    return text[: max_chars - len(suffix)] + suffix, True
+
+
+def _representative_profile_items(
+    items: Sequence[Any], *, maximum: int
+) -> list[Any]:
+    """Select deterministic boundary and interior examples within a hard cap."""
+
+    if len(items) <= maximum:
+        return list(items)
+    if maximum == 1:
+        return [items[0]]
+    indexes = [round(index * (len(items) - 1) / (maximum - 1)) for index in range(maximum)]
+    return [items[index] for index in indexes]
+
+
+def _profile_sample_cells(
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    max_columns: int,
+    max_rows: int,
+) -> list[Mapping[str, Any]]:
+    by_row: dict[int, list[Mapping[str, Any]]] = {}
+    for cell in cells:
+        by_row.setdefault(int(cell["row"]), []).append(cell)
+    selected_rows = _representative_profile_items(sorted(by_row), maximum=max_rows)
+    sample: list[Mapping[str, Any]] = []
+    for row_number in selected_rows:
+        row = sorted(by_row[row_number], key=lambda cell: int(cell["column"]))
+        sample.extend(_representative_profile_items(row, maximum=max_columns))
+    return sample
+
+
 def _profile_header_rows(cells: Sequence[Mapping[str, Any]], *, maximum: int) -> int:
     by_row: dict[int, list[Mapping[str, Any]]] = {}
     for cell in cells:
@@ -611,7 +674,11 @@ def _profile_header_rows(cells: Sequence[Mapping[str, Any]], *, maximum: int) ->
 
 
 def _profile_unit_hints(
-    cells: Sequence[Mapping[str, Any]], *, header_rows: int, maximum: int
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    header_rows: int,
+    maximum: int,
+    scalar_limit: int,
 ) -> list[dict[str, Any]]:
     if not cells:
         return []
@@ -643,15 +710,22 @@ def _profile_unit_hints(
         key = (str(format_unit), number_format)
         if format_unit is not None and key not in seen:
             seen.add(key)
+            bounded_format, format_truncated = _bounded_profile_text(
+                number_format,
+                max_chars=scalar_limit,
+            )
+            format_provenance: dict[str, Any] = {
+                "cell": cell["coordinate"],
+                "number_format": bounded_format,
+                "method": "number-format",
+            }
+            if format_truncated:
+                format_provenance["number_format_truncated"] = True
             hints.append(
                 {
                     "unit": format_unit,
                     "confidence": "format-derived",
-                    "provenance": {
-                        "cell": cell["coordinate"],
-                        "number_format": number_format,
-                        "method": "number-format",
-                    },
+                    "provenance": format_provenance,
                 }
             )
         if len(hints) >= maximum:
@@ -692,7 +766,11 @@ def _contiguous_profile_regions(
 
 
 def _profile_formula_clusters(
-    cells: Sequence[Mapping[str, Any]], *, maximum: int, provenance_limit: int
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    maximum: int,
+    provenance_limit: int,
+    scalar_limit: int,
 ) -> tuple[list[dict[str, Any]], bool]:
     clusters: dict[tuple[str, ...], list[Mapping[str, Any]]] = {}
     for cell in cells:
@@ -710,11 +788,22 @@ def _profile_formula_clusters(
     result: list[dict[str, Any]] = []
     for references, members in ordered[:maximum]:
         coordinates = [str(cell["coordinate"]) for cell in members]
+        formula_samples: list[dict[str, Any]] = []
+        for cell in _representative_profile_items(members, maximum=provenance_limit):
+            bounded = _bounded_profile_scalar(cell["formula"], max_chars=scalar_limit)
+            formula_samples.append(
+                {
+                    "cell": cell["coordinate"],
+                    "formula": bounded.pop("value"),
+                    **bounded,
+                }
+            )
         result.append(
             {
                 "cells": coordinates[:provenance_limit],
                 "cell_count": len(coordinates),
                 "references": list(references[:provenance_limit]),
+                "sample_formulas": formula_samples,
                 "confidence": "high" if references else "medium",
                 "provenance": {
                     "method": "openpyxl-formula-token-pattern",
@@ -751,11 +840,27 @@ def _profile_sheet(
             for cell in members
             if cell.get("number_format") not in {None, "", "General"}
         )
+        selected_number_formats = sorted(
+            number_formats.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[: bounds["max_number_formats_per_region"]]
+        bounded_number_formats: Counter[str] = Counter()
+        number_format_values_truncated = False
+        for number_format, count in selected_number_formats:
+            bounded_format, was_truncated = _bounded_profile_text(
+                number_format,
+                max_chars=bounds["max_scalar_chars"],
+            )
+            bounded_number_formats[bounded_format] += count
+            number_format_values_truncated = (
+                number_format_values_truncated or was_truncated
+            )
         sample: list[dict[str, Any]] = []
-        sample_limit = (
-            bounds["max_columns_per_region"] * bounds["max_sample_rows_per_region"]
-        )
-        for cell in members[:sample_limit]:
+        for cell in _profile_sample_cells(
+            members,
+            max_columns=bounds["max_columns_per_region"],
+            max_rows=bounds["max_sample_rows_per_region"],
+        ):
             bounded = _bounded_profile_scalar(
                 cell.get("formula") if cell.get("formula") is not None else cell.get("value"),
                 max_chars=bounds["max_scalar_chars"],
@@ -767,6 +872,10 @@ def _profile_sheet(
                     **bounded,
                 }
             )
+        provenance_sample = _representative_profile_items(
+            sample,
+            maximum=bounds["max_provenance_cells_per_claim"],
+        )
         regions.append(
             {
                 "range": _bounds_to_ref((min_column, min_row, max_column, max_row)),
@@ -775,11 +884,16 @@ def _profile_sheet(
                 "row_count": max_row - min_row + 1,
                 "column_count": max_column - min_column + 1,
                 "type_counts": dict(sorted(kind_counts.items())),
-                "number_formats": dict(sorted(number_formats.items())),
+                "number_formats": dict(sorted(bounded_number_formats.items())),
+                "number_formats_truncated": (
+                    len(selected_number_formats) < len(number_formats)
+                    or number_format_values_truncated
+                ),
                 "unit_hints": _profile_unit_hints(
                     members,
                     header_rows=header_rows,
                     maximum=bounds["max_provenance_cells_per_claim"],
+                    scalar_limit=bounds["max_scalar_chars"],
                 ),
                 "sample": sample,
                 "confidence": "medium" if header_rows else "high",
@@ -787,9 +901,7 @@ def _profile_sheet(
                     "method": "deterministic-four-neighbor-components",
                     "sheet": sheet["name"],
                     "range": _bounds_to_ref((min_column, min_row, max_column, max_row)),
-                    "sample_cells": [item["cell"] for item in sample][
-                        : bounds["max_provenance_cells_per_claim"]
-                    ],
+                    "sample_cells": [item["cell"] for item in provenance_sample],
                 },
             }
         )
@@ -797,6 +909,7 @@ def _profile_sheet(
         cells,
         maximum=bounds["max_formula_clusters_per_sheet"],
         provenance_limit=bounds["max_provenance_cells_per_claim"],
+        scalar_limit=bounds["max_scalar_chars"],
     )
     return {
         "name": sheet["name"],
@@ -898,8 +1011,17 @@ def render_deterministic_profile(profile: Mapping[str, Any]) -> str:
     """Serialize profile evidence as bounded JSON with an auditable truncation marker."""
 
     maximum = int(profile["bounds"]["max_rendered_chars"])
-    rendered = json.dumps(profile, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    rendered = rendered.replace("<", "\\u003c").replace(">", "\\u003e")
+
+    def render(value: Mapping[str, Any]) -> str:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return serialized.replace("<", "\\u003c").replace(">", "\\u003e")
+
+    rendered = render(profile)
     if len(rendered) <= maximum:
         return rendered
     digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
@@ -909,16 +1031,89 @@ def render_deterministic_profile(profile: Mapping[str, Any]) -> str:
             {key: value for key, value in region.items() if key != "sample"}
             for region in sheet.get("regions", [])
         ]
+        for cluster in sheet.get("formula_clusters", []):
+            cluster["sample_formulas"] = cluster.get("sample_formulas", [])[:1]
+        sheet["truncation"]["rendered_samples"] = True
     compact["truncation"]["rendered"] = True
     compact["truncation"]["unabridged_chars"] = len(rendered)
     compact["truncation"]["unabridged_sha256"] = digest
-    rendered = json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    rendered = rendered.replace("<", "\\u003c").replace(">", "\\u003e")
-    if len(rendered) > maximum:
-        raise PreprocessError(
-            f"Deterministic profile metadata exceeds max_rendered_chars={maximum}"
-        )
-    return rendered
+    rendered = render(compact)
+    if len(rendered) <= maximum:
+        return rendered
+
+    for region_limit, formula_limit in ((2, 2), (2, 1), (1, 1)):
+        for sheet in compact.get("sheets", []):
+            regions = sheet.get("regions", [])
+            clusters = sheet.get("formula_clusters", [])
+            if len(regions) > region_limit:
+                sheet["truncation"]["rendered_regions"] = True
+                sheet["regions"] = regions[:region_limit]
+            if len(clusters) > formula_limit:
+                sheet["truncation"]["rendered_formula_clusters"] = True
+                sheet["formula_clusters"] = clusters[:formula_limit]
+        rendered = render(compact)
+        if len(rendered) <= maximum:
+            return rendered
+
+    for sheet in compact.get("sheets", []):
+        for region in sheet.get("regions", []):
+            if region.get("number_formats") or region.get("unit_hints"):
+                sheet["truncation"]["rendered_format_metadata"] = True
+                region["number_formats"] = {}
+                region["number_formats_truncated"] = True
+                region["unit_hints"] = []
+        for cluster in sheet.get("formula_clusters", []):
+            if cluster.get("sample_formulas"):
+                sheet["truncation"]["rendered_formula_samples"] = True
+                cluster["sample_formulas"] = []
+    rendered = render(compact)
+    if len(rendered) <= maximum:
+        return rendered
+
+    for sheet in compact.get("sheets", []):
+        if sheet.get("regions") or sheet.get("formula_clusters"):
+            sheet["truncation"]["rendered_structural_details"] = True
+            sheet["regions"] = []
+            sheet["formula_clusters"] = []
+    rendered = render(compact)
+    if len(rendered) <= maximum:
+        return rendered
+    minimal = {
+        "schema_version": compact.get("schema_version"),
+        "profile_sha256": compact.get("profile_sha256"),
+        "source": compact.get("source"),
+        "backend": compact.get("backend"),
+        "task_independent": compact.get("task_independent"),
+        "bounds": compact.get("bounds"),
+        "sheets": [
+            {
+                "name": _bounded_profile_text(
+                    sheet.get("name", ""),
+                    max_chars=int(
+                        (compact.get("bounds") or {}).get("max_scalar_chars", 96)
+                    ),
+                )[0],
+                "state": sheet.get("state"),
+                "used_region": sheet.get("used_region"),
+                "counts": sheet.get("counts"),
+                "truncation": {
+                    **dict(sheet.get("truncation") or {}),
+                    "rendered_to_sheet_summary": True,
+                },
+            }
+            for sheet in compact.get("sheets", [])
+        ],
+        "truncation": {
+            **dict(compact.get("truncation") or {}),
+            "rendered_to_sheet_summary": True,
+        },
+    }
+    rendered = render(minimal)
+    if len(rendered) <= maximum:
+        return rendered
+    raise PreprocessError(
+        f"Deterministic profile metadata exceeds max_rendered_chars={maximum}"
+    )
 
 
 def _markdown_escape(value: Any) -> str:

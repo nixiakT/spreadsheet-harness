@@ -24,6 +24,9 @@ from spreadsheet_harness.comparison import (
     V24_COMPARISON_CONFIGURATION_POLICIES,
     V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V24_COMPARISON_PROTOCOL_VERSION,
+    V25_COMPARISON_CONFIGURATION_POLICIES,
+    V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V25_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     _allowed_observed_terminals_policy,
     _stage_allowed_tools_policy,
@@ -143,7 +146,14 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         {"name": "code_interpreter", "ok": True},
         {"name": "code_interpreter", "ok": True},
     ]
+    terminal_response = {
+        "status": "accepted",
+        "response_id": "response-final",
+        "acknowledgement": {},
+    }
     stage_agent = {
+        "final_text": "Spreadsheet task completed.",
+        "response_id": "response-final",
         "turns": 3,
         "tool_calls": 2,
         "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
@@ -152,6 +162,10 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "terminal_submissions": 1,
         "function_calls_total": 3,
         "budget": stage_budget,
+        "post_prefix_tool_choice": "auto",
+        "terminal_tool": "submit_result",
+        "observed_terminal_tool": "submit_result",
+        "terminal_response": terminal_response,
     }
     stage = {
         "name": "solve",
@@ -161,6 +175,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "observed_first_tool": "code_interpreter",
         "forced_tool_prefix": ["code_interpreter", "code_interpreter"],
         "observed_forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+        "post_prefix_tool_choice": "auto",
         "terminal_tool": "submit_result",
         "observed_terminal_tool": "submit_result",
         "tool_name_trace": ["code_interpreter", "code_interpreter"],
@@ -191,6 +206,8 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "comparison": comparison.to_dict(),
         "agent": {
             "arm": "bare",
+            "final_text": "Spreadsheet task completed.",
+            "response_id": "response-final",
             "turns": 3,
             "tool_calls": 2,
             "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
@@ -200,6 +217,10 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
             ],
             "terminal_submissions": 1,
             "function_calls_total": 3,
+            "post_prefix_tool_choice": "auto",
+            "terminal_tool": "submit_result",
+            "observed_terminal_tool": "submit_result",
+            "terminal_response": json.loads(json.dumps(terminal_response)),
             "stages": [stage],
             "budget": stage_budget,
         },
@@ -216,6 +237,218 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "output_workbook": str(output),
         "output_sha256": _sha256(output),
     }
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return results, task, row
+
+
+def _set_final_model_execution_failure(row: dict[str, Any], message: str) -> None:
+    """Replace a successful final acknowledgement with failure-path evidence."""
+
+    final_agent = row["agent"]["stages"][-1]["agent"]
+    for result in (final_agent, row["agent"]):
+        result["final_text"] = message
+        result.pop("terminal_response", None)
+
+
+def _truncated_terminal_fixture(
+    tmp_path: Path,
+) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["configuration"]["api_protocol"] = "chat-completions"
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    attempt = {
+        "attempt": 1,
+        "outcome": "error",
+        "error_type": "ProviderOutputLimitError",
+        "message": "provider output limit",
+        "phase": "response_body",
+        "elapsed_seconds": 0.4,
+        "first_event_seconds": 0.4,
+        "headers_seconds": 0.4,
+        "terminal_seconds": 0.4,
+        "terminal_event": "chat.completion",
+        "status_code": 200,
+        "sse_events": 0,
+        "transport_exception_type": None,
+        "retryable": False,
+        "safe_to_retry": False,
+        "safe_retry_reason": None,
+        "retry_after_seconds": None,
+        "backoff_requested_seconds": None,
+        "backoff_seconds": None,
+        "overload_detected": False,
+        "no_header_read_timeout": False,
+        "retry_backoff_reason": None,
+        "automatic_retry_scheduled": False,
+        "automatic_retry_suppressed_reason": "delivery_not_known_safe",
+        "logical_request_id": "logical-final",
+        "client_request_id": "logical-final-1",
+        "request_payload_sha256": "a" * 64,
+        "response_headers": {},
+        "delivery_state": "terminal_seen",
+        "pacing": {"wait_seconds": 0.0},
+        "api_protocol": "chat-completions",
+        "endpoint": "/chat/completions",
+    }
+    response_timing = {
+        "attempts": 1,
+        "elapsed_seconds": 0.4,
+        "first_event_seconds": 0.4,
+        "headers_seconds": 0.4,
+        "terminal_seconds": 0.4,
+        "terminal_event": "chat.completion",
+        "status_code": 200,
+        "sse_events": 0,
+        "logical_request_id": "logical-final",
+        "client_request_id": "logical-final-1",
+        "request_payload_sha256": "a" * 64,
+        "response_headers": {},
+        "delivery_state": "terminal_seen",
+        "pacing_wait_seconds_total": 0.0,
+        "attempt_history": [attempt],
+    }
+    final_timing = {
+        "turn": 3,
+        "stage": "solve",
+        **response_timing,
+        "input_serialized_chars": 12,
+        "input_serialized_bytes": 12,
+        "request_body_chars": 24,
+        "request_body_bytes": 24,
+        "history_summary_chars": 0,
+        "recent_raw_tool_output_chars": 0,
+        "recent_image_bytes": 0,
+        "recent_image_count": 0,
+        "input_tokens": 4,
+        "output_tokens": 2,
+        "total_tokens": 6,
+    }
+    terminal_response = {
+        "status": "truncated",
+        "finish_reason": "length",
+        "response_id": "chat-truncated",
+        "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+        "timing": response_timing,
+        "discarded_message": {
+            "sha256": "b" * 64,
+            "serialized_chars": 80,
+            "serialized_bytes": 80,
+            "top_level_field_count": 3,
+            "content_item_count": 0,
+            "tool_call_count": 1,
+        },
+    }
+
+    stage = row["agent"]["stages"][-1]
+    stage_agent = stage["agent"]
+    for timing in stage_agent["request_timings"][:-1]:
+        timing["attempt_history"][0].update(
+            {
+                "api_protocol": "chat-completions",
+                "endpoint": "/chat/completions",
+            }
+        )
+    stage_agent["request_timings"][-1] = final_timing
+    stage.update(
+        {
+            "post_prefix_tool_choice": "auto",
+            "observed_terminal_tool": "submit_result_length",
+        }
+    )
+    stage_agent.update(
+        {
+            "final_text": "Terminal response truncated.",
+            "response_id": "chat-truncated",
+            "first_tool_choice": "code_interpreter",
+            "observed_first_tool": "code_interpreter",
+            "forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+            "observed_forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+            "post_prefix_tool_choice": "auto",
+            "terminal_tool": "submit_result",
+            "observed_terminal_tool": "submit_result_length",
+            "terminal_submissions": 0,
+            "function_calls_total": 2,
+            "terminal_response": terminal_response,
+        }
+    )
+    aggregate_timings = json.loads(json.dumps(stage_agent["request_timings"]))
+    row["agent"].update(
+        {
+            "final_text": "Terminal response truncated.",
+            "response_id": "chat-truncated",
+            "request_timings": aggregate_timings,
+            "first_tool_choice": "code_interpreter",
+            "observed_first_tool": "code_interpreter",
+            "forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+            "observed_forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+            "post_prefix_tool_choice": "auto",
+            "terminal_tool": "submit_result",
+            "observed_terminal_tool": "submit_result_length",
+            "terminal_submissions": 0,
+            "function_calls_total": 2,
+            "terminal_response": json.loads(json.dumps(terminal_response)),
+        }
+    )
+    row.update(
+        {
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "comparison_manifest_sha256": _sha256(manifest_path),
+            "api_protocol": "chat-completions",
+            "status": "completed",
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "Terminal response truncated.",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "terminal_submission_truncated",
+        }
+    )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return results, task, row
+
+
+def _budget_truncated_terminal_fixture(
+    tmp_path: Path,
+) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
+    results, task, row = _truncated_terminal_fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["configuration"]["max_total_tokens"] = 5
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    termination = {
+        "reason": "max_total_tokens",
+        "message": "token budget exhausted after the output-limit response",
+        "stage": "solve",
+        "elapsed_seconds": 1.0,
+    }
+    budget = {
+        "limit": {
+            "model_calls": 3,
+            "total_tokens": 5,
+            "elapsed_seconds": 30,
+        },
+        "used": {"model_calls": 3, "total_tokens": 10, "elapsed_seconds": 1.0},
+        "termination": termination,
+    }
+    final_stage = row["agent"]["stages"][-1]
+    final_stage["observed_terminal_tool"] = "budget_exhausted"
+    final_stage["agent"]["observed_terminal_tool"] = "budget_exhausted"
+    final_stage["agent"]["budget"] = json.loads(json.dumps(budget))
+    row["agent"]["observed_terminal_tool"] = "budget_exhausted"
+    row["agent"]["budget"] = json.loads(json.dumps(budget))
+    row["budget"] = budget
+    row.update(
+        {
+            "comparison_manifest_sha256": _sha256(manifest_path),
+            "error": "token budget exhausted after the output-limit response",
+            "model_failure_reason": "budget_exhausted",
+        }
+    )
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return results, task, row
 
@@ -259,7 +492,8 @@ def _paper_budget_fixture(
     for name in expected_names[: failed_index + 1]:
         prefix = list(COMPARISON_FORCED_TOOL_PREFIX_POLICY["paper"][name])
         is_failure = name == failed_stage
-        turns = failure_turns if is_failure else max(len(prefix), 1)
+        terminal_tool = "assistant_text" if name == "reconcile" else "submit_result"
+        turns = failure_turns if is_failure else max(len(prefix) + 1, 1)
         per_turn_tokens = 0
         timings = [
             {
@@ -274,8 +508,7 @@ def _paper_budget_fixture(
             for turn in range(1, turns + 1)
         ]
         aggregate_timings.extend(json.loads(json.dumps(timings)))
-        terminal_tool = "assistant_text" if name == "reconcile" else "submit_result"
-        terminal_submissions = 0
+        terminal_submissions = int(not is_failure and terminal_tool == "submit_result")
         tool_trace = [
             {"name": tool_name, "ok": True}
             for tool_name in ([] if is_failure else prefix)
@@ -309,7 +542,7 @@ def _paper_budget_fixture(
                     else terminal_tool
                 ),
                 "observed_terminal_tool": (
-                    "budget_exhausted" if is_failure else "assistant_text"
+                    "budget_exhausted" if is_failure else terminal_tool
                 ),
                 "tool_name_trace": [item["name"] for item in tool_trace],
                 "tool_trace": json.loads(json.dumps(tool_trace)),
@@ -325,6 +558,50 @@ def _paper_budget_fixture(
                 },
             }
         )
+        stage = stages[-1]
+        stage_agent = stage["agent"]
+        if is_failure:
+            stage_agent.update(
+                {
+                    "final_text": "budget exhausted",
+                    "response_id": None,
+                    "terminal_tool": stage["terminal_tool"],
+                    "observed_terminal_tool": "budget_exhausted",
+                }
+            )
+        elif name == "reconcile":
+            stage_agent.update(
+                {
+                    "final_text": "reconciled: true\nprovenance:\n- range: A1",
+                    "response_id": "response-reconcile",
+                    "terminal_tool": "assistant_text",
+                    "observed_terminal_tool": "assistant_text",
+                }
+            )
+        else:
+            final_text = f"{name}: verified\nprovenance:\n- range: A1"
+            response_id = f"response-{name}"
+            stage["post_prefix_tool_choice"] = "auto"
+            stage_agent.update(
+                {
+                    "final_text": final_text,
+                    "response_id": response_id,
+                    "post_prefix_tool_choice": "auto",
+                    "terminal_tool": "submit_result",
+                    "observed_terminal_tool": "submit_result",
+                    "terminal_response": {
+                        "status": "accepted",
+                        "response_id": response_id,
+                        "acknowledgement": {
+                            "mode": "evidence_result",
+                            "result_chars": len(final_text),
+                            "result_sha256": hashlib.sha256(
+                                final_text.encode("utf-8")
+                            ).hexdigest(),
+                        },
+                    },
+                }
+            )
 
     used_calls = len(aggregate_timings)
     used_tokens = 100 if termination_reason == "max_total_tokens" else 10
@@ -402,6 +679,8 @@ def _paper_budget_fixture(
             "output_workbook": str(output),
             "agent": {
                 "arm": "paper",
+                "final_text": stages[-1]["agent"]["final_text"],
+                "response_id": stages[-1]["agent"]["response_id"],
                 "turns": aggregate_turns,
                 "tool_calls": aggregate_tool_calls,
                 "usage": {
@@ -421,6 +700,131 @@ def _paper_budget_fixture(
             "budget": budget,
         }
     )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return results, task, row
+
+
+def _paper_scored_fixture(
+    tmp_path: Path,
+) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
+    results, task, row = _paper_budget_fixture(
+        tmp_path,
+        failed_stage="solve",
+        failure_turns=3,
+    )
+    row = json.loads(json.dumps(row))
+    stages = row["agent"]["stages"]
+
+    for budget in [row["budget"], row["agent"]["budget"], *(
+        stage["agent"]["budget"] for stage in stages
+    )]:
+        budget["termination"] = None
+
+    for stage in stages:
+        name = stage["name"]
+        stage_agent = stage["agent"]
+        response_id = f"response-{name}"
+        stage_agent.update(
+            {
+                "response_id": response_id,
+                "terminal_tool": stage["terminal_tool"],
+                "observed_terminal_tool": stage["observed_terminal_tool"],
+            }
+        )
+        if name in {"extract", "vision_verify", "latex_verify"}:
+            final_text = f"{name}: verified\nprovenance:\n- range: A1"
+            acknowledgement = {
+                "mode": "evidence_result",
+                "result_chars": len(final_text),
+                "result_sha256": hashlib.sha256(
+                    final_text.encode("utf-8")
+                ).hexdigest(),
+            }
+            stage_agent.update(
+                {
+                    "final_text": final_text,
+                    "post_prefix_tool_choice": "auto",
+                    "terminal_response": {
+                        "status": "accepted",
+                        "response_id": response_id,
+                        "acknowledgement": acknowledgement,
+                    },
+                }
+            )
+            stage["post_prefix_tool_choice"] = "auto"
+        elif name == "reconcile":
+            stage_agent["final_text"] = (
+                "reconciled: true\nprovenance:\n- range: A1"
+            )
+            stage["post_prefix_tool_choice"] = None
+        else:
+            prefix = list(COMPARISON_FORCED_TOOL_PREFIX_POLICY["paper"]["solve"])
+            tool_trace = [{"name": tool_name, "ok": True} for tool_name in prefix]
+            stage.update(
+                {
+                    "observed_first_tool": prefix[0],
+                    "observed_forced_tool_prefix": prefix,
+                    "observed_terminal_tool": "submit_result",
+                    "post_prefix_tool_choice": "auto",
+                    "tool_name_trace": prefix,
+                    "tool_trace": json.loads(json.dumps(tool_trace)),
+                }
+            )
+            stage_agent.update(
+                {
+                    "final_text": "Spreadsheet task completed.",
+                    "tool_calls": len(tool_trace),
+                    "tool_trace": json.loads(json.dumps(tool_trace)),
+                    "terminal_submissions": 1,
+                    "function_calls_total": len(tool_trace) + 1,
+                    "post_prefix_tool_choice": "auto",
+                    "terminal_tool": "submit_result",
+                    "observed_terminal_tool": "submit_result",
+                    "terminal_response": {
+                        "status": "accepted",
+                        "response_id": response_id,
+                        "acknowledgement": {},
+                    },
+                }
+            )
+
+    aggregate_tool_trace = [
+        {"stage": stage["name"], **item}
+        for stage in stages
+        for item in stage["tool_trace"]
+    ]
+    aggregate_tool_calls = sum(stage["agent"]["tool_calls"] for stage in stages)
+    aggregate_terminal_submissions = sum(
+        stage["agent"]["terminal_submissions"] for stage in stages
+    )
+    final_agent = stages[-1]["agent"]
+    row["agent"].update(
+        {
+            "final_text": final_agent["final_text"],
+            "response_id": final_agent["response_id"],
+            "tool_calls": aggregate_tool_calls,
+            "tool_trace": aggregate_tool_trace,
+            "terminal_submissions": aggregate_terminal_submissions,
+            "function_calls_total": (
+                aggregate_tool_calls + aggregate_terminal_submissions
+            ),
+            "post_prefix_tool_choice": "auto",
+            "terminal_tool": "submit_result",
+            "observed_terminal_tool": "submit_result",
+            "terminal_response": json.loads(
+                json.dumps(final_agent["terminal_response"])
+            ),
+        }
+    )
+    row.update({"outcome_kind": "scored", "passed": True})
+    for field in (
+        "error",
+        "error_type",
+        "error_retryable",
+        "error_category",
+        "model_failure_reason",
+    ):
+        row.pop(field, None)
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return results, task, row
 
@@ -570,6 +974,7 @@ def test_audit_accepts_known_model_execution_failure_as_completed_false(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)
+    _set_final_model_execution_failure(row, "managed workbook remained unchanged")
     row.update(
         {
             "outcome_kind": "model_execution_failure",
@@ -598,10 +1003,44 @@ def test_audit_accepts_known_model_execution_failure_as_completed_false(
     assert summary["rows"][0]["model_failure_reason"] == "workbook_unchanged"
 
 
+@pytest.mark.parametrize("target", ["aggregate", "final_stage"])
+def test_v26_audit_rejects_accepted_response_on_model_execution_failure(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    accepted_response = json.loads(json.dumps(row["agent"]["terminal_response"]))
+    _set_final_model_execution_failure(row, "managed workbook remained unchanged")
+    row.update(
+        {
+            "outcome_kind": "model_execution_failure",
+            "passed": False,
+            "error": "managed workbook remained unchanged",
+            "error_type": "AgentExecutionFailure",
+            "error_retryable": False,
+            "error_category": "model_execution_failure",
+            "model_failure_reason": "workbook_unchanged",
+        }
+    )
+    if target == "aggregate":
+        row["agent"]["terminal_response"] = accepted_response
+    else:
+        row["agent"]["stages"][-1]["agent"][
+            "terminal_response"
+        ] = accepted_response
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "accepted_terminal_response_evidence_invalid")
+
+
 def test_audit_accepts_only_one_provable_response_token_overage(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)
+    _set_final_model_execution_failure(row, "token budget exhausted")
     row.update(
         {
             "outcome_kind": "model_execution_failure",
@@ -667,6 +1106,7 @@ def test_v25_budget_failure_allows_only_an_observed_forced_prefix(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)
+    _set_final_model_execution_failure(row, "token budget exhausted")
     termination = {
         "reason": "max_total_tokens",
         "message": "token budget exhausted",
@@ -732,6 +1172,7 @@ def test_nonbudget_failure_still_requires_exact_forced_prefix(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)
+    _set_final_model_execution_failure(row, "managed workbook remained unchanged")
     row.update(
         {
             "outcome_kind": "model_execution_failure",
@@ -1048,6 +1489,360 @@ def test_v24_audit_does_not_require_v25_exact_agent_evidence(tmp_path: Path) -> 
     assert summary["audit_valid"] is True
 
 
+def test_v25_audit_preserves_schema14_exact_agent_contract(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V25_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V25_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V25_COMPARISON_CONFIGURATION_POLICIES)
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
+        manifest["stage_turn_caps"],
+        protocol_version=V25_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["harness_source"]["files"][0]["sha256"] = "0" * 64
+    combined = hashlib.sha256()
+    for entry in manifest["harness_source"]["files"]:
+        combined.update(entry["path"].encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(entry["sha256"].encode("ascii"))
+        combined.update(b"\n")
+    manifest["harness_source"]["sha256"] = combined.hexdigest()
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row = json.loads(json.dumps(row))
+    row["comparison_protocol_version"] = V25_COMPARISON_PROTOCOL_VERSION
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    accepted = audit_comparison(results, [task])
+    assert accepted["audit_valid"] is True
+
+    row["agent"]["request_timings"].reverse()
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    rejected = audit_comparison(results, [task])
+    assert rejected["audit_valid"] is False
+    assert _row_reason(rejected, "agent_request_timings_mismatch")
+
+
+def test_v26_audit_accepts_exact_truncated_terminal_evidence(tmp_path: Path) -> None:
+    results, task, _ = _truncated_terminal_fixture(tmp_path)
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["rows"][0]["model_failure_reason"] == (
+        "terminal_submission_truncated"
+    )
+
+
+def test_v26_audit_accepts_budget_precedence_with_truncated_response(
+    tmp_path: Path,
+) -> None:
+    results, task, _ = _budget_truncated_terminal_fixture(tmp_path)
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["rows"][0]["model_failure_reason"] == "budget_exhausted"
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "aggregate_response_missing",
+        "stage_response_missing",
+        "response_usage",
+        "termination_ceiling",
+        "observed_terminal",
+    ],
+)
+def test_v26_audit_rejects_tampered_budget_precedence_truncation(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    results, task, row = _budget_truncated_terminal_fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    final_stage = row["agent"]["stages"][-1]
+    if target == "aggregate_response_missing":
+        row["agent"].pop("terminal_response")
+    elif target == "stage_response_missing":
+        final_stage["agent"].pop("terminal_response")
+    elif target == "response_usage":
+        row["agent"]["terminal_response"]["usage"]["total_tokens"] = 7
+    elif target == "termination_ceiling":
+        for budget in (
+            row["budget"],
+            row["agent"]["budget"],
+            final_stage["agent"]["budget"],
+        ):
+            budget["limit"]["total_tokens"] = 10
+    else:
+        final_stage["observed_terminal_tool"] = "submit_result_length"
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "terminal_submission_truncated_evidence_invalid")
+
+
+def test_v26_audit_accepts_empty_ack_terminal_response(tmp_path: Path) -> None:
+    results, task, _ = _fixture(tmp_path)
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+
+
+def test_v26_audit_rejects_evidence_result_for_bare_solve(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    final_text = "stage evidence result"
+    acknowledgement = {
+        "mode": "evidence_result",
+        "result_chars": len(final_text),
+        "result_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
+    }
+    final_agent = row["agent"]["stages"][-1]["agent"]
+    final_agent["final_text"] = final_text
+    final_agent["terminal_response"]["acknowledgement"] = acknowledgement
+    row["agent"]["final_text"] = final_text
+    row["agent"]["terminal_response"] = json.loads(
+        json.dumps(final_agent["terminal_response"])
+    )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "accepted_terminal_response_evidence_invalid")
+
+
+def test_v26_audit_accepts_stage_bound_paper_terminal_responses(
+    tmp_path: Path,
+) -> None:
+    results, task, _ = _paper_scored_fixture(tmp_path)
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("stage_name", "wrong_mode"),
+    [
+        ("extract", "empty_ack"),
+        ("vision_verify", "empty_ack"),
+        ("latex_verify", "empty_ack"),
+        ("reconcile", "evidence_result"),
+        ("solve", "evidence_result"),
+    ],
+)
+def test_v26_audit_rejects_terminal_response_mode_for_wrong_paper_stage(
+    tmp_path: Path,
+    stage_name: str,
+    wrong_mode: str,
+) -> None:
+    results, task, row = _paper_scored_fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    stage = next(
+        item for item in row["agent"]["stages"] if item["name"] == stage_name
+    )
+    stage_agent = stage["agent"]
+    response_id = stage_agent["response_id"]
+    if wrong_mode == "empty_ack":
+        stage_agent["final_text"] = "Spreadsheet task completed."
+        stage_agent["terminal_response"]["acknowledgement"] = {}
+    else:
+        final_text = f"{stage_name} evidence"
+        stage_agent["final_text"] = final_text
+        stage_agent["terminal_response"] = {
+            "status": "accepted",
+            "response_id": response_id,
+            "acknowledgement": {
+                "mode": "evidence_result",
+                "result_chars": len(final_text),
+                "result_sha256": hashlib.sha256(
+                    final_text.encode("utf-8")
+                ).hexdigest(),
+            },
+        }
+    if stage_name == "solve":
+        row["agent"]["final_text"] = stage_agent["final_text"]
+        row["agent"]["terminal_response"] = json.loads(
+            json.dumps(stage_agent["terminal_response"])
+        )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "accepted_terminal_response_evidence_invalid")
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "aggregate_response_missing",
+        "stage_response_missing",
+        "aggregate_response_tampered",
+        "stage_response_tampered",
+        "wrapper_response",
+        "ack_text",
+    ],
+)
+def test_v26_audit_rejects_tampered_accepted_terminal_response(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    final_stage = row["agent"]["stages"][-1]
+    final_agent = final_stage["agent"]
+    if target == "aggregate_response_missing":
+        row["agent"].pop("terminal_response")
+    elif target == "stage_response_missing":
+        final_agent.pop("terminal_response")
+    elif target == "aggregate_response_tampered":
+        row["agent"]["terminal_response"]["response_id"] = "other-response"
+    elif target == "stage_response_tampered":
+        final_agent["terminal_response"]["status"] = "truncated"
+    elif target == "wrapper_response":
+        final_stage["terminal_response"] = {"status": "accepted"}
+    elif target == "ack_text":
+        final_agent["final_text"] = "model-authored text"
+        row["agent"]["final_text"] = "model-authored text"
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "accepted_terminal_response_evidence_invalid")
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["evidence_chars", "evidence_chars_bool", "evidence_sha256", "evidence_extra_field"],
+)
+def test_v26_audit_rejects_tampered_paper_evidence_result(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    results, task, row = _paper_scored_fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    stage_agent = row["agent"]["stages"][0]["agent"]
+    acknowledgement = stage_agent["terminal_response"]["acknowledgement"]
+    if target == "evidence_chars":
+        acknowledgement["result_chars"] += 1
+    elif target == "evidence_chars_bool":
+        acknowledgement["result_chars"] = True
+    elif target == "evidence_sha256":
+        acknowledgement["result_sha256"] = "0" * 64
+    else:
+        acknowledgement["extra"] = True
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "accepted_terminal_response_evidence_invalid")
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("model_failure_reason",), "terminal_submission_invalid"),
+        (("api_protocol",), "responses"),
+        (("agent", "terminal_response", "finish_reason"), "stop"),
+        (("agent", "terminal_response", "response_id"), "other-response"),
+        (("agent", "terminal_response", "timing", "status_code"), 201),
+        (
+            (
+                "agent",
+                "terminal_response",
+                "timing",
+                "attempt_history",
+                0,
+                "error_type",
+            ),
+            "ProviderError",
+        ),
+        (
+            (
+                "agent",
+                "terminal_response",
+                "timing",
+                "attempt_history",
+                0,
+                "delivery_state",
+            ),
+            "headers_seen",
+        ),
+        (("agent", "terminal_response", "usage", "total_tokens"), 7),
+        (("agent", "terminal_response", "discarded_message", "sha256"), "x" * 64),
+        (("agent", "stages", 0, "terminal_tool"), None),
+        (("agent", "stages", 0, "agent", "terminal_submissions"), 1),
+        (("agent", "stages", 0, "agent", "observed_terminal_tool"), "submit_result"),
+        (("agent", "stages", 0, "agent", "request_timings", 2, "turn"), 2),
+        (
+            ("agent", "stages", 0, "agent", "tool_trace"),
+            [{"name": "submit_result", "ok": True}],
+        ),
+        (("agent", "stages", 0, "terminal_response"), {"status": "truncated"}),
+    ],
+)
+def test_v26_audit_rejects_tampered_truncated_terminal_evidence(
+    tmp_path: Path,
+    path: tuple[str | int, ...],
+    value: Any,
+) -> None:
+    results, task, row = _truncated_terminal_fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    target: Any = row
+    for component in path[:-1]:
+        target = target[component]
+    target[path[-1]] = value
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "terminal_submission_truncated_evidence_invalid")
+
+
+def test_v26_audit_requires_derivable_forced_terminal_route_basis(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _truncated_terminal_fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    final_stage = row["agent"]["stages"][-1]
+    final_stage["max_turns"] = 4
+    final_stage["agent"]["budget"]["limit"]["model_calls"] = 4
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "terminal_submission_truncated_evidence_invalid")
+
+
+def test_v26_audit_rejects_truncation_before_last_stage(tmp_path: Path) -> None:
+    results, task, row = _truncated_terminal_fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    trailing = json.loads(json.dumps(row["agent"]["stages"][0]))
+    trailing["name"] = "unexpected-trailing-stage"
+    trailing["agent"].pop("terminal_response")
+    trailing["observed_terminal_tool"] = "submit_result"
+    trailing["agent"]["observed_terminal_tool"] = "submit_result"
+    row["agent"]["stages"].append(trailing)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "agent_stage_order_mismatch")
+
+
 @pytest.mark.parametrize(
     ("field", "value", "expected_reason"),
     [
@@ -1066,6 +1861,7 @@ def test_audit_rejects_tampered_model_execution_failure_taxonomy(
     expected_reason: str,
 ) -> None:
     results, task, row = _fixture(tmp_path)
+    _set_final_model_execution_failure(row, "managed workbook remained unchanged")
     row.update(
         {
             "outcome_kind": "model_execution_failure",
@@ -1198,7 +1994,7 @@ def test_audit_rejects_manifest_continuation_repository_source_mismatch(
     assert "continuation_source_invalid" in summary["reasons"]
 
 
-def test_audit_rejects_registered_v25_manifest_not_bound_to_current_git(
+def test_audit_rejects_registered_v26_manifest_not_bound_to_current_git(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -1206,7 +2002,7 @@ def test_audit_rejects_registered_v25_manifest_not_bound_to_current_git(
     manifest_path = results / "comparison-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["split_provenance"] = {
-        "manifest_id": "qwen35-trace2skill-local-postopt16-v1"
+        "manifest_id": "qwen35-trace2skill-local-v26-confirm16-v1"
     }
     manifest["repository_source"] = _continuation_source(results)[
         "repository_source"
@@ -1586,7 +2382,7 @@ def test_audit_requires_frozen_manifest_provenance(
     assert any(expected_fragment in reason for reason in summary["reasons"])
 
 
-def test_audit_requires_manifest_source_to_match_active_checkout(
+def test_v26_audit_requires_manifest_source_to_match_active_checkout(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)

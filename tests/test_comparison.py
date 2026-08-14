@@ -18,15 +18,22 @@ from spreadsheet_harness.comparison import (
     COMPARISON_ARMS,
     COMPARISON_MANIFEST_SCHEMA_VERSION,
     COMPARISON_PROTOCOL_VERSION,
+    LEGACY_COMPARISON_PROTOCOL_VERSION,
     RUN_SPEC_ANCHORS,
     V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V24_COMPARISON_PROTOCOL_VERSION,
+    V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V25_COMPARISON_PROTOCOL_VERSION,
+    V25_RUN_SPEC_SOURCE_CONTRACT,
     ComparisonBenchmarkRunner,
     RunSpecAnchor,
+    _allowed_observed_terminals_policy,
     _arm_order,
     _balanced_arm_orders,
+    _stage_allowed_tools_policy,
     comparison_summary,
     load_pilot_run_spec,
+    manifest_execution_contract,
     require_launchable_run_spec,
     verify_repository_source_state,
 )
@@ -117,9 +124,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 14
-    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 14
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v25"
+    assert manifest["schema_version"] == 15
+    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 15
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v26"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -132,6 +139,21 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     )
     assert manifest["configuration"]["edit_recovery_prompt_policy"] == (
         "self-contained-request-scoped-verification-v1"
+    )
+    assert manifest["configuration"]["terminal_submission_policy"] == (
+        "empty-ack-harness-final-text-v1"
+    )
+    assert manifest["configuration"]["edit_recovery_terminal_policy"] == (
+        "penultimate-recovery-final-submit-v1"
+    )
+    assert manifest["configuration"]["ours_tool_policy"] == (
+        "fixed-six-code-first-v1"
+    )
+    assert manifest["configuration"]["deterministic_profile_policy"] == (
+        "representative-evidence-12k-v1"
+    )
+    assert manifest["configuration"]["formula_verification_skill_policy"] == (
+        "trajectory-local-transfer-gate-v1"
     )
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
@@ -165,28 +187,37 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
             "reconcile": [],
             "solve": ["code_interpreter"],
         },
-        "ours": {"solve": "all"},
+        "ours": {
+            "solve": [
+                "code_interpreter",
+                "fill_formula",
+                "inspect_range",
+                "recalculate_and_read",
+                "render_workbook",
+                "view_image",
+            ]
+        },
     }
+    assert _stage_allowed_tools_policy(
+        ("ours",), protocol_version=V25_COMPARISON_PROTOCOL_VERSION
+    ) == {"ours": {"solve": "all"}}
     assert manifest["allowed_observed_terminals"]["paper"]["reconcile"] == [
         "assistant_text",
         "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["ours"]["solve"] == [
         "submit_result",
-        "assistant_text",
-        "final_recovery_code_interpreter",
+        "submit_result_length",
         "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["bare"]["solve"] == [
         "submit_result",
-        "assistant_text",
-        "final_recovery_code_interpreter",
+        "submit_result_length",
         "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["paper"]["solve"] == [
         "submit_result",
-        "assistant_text",
-        "final_recovery_code_interpreter",
+        "submit_result_length",
         "budget_exhausted",
     ]
     assert manifest["forced_prefix_wire_policy"] == {
@@ -277,6 +308,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "budget_exhausted",
         "edit_recovery_exhausted",
         "terminal_submission_invalid",
+        "terminal_submission_truncated",
         "workbook_unchanged",
     ]
     assert manifest["hidden_from_models"] == [
@@ -284,6 +316,55 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "answer_position",
         "answer_sheet",
         "golden_path",
+    ]
+
+
+@pytest.mark.parametrize(
+    "protocol_version",
+    [
+        LEGACY_COMPARISON_PROTOCOL_VERSION,
+        V24_COMPARISON_PROTOCOL_VERSION,
+        V25_COMPARISON_PROTOCOL_VERSION,
+    ],
+)
+def test_historical_terminal_policies_retain_tool_stage_text_fallback(
+    protocol_version: str,
+) -> None:
+    policy = _allowed_observed_terminals_policy(
+        {
+            "bare": {"solve": 2},
+            "paper": {"reconcile": 1, "solve": 2},
+        },
+        protocol_version=protocol_version,
+    )
+
+    assert "assistant_text" in policy["bare"]["solve"]
+    assert "assistant_text" in policy["paper"]["solve"]
+    assert policy["paper"]["reconcile"][0] == "assistant_text"
+
+
+def test_v26_terminal_policy_requires_submit_for_tool_stages() -> None:
+    policy = _allowed_observed_terminals_policy(
+        {
+            "bare": {"solve": 2},
+            "paper": {"reconcile": 1, "solve": 2},
+        },
+        protocol_version=COMPARISON_PROTOCOL_VERSION,
+    )
+
+    assert policy["bare"]["solve"] == [
+        "submit_result",
+        "submit_result_length",
+        "budget_exhausted",
+    ]
+    assert policy["paper"]["solve"] == [
+        "submit_result",
+        "submit_result_length",
+        "budget_exhausted",
+    ]
+    assert policy["paper"]["reconcile"] == [
+        "assistant_text",
+        "budget_exhausted",
     ]
 
 
@@ -612,6 +693,7 @@ def _pilot_run_spec_runner(
     source = _tasks(tmp_path)[0]
     spec_path = Path("benchmarks/protocols") / spec_filename
     document, provenance, raw = load_pilot_run_spec(spec_path)
+    resources = document["execution"]["resources"]
     if split_provenance is None:
         split_provenance = document["execution"]["split_provenance"]
     monkeypatch.setattr(
@@ -670,14 +752,14 @@ def _pilot_run_spec_runner(
         tmp_path / "pilot-output",
         skill_registry=SkillRegistry([Path("skills")]),
         arms=("bare", "ours"),
-        max_model_calls=8,
-        max_turns_per_arm=8,
-        max_total_tokens=120000,
-        max_output_tokens=4096,
-        task_timeout_seconds=1200,
-        recalculate=True,
-        arm_order_seed=20260812,
-        circuit_breaker_threshold=3,
+        max_model_calls=resources["max_model_calls"],
+        max_turns_per_arm=resources["max_turns_per_arm"],
+        max_total_tokens=resources["max_total_tokens"],
+        max_output_tokens=resources["max_output_tokens_per_call"],
+        task_timeout_seconds=resources["task_timeout_seconds"],
+        recalculate=resources["recalculate"],
+        arm_order_seed=resources["arm_order_seed"],
+        circuit_breaker_threshold=resources["circuit_breaker_threshold"],
         split_provenance=split_provenance,
         run_spec_document=document,
         run_spec_provenance=provenance,
@@ -758,12 +840,18 @@ def test_v24_run_spec_is_historical_and_read_only() -> None:
     )
 
 
-def test_v25_confirmation_run_spec_is_fresh_only() -> None:
+def test_v25_confirmation_run_spec_is_historical_and_read_only() -> None:
     document, provenance, _ = load_pilot_run_spec(
         Path("benchmarks/protocols/qwen35-trace2skill-local-confirm16-run-spec-v1.json")
     )
 
-    anchor = require_launchable_run_spec(provenance)
+    with pytest.raises(HarnessError, match="read-only"):
+        require_launchable_run_spec(provenance)
+    anchor = next(
+        candidate
+        for candidate in RUN_SPEC_ANCHORS
+        if candidate.run_spec_id == document["run_spec_id"]
+    )
 
     assert anchor == RunSpecAnchor(
         run_spec_id=document["run_spec_id"],
@@ -772,59 +860,114 @@ def test_v25_confirmation_run_spec_is_fresh_only() -> None:
         schema_version=document["schema_version"],
         phase="post_optimization_confirmation",
         split_manifest_id="qwen35-trace2skill-local-confirm16-v1",
-        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
-        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
-        launchable=True,
+        comparison_protocol_version=V25_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
     )
-    with pytest.raises(HarnessError, match="fresh-only"):
+    with pytest.raises(HarnessError, match="read-only"):
         require_launchable_run_spec(provenance, resume=True)
 
 
-def test_v25_source_contract_exactly_matches_current_source() -> None:
+def test_v25_source_contract_remains_pinned_to_historical_source() -> None:
     document, _, _ = load_pilot_run_spec(
         Path("benchmarks/protocols/qwen35-trace2skill-local-confirm16-run-spec-v1.json")
     )
 
-    assert document["execution"]["source_contract"] == (
+    assert document["execution"]["source_contract"] == V25_RUN_SPEC_SOURCE_CONTRACT
+    historical_manifest = {
+        "schema_version": V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "comparison_protocol_version": V25_COMPARISON_PROTOCOL_VERSION,
+        "configuration": {},
+    }
+    assert manifest_execution_contract(historical_manifest)["source_contract"] == (
+        V25_RUN_SPEC_SOURCE_CONTRACT
+    )
+    assert document["execution"]["source_contract"] != (
         benchmark_module._run_spec_source_fingerprint()
     )
 
 
-@pytest.mark.parametrize(
-    "source_contract",
-    [
-        {
-            "schema_version": 1,
-            "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
-            "sha256": "0" * 64,
-            "file_count": 21,
-        },
-        {
-            "schema_version": 1,
-            "policy": "tampered-policy",
-            "sha256": "0" * 64,
-            "file_count": 21,
-        },
-    ],
-)
-def test_v25_preflight_rejects_stale_or_tampered_source_contract(
+def test_v26_confirmation_run_spec_is_current_fresh_only() -> None:
+    path = Path(
+        "benchmarks/protocols/"
+        "qwen35-trace2skill-local-v26-confirm16-run-spec-v1.json"
+    )
+    document, provenance, _ = load_pilot_run_spec(path)
+
+    anchor = require_launchable_run_spec(provenance)
+
+    assert anchor == RunSpecAnchor(
+        run_spec_id="qwen36-local-v26-confirm-eval16-v1-bare-ours-seed41",
+        filename=path.name,
+        sha256="4bca7fe452c9ba2dadc31c374f29abcda575cb243e5f960789f2f50b4191884a",
+        schema_version=document["schema_version"],
+        phase="v26_post_optimization_confirmation",
+        split_manifest_id="qwen35-trace2skill-local-v26-confirm16-v1",
+        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=True,
+    )
+    assert document["execution"]["source_contract"] == (
+        benchmark_module._run_spec_source_fingerprint()
+    )
+    assert document["execution"]["resources"] == {
+        "max_model_calls": 12,
+        "max_turns_per_arm": 12,
+        "max_total_tokens": 180000,
+        "max_output_tokens_per_call": 4096,
+        "task_timeout_seconds": 1800.0,
+        "recalculate": True,
+        "task_retries": 0,
+        "circuit_breaker_threshold": 3,
+        "arm_order_seed": 20260812,
+    }
+    with pytest.raises(HarnessError, match="fresh-only"):
+        require_launchable_run_spec(provenance, resume=True)
+
+
+def test_v26_run_spec_matches_resolved_execution_contract(
     tmp_path: Path,
     monkeypatch: Any,
-    source_contract: dict[str, Any],
+) -> None:
+    runner, tasks = _pilot_run_spec_runner(
+        tmp_path,
+        monkeypatch,
+        spec_filename="qwen35-trace2skill-local-v26-confirm16-run-spec-v1.json",
+    )
+
+    manifest = runner._manifest(tasks)
+
+    assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
+    assert manifest["schema_version"] == COMPARISON_MANIFEST_SCHEMA_VERSION
+    assert manifest["task_ids"] == list(
+        benchmark_module.TRACE2SKILL_V26_CONFIRM_TASK_IDS
+    )
+    assert manifest["stage_allowed_tools"]["ours"]["solve"] == [
+        "code_interpreter",
+        "fill_formula",
+        "inspect_range",
+        "recalculate_and_read",
+        "render_workbook",
+        "view_image",
+    ]
+
+
+def test_v25_preflight_rejects_historical_run_before_isolation(
+    tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     runner, tasks = _pilot_run_spec_runner(
         tmp_path,
         monkeypatch,
         spec_filename="qwen35-trace2skill-local-confirm16-run-spec-v1.json",
     )
-    runner.run_spec_document["execution"]["source_contract"] = source_contract
     events: list[str] = []
     monkeypatch.setattr(
         "spreadsheet_harness.comparison.ensure_strict_code_isolation",
         lambda *_args, **_kwargs: events.append("isolation") or {},
     )
 
-    with pytest.raises(HarnessError, match="execution contract"):
+    with pytest.raises(HarnessError, match="read-only"):
         runner.preflight(tasks)
 
     assert events == []
@@ -1998,6 +2141,11 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
             "used": {"model_calls": 3, "total_tokens": 10, "elapsed_seconds": 1.0},
             "termination": None,
         }
+        terminal_response = {
+            "status": "accepted",
+            "response_id": "response-final",
+            "acknowledgement": {},
+        }
         comparison = compare_workbooks(
             task.golden_path,
             output,
@@ -2034,6 +2182,8 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
             "budget": budget,
             "agent": {
                 "arm": "bare",
+                "final_text": "Spreadsheet task completed.",
+                "response_id": "response-final",
                 "turns": 3,
                 "tool_calls": 2,
                 "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
@@ -2043,6 +2193,10 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                 ],
                 "terminal_submissions": 1,
                 "function_calls_total": 3,
+                "post_prefix_tool_choice": "auto",
+                "terminal_tool": "submit_result",
+                "observed_terminal_tool": "submit_result",
+                "terminal_response": terminal_response,
                 "budget": budget,
                 "stages": [
                     {
@@ -2056,6 +2210,7 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                             "code_interpreter",
                             "code_interpreter",
                         ],
+                        "post_prefix_tool_choice": "auto",
                         "terminal_tool": "submit_result",
                         "observed_terminal_tool": "submit_result",
                         "tool_name_trace": [
@@ -2064,6 +2219,8 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                         ],
                         "tool_trace": tool_trace,
                         "agent": {
+                            "final_text": "Spreadsheet task completed.",
+                            "response_id": "response-final",
                             "turns": 3,
                             "tool_calls": 2,
                             "usage": {
@@ -2075,6 +2232,10 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                             "tool_trace": tool_trace,
                             "terminal_submissions": 1,
                             "function_calls_total": 3,
+                            "post_prefix_tool_choice": "auto",
+                            "terminal_tool": "submit_result",
+                            "observed_terminal_tool": "submit_result",
+                            "terminal_response": terminal_response,
                             "budget": budget,
                         },
                     }
@@ -2317,8 +2478,8 @@ def test_known_model_execution_failure_row_passes_full_audit(
                 "tool_trace": [
                     {"stage": "solve", **item} for item in tool_trace
                 ],
-                "terminal_submissions": 0,
-                "function_calls_total": 2,
+                "terminal_submissions": 1,
+                "function_calls_total": 3,
                 "budget": budget,
                 "stages": [
                     {
@@ -2336,7 +2497,7 @@ def test_known_model_execution_failure_row_passes_full_audit(
                             "code_interpreter",
                         ],
                         "terminal_tool": "submit_result",
-                        "observed_terminal_tool": "final_recovery_code_interpreter",
+                        "observed_terminal_tool": "submit_result",
                         "tool_name_trace": [
                             "code_interpreter",
                             "code_interpreter",
@@ -2352,8 +2513,8 @@ def test_known_model_execution_failure_row_passes_full_audit(
                             },
                             "request_timings": self.timings,
                             "tool_trace": tool_trace,
-                            "terminal_submissions": 0,
-                            "function_calls_total": 2,
+                            "terminal_submissions": 1,
+                            "function_calls_total": 3,
                             "budget": budget,
                         },
                     }

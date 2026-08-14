@@ -1,11 +1,11 @@
 ---
 name: spreadsheet-core
-description: Safe inspect-edit-verify workflow for realistic spreadsheet tasks.
+description: Inspect, edit, and verify realistic spreadsheet workbooks safely, especially for formula fills, recalculation checks, layout-sensitive changes, and bounded workbook mutations.
 ---
 
 # Spreadsheet core workflow
 
-Work on the smallest range that satisfies the instruction. Use the supplied profile and preview to target the first inspection; call `list_sheets` only when sheet identity is still ambiguous. Inspect the stated range and nearby headers, and search before assuming where a label or formula lives.
+Work on the smallest range that satisfies the instruction. Use the supplied profile and preview to target the first inspection. If sheet identity remains ambiguous, resolve it with a bounded `code_interpreter` inspection. Inspect the stated range and nearby headers, and search before assuming where a label or formula lives.
 
 ## Budget discipline
 
@@ -20,7 +20,7 @@ Work on the smallest range that satisfies the instruction. Use the supplied prof
 - Prefer formulas for values that should update when inputs change. Write literal values only for constants or when explicitly requested.
 - Do not rebuild a sheet to make one local change. Avoid deleting rows or columns unless the instruction explicitly requires structural deletion.
 - Extend an adjacent formula with `fill_formula`; it translates relative references more reliably than manually composing each formula.
-- Match nearby formatting by inspecting it first. Use `format_range` only for requested properties.
+- Match nearby formatting by inspecting it first. Change only the requested properties with `code_interpreter`; do not replace an entire style when a narrower update is sufficient.
 
 ## Verify
 
@@ -28,8 +28,21 @@ After every mutation, inspect the exact changed range and its immediate boundary
 
 LibreOffice is the declared calculation backend. Do not silently substitute an Excel-only function when Calc semantics differ. If a task needs unsupported Excel behavior, preserve the formula where possible and state the backend limitation in the run summary.
 
+### Formula verification gate
+
+Complete every applicable check before submitting a formula edit:
+
+- Define the exact expected target cells before editing. After saving, assert that every target contains the intended formula and that the cells immediately outside the target were not filled accidentally.
+- Inspect formulas and cached results at the first, middle, and last target positions, plus any blank-to-data or data-to-blank boundary. For a two-dimensional fill, sample first/middle/last positions on both the horizontal and vertical axes.
+- Compare translated formulas, not just their displayed values. Relative row and column references must move in the fill direction; absolute rows, absolute columns, and fully absolute references containing `$` must remain fixed.
+- Recalculate the exact target and its dependency boundary with `recalculate_and_read`. Assert that cells expected to produce values are nonblank, that any blank matches the intended blank-input behavior, and that results contain none of `#REF!`, `#VALUE!`, `#DIV/0!`, `#NAME?`, `#N/A`, `#NUM!`, `#NULL!`, `#SPILL!`, or `#CALC!`. If a formula text is returned where an intended cached blank is ambiguous, reopen the recalculated workbook with `data_only=True` in `code_interpreter`; for cross-sheet formulas, also inspect the smallest decisive source range.
+- Hand-check representative inputs for last-N, date-filtered, blank-aware, or lookup logic. Include the cutoff or last included item, a blank when one exists, and a duplicate key when one exists; confirm whether the intended lookup chooses the first, last, or all duplicates.
+
+Any missing target, reference drift, Calc error, unexpected blank, or failed hand-check blocks submission. Correct it, recalculate, and repeat the failed checks; never report success with a known formula error.
+
 ## Tool discipline
 
-- Spreadsheet mutation tools are transactional and create snapshots. If verification shows an unintended change, use `undo_last`.
-- In the `ours` comparison arm, follow the arm instruction to use the managed code interpreter as the primary inspection and mutation path; `sheet_harness.save_workbook` records managed saves. Use native mutation tools for narrow gaps or when the arm instruction explicitly routes to them.
+- In the `ours` comparison arm, use only its fixed tool set: `code_interpreter`, `inspect_range`, `fill_formula`, `recalculate_and_read`, `render_workbook`, and `view_image`.
+- Use the managed code interpreter as the primary inspection and mutation path; `sheet_harness.save_workbook` records managed saves. Use `inspect_range` only for a bounded target check and `fill_formula` only for an already-verified adjacent pattern.
+- Use `recalculate_and_read` only when formula results matter. Use `render_workbook` followed by `view_image` only when the answer depends on layout or visual formatting.
 - Never access paths outside the run workspace or embed credentials in code, cells, logs, or responses.

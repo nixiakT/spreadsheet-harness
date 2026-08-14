@@ -29,6 +29,7 @@ from .errors import (
     AgentTurnLimitError,
     HarnessError,
     ProviderError,
+    ProviderOutputLimitError,
     redact_sensitive_text,
 )
 from .pacing import RelayPacer
@@ -80,7 +81,7 @@ _EDIT_RECOVERY_DIAGNOSTICS_MAX_CHARS = 6_000
 _IMAGE_TURN_MAX_BYTES = 20 * 1024 * 1024
 _WORKBOOK_CHANGE_REMINDER_AFTER_TURNS = 3
 _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS = 512
-_FINAL_TOOL_MAX_OUTPUT_TOKENS = 1_024
+_FINAL_TOOL_MAX_OUTPUT_TOKENS = 128
 _DIRECT_WORKBOOK_MUTATION_TOOLS = frozenset(
     {
         "clear_range",
@@ -139,22 +140,39 @@ _SAFE_RESPONSE_HEADERS = frozenset(
 )
 TERMINAL_TOOL_NAME = "submit_result"
 ASSISTANT_TEXT_TERMINAL = "assistant_text"
-FINAL_RECOVERY_TERMINAL = "final_recovery_code_interpreter"
 BUDGET_EXHAUSTED_TERMINAL = "budget_exhausted"
+OUTPUT_LIMIT_TERMINAL = "submit_result_length"
+_TERMINAL_SUCCESS_TEXT = "Spreadsheet task completed."
 _TERMINAL_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
     "name": TERMINAL_TOOL_NAME,
     "description": (
         "Finish the current harness stage. Call this exactly once, and only after all required "
-        "inspection, editing, and verification is complete. Put the complete final response in "
-        "the result field."
+        "inspection, editing, and verification is complete. This is only an acknowledgement; "
+        "do not add prose or arguments."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    },
+    "strict": False,
+}
+_TERMINAL_RESULT_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "name": TERMINAL_TOOL_NAME,
+    "description": (
+        "Finish the current evidence-producing harness stage. Call this exactly once, and only "
+        "after all required inspection and verification is complete. Put the complete evidence "
+        "response in the result field."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "result": {
                 "type": "string",
-                "description": "The complete final response for this stage.",
+                "description": "The complete evidence response for this stage.",
                 "minLength": 1,
             }
         },
@@ -487,6 +505,30 @@ def _chat_usage(value: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _discarded_chat_message_metadata(message: dict[str, Any]) -> dict[str, object]:
+    """Describe a discarded partial message without retaining its contents."""
+
+    encoded = json.dumps(
+        message,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    content = message.get("content")
+    tool_calls = message.get("tool_calls")
+    return {
+        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "serialized_chars": len(encoded),
+        "serialized_bytes": len(encoded.encode("utf-8")),
+        "top_level_field_count": len(message),
+        "content_item_count": (
+            len(content) if isinstance(content, list) else int(content is not None)
+        ),
+        "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+    }
+
+
 def _chat_message_to_output(message: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     output: list[dict[str, Any]] = []
     text = str(message.get("content") or "")
@@ -771,6 +813,37 @@ class ResponseTurn:
         }
 
 
+def _timing_from_attempt_detail(
+    detail: dict[str, object],
+    *,
+    attempts: int,
+    elapsed_seconds: float,
+    attempt_history: list[dict[str, object]],
+) -> dict[str, object]:
+    pacing_wait_seconds_total = sum(
+        float((item.get("pacing") or {}).get("wait_seconds", 0.0) or 0.0)
+        for item in attempt_history
+        if isinstance(item.get("pacing"), dict)
+    )
+    return {
+        "attempts": attempts,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "first_event_seconds": detail.get("first_event_seconds"),
+        "headers_seconds": detail.get("headers_seconds"),
+        "terminal_seconds": detail.get("terminal_seconds"),
+        "terminal_event": detail.get("terminal_event"),
+        "status_code": detail.get("status_code"),
+        "sse_events": detail.get("sse_events", 0),
+        "logical_request_id": detail.get("logical_request_id"),
+        "client_request_id": detail.get("client_request_id"),
+        "request_payload_sha256": detail.get("request_payload_sha256"),
+        "response_headers": dict(detail.get("response_headers") or {}),
+        "delivery_state": detail.get("delivery_state"),
+        "pacing_wait_seconds_total": round(pacing_wait_seconds_total, 3),
+        "attempt_history": [dict(item) for item in attempt_history],
+    }
+
+
 @dataclass
 class AgentResult:
     final_text: str
@@ -791,6 +864,7 @@ class AgentResult:
     terminal_tool: str | None = None
     observed_terminal_tool: str | None = None
     terminal_submissions: int = 0
+    terminal_response: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -822,6 +896,8 @@ class AgentResult:
         if self.terminal_tool is not None:
             result["terminal_tool"] = self.terminal_tool
             result["observed_terminal_tool"] = self.observed_terminal_tool
+        if self.terminal_response is not None:
+            result["terminal_response"] = self.terminal_response
         return result
 
 
@@ -1656,6 +1732,44 @@ class ChatCompletionsClient:
                     status_code=status_code,
                     delivery_state=delivery_state,
                 )
+            finish_reason = choice.get("finish_reason")
+            if finish_reason == "length":
+                delivery_state = "terminal_seen"
+                attempt_detail = self._attempt_detail(
+                    started=started,
+                    logical_request_id=logical_request_id,
+                    client_request_id=client_request_id,
+                    request_payload_sha256=request_payload_sha256,
+                    pacing=pacing,
+                    headers_seconds=headers_seconds,
+                    terminal_seconds=terminal_seconds,
+                    status_code=status_code,
+                    response_headers=response_headers,
+                    delivery_state=delivery_state,
+                )
+                usage_value = data.get("usage")
+                usage = _chat_usage(usage_value if isinstance(usage_value, dict) else {})
+                raise ProviderOutputLimitError(
+                    "Chat Completions API reached its output limit "
+                    "(finish_reason='length'); the partial assistant message was discarded",
+                    response_id=(
+                        str(data.get("id")) if data.get("id") is not None else None
+                    ),
+                    usage=usage,
+                    timing=_timing_from_attempt_detail(
+                        attempt_detail,
+                        attempts=1,
+                        elapsed_seconds=time.monotonic() - started,
+                        attempt_history=[],
+                    ),
+                    discarded_message=_discarded_chat_message_metadata(message),
+                    retryable=False,
+                    phase="response_body",
+                    status_code=status_code,
+                    safe_to_retry=False,
+                    delivery_state=delivery_state,
+                    attempt_detail=attempt_detail,
+                )
             output, text = _chat_message_to_output(message)
             try:
                 function_calls = _validated_function_calls(output)
@@ -1676,7 +1790,6 @@ class ChatCompletionsClient:
                         delivery_state="terminal_seen",
                     )
                 raise
-            finish_reason = choice.get("finish_reason")
             expected_finish_reason = "tool_calls" if function_calls else "stop"
             if finish_reason != expected_finish_reason:
                 delivery_state = "terminal_seen"
@@ -2024,6 +2137,13 @@ class ChatCompletionsClient:
                 exc.safe_to_retry = safe_to_retry
                 exc.safe_retry_reason = safe_retry_reason if safe_to_retry else None
                 exc.delivery_state = str(detail["delivery_state"])
+                if isinstance(exc, ProviderOutputLimitError):
+                    exc.timing = _timing_from_attempt_detail(
+                        detail,
+                        attempts=attempt + 1,
+                        elapsed_seconds=time.monotonic() - started,
+                        attempt_history=attempt_history,
+                    )
                 if not retry_scheduled:
                     exc.attempts = attempt + 1
                     exc.elapsed_seconds = time.monotonic() - started
@@ -2221,6 +2341,7 @@ class SpreadsheetAgent:
         first_tool_choice: str | None = None,
         forced_tool_prefix: tuple[str, ...] | None = None,
         required_tool_termination: bool = False,
+        terminal_result_required: bool = False,
         require_workbook_change: bool = False,
         force_code_on_stalled_edit: bool = False,
         pacer: RelayPacer | None = None,
@@ -2245,12 +2366,17 @@ class SpreadsheetAgent:
             self.forced_tool_prefix[0] if self.forced_tool_prefix else None
         )
         self.required_tool_termination = required_tool_termination
+        self.terminal_result_required = terminal_result_required
         self.require_workbook_change = require_workbook_change
         self.force_code_on_stalled_edit = force_code_on_stalled_edit
         self.pacer = pacer
         if len(self.forced_tool_prefix) >= self.max_turns:
             raise ValueError(
                 "forced_tool_prefix must leave at least one turn for the final response"
+            )
+        if self.terminal_result_required and not self.required_tool_termination:
+            raise ValueError(
+                "terminal_result_required needs required_tool_termination"
             )
 
     def _instructions(self) -> tuple[str, list[dict[str, str]]]:
@@ -2266,12 +2392,20 @@ class SpreadsheetAgent:
                 "\nSome early responses may be explicitly routed to one required function. "
                 "After those routed calls, call another tool only when it is needed for a "
                 "specific inspection, edit, or verification gap. When the stage is complete, "
-                f"call {TERMINAL_TOOL_NAME} or return a concise final text response. Do not call "
-                f"another function in the same response as {TERMINAL_TOOL_NAME}. On the final "
-                f"allowed turn, only {TERMINAL_TOOL_NAME} will normally be available, so "
-                "complete and verify the workbook before then. In an editing stage, the final "
-                "turn may instead be reserved for one code_interpreter recovery call when the "
-                "managed workbook is still unchanged or a failed edit still needs recovery."
+                f"call {TERMINAL_TOOL_NAME}; a text-only response cannot finish this stage. Do "
+                f"not call another function in the same response as {TERMINAL_TOOL_NAME}. On "
+                "the final "
+                f"allowed turn, only {TERMINAL_TOOL_NAME} will normally be available. "
+                + (
+                    "Put the complete requested evidence in its result field and add no prose "
+                    "outside the tool call. "
+                    if self.terminal_result_required
+                    else "Call it with an empty object and no prose; the harness supplies the "
+                    "final text. "
+                )
+                + "Therefore, complete and verify the workbook before then. In an editing stage, "
+                "any forced code_interpreter recovery occurs no later than the penultimate "
+                f"model call; the final call remains reserved for {TERMINAL_TOOL_NAME}."
             )
         if self.require_workbook_change:
             instructions += (
@@ -2309,6 +2443,13 @@ class SpreadsheetAgent:
                 )
 
         system, skill_manifest = self._instructions()
+        terminal_submission_requirement = (
+            f"Call {TERMINAL_TOOL_NAME} exactly once with the complete requested evidence in "
+            "its result field and no prose outside the tool call."
+            if self.terminal_result_required
+            else f"Call {TERMINAL_TOOL_NAME} exactly once with an empty JSON object and no "
+            "prose outside the tool call."
+        )
         session = self.tools.session
         initial_workbook_sha256 = (
             _safe_file_sha256(session.workbook_path)
@@ -2344,7 +2485,11 @@ class SpreadsheetAgent:
                 raise AgentRoutingError(
                     f"Workbook tool registry collides with terminal tool {TERMINAL_TOOL_NAME!r}"
                 )
-            tool_schemas.append(_TERMINAL_TOOL_SCHEMA)
+            tool_schemas.append(
+                _TERMINAL_RESULT_TOOL_SCHEMA
+                if self.terminal_result_required
+                else _TERMINAL_TOOL_SCHEMA
+            )
         initial_input: dict[str, Any] = {
             "role": "user",
             "content": [
@@ -2381,6 +2526,7 @@ class SpreadsheetAgent:
             turns: int,
             observed_terminal_tool: str | None,
             terminal_submissions: int = 0,
+            terminal_response: dict[str, Any] | None = None,
         ) -> AgentResult:
             return AgentResult(
                 final_text=final_text,
@@ -2403,6 +2549,9 @@ class SpreadsheetAgent:
                 ),
                 observed_terminal_tool=observed_terminal_tool,
                 terminal_submissions=terminal_submissions,
+                terminal_response=(
+                    dict(terminal_response) if terminal_response is not None else None
+                ),
             )
 
         def execution_failure(
@@ -2412,12 +2561,14 @@ class SpreadsheetAgent:
             turns: int,
             observed_terminal_tool: str | None,
             terminal_submissions: int = 0,
+            terminal_response: dict[str, Any] | None = None,
         ) -> AgentExecutionFailure:
             result = partial_result(
                 final_text=message,
                 turns=turns,
                 observed_terminal_tool=observed_terminal_tool,
                 terminal_submissions=terminal_submissions,
+                terminal_response=terminal_response,
             )
             session.recorder.record(
                 "agent.execution_failed",
@@ -2433,12 +2584,14 @@ class SpreadsheetAgent:
             error: AgentBudgetError,
             *,
             turns: int,
+            terminal_response: dict[str, Any] | None = None,
         ) -> AgentExecutionFailure:
             return execution_failure(
                 str(error),
                 reason="budget_exhausted",
                 turns=turns,
                 observed_terminal_tool=BUDGET_EXHAUSTED_TERMINAL,
+                terminal_response=terminal_response,
             )
 
         def safe_edit_recovery_diagnostics(
@@ -2502,8 +2655,7 @@ class SpreadsheetAgent:
                     "reasoning": {"effort": self.config.reasoning_effort},
                     "max_output_tokens": self.max_output_tokens,
                 })
-                final_turn_code_recovery = False
-                final_turn_recovery_was_active = False
+                recovery_turn_code_forced = False
                 terminal_route_forced = False
                 remaining_model_calls = (
                     self.budget.remaining_model_calls()
@@ -2515,6 +2667,14 @@ class SpreadsheetAgent:
                     and remaining_model_calls == 1
                 )
                 final_agent_turn = turn_number == self.max_turns
+                recovery_slot_turn = bool(
+                    not final_agent_turn
+                    and not budget_terminal_turn
+                    and (
+                        turn_number == self.max_turns - 1
+                        or remaining_model_calls == 2
+                    )
+                )
                 if tool_schemas:
                     tool_choice: str | dict[str, str] = "auto"
                     request_tool_schemas = tool_schemas
@@ -2530,16 +2690,58 @@ class SpreadsheetAgent:
                         and self.require_workbook_change
                         and self.force_code_on_stalled_edit
                         and "code_interpreter" in tool_names
-                        and final_agent_turn
+                        and recovery_slot_turn
                     ):
-                        final_turn_recovery_was_active = stalled_edit_recovery_active
-                        final_turn_code_recovery = bool(
+                        recovery_turn_code_forced = bool(
                             stalled_edit_recovery_active
                             or not refresh_workbook_changed()
                         )
-                    if forced_tool is None and final_turn_code_recovery:
+                    if forced_tool is None and recovery_turn_code_forced:
                         forced_tool = "code_interpreter"
-                    if forced_tool is not None:
+                    if self.required_tool_termination and (
+                        final_agent_turn or budget_terminal_turn
+                    ):
+                        if forced_tool is not None:
+                            failure_detail = {
+                                "stage": self.stage,
+                                "turn": turn_number,
+                                "forced_prefix_index": forced_prefix_index,
+                                "next_forced_tool": forced_tool,
+                                "remaining_forced_tool_prefix": list(
+                                    self.forced_tool_prefix[forced_prefix_index:]
+                                ),
+                                "terminal_tool": TERMINAL_TOOL_NAME,
+                                "reservation_basis": [
+                                    basis
+                                    for basis, active in (
+                                        ("max_turns", final_agent_turn),
+                                        ("max_model_calls", budget_terminal_turn),
+                                    )
+                                    if active
+                                ],
+                                "reason": "forced_prefix_incomplete_before_terminal",
+                            }
+                            session.recorder.record("agent.routing_failed", failure_detail)
+                            raise AgentRoutingError(
+                                "Forced tool prefix remained incomplete before the reserved "
+                                f"{TERMINAL_TOOL_NAME!r} route"
+                            )
+                        terminal_route_forced = True
+                        request_tool_schemas = [
+                            schema
+                            for schema in tool_schemas
+                            if schema.get("name") == TERMINAL_TOOL_NAME
+                        ]
+                        tool_choice = {
+                            "type": "function",
+                            "name": TERMINAL_TOOL_NAME,
+                        }
+                        if not self.terminal_result_required:
+                            request_max_output_tokens = min(
+                                request_max_output_tokens,
+                                _FINAL_TOOL_MAX_OUTPUT_TOKENS,
+                            )
+                    elif forced_tool is not None:
                         request_tool_schemas = [
                             schema
                             for schema in tool_schemas
@@ -2554,23 +2756,6 @@ class SpreadsheetAgent:
                                 request_max_output_tokens,
                                 _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
                             )
-                    elif self.required_tool_termination and (
-                        final_agent_turn or budget_terminal_turn
-                    ):
-                        terminal_route_forced = True
-                        request_tool_schemas = [
-                            schema
-                            for schema in tool_schemas
-                            if schema.get("name") == TERMINAL_TOOL_NAME
-                        ]
-                        tool_choice = {
-                            "type": "function",
-                            "name": TERMINAL_TOOL_NAME,
-                        }
-                        request_max_output_tokens = min(
-                            request_max_output_tokens,
-                            _FINAL_TOOL_MAX_OUTPUT_TOKENS,
-                        )
                     elif self.required_tool_termination:
                         tool_choice = "auto"
                     payload["max_output_tokens"] = request_max_output_tokens
@@ -2647,6 +2832,116 @@ class SpreadsheetAgent:
                         on_text=on_text,
                         deadline=task_deadline,
                     )
+                except ProviderOutputLimitError as exc:
+                    budget_error: AgentBudgetError | None = None
+                    if self.budget is not None:
+                        assert reservation is not None
+                        try:
+                            self.budget.record_response(
+                                reservation,
+                                exc.usage,
+                                stage=self.stage,
+                            )
+                        except AgentBudgetError as budget_exc:
+                            budget_error = budget_exc
+                    exact_forced_terminal_route = bool(
+                        terminal_route_forced
+                        and payload.get("tool_choice")
+                        == {"type": "function", "name": TERMINAL_TOOL_NAME}
+                        and [
+                            str(schema.get("name", ""))
+                            for schema in payload.get("tools", [])
+                        ]
+                        == [TERMINAL_TOOL_NAME]
+                        and payload.get("parallel_tool_calls") is False
+                    )
+                    if not exact_forced_terminal_route:
+                        session.recorder.record(
+                            "model.failed",
+                            {
+                                "turn": turn_number,
+                                "stage": self.stage,
+                                "provider_error": exc.public_dict(
+                                    secrets=(self.config.api_key,)
+                                ),
+                            },
+                        )
+                        if budget_error is not None:
+                            session.recorder.record(
+                                "agent.budget_exceeded",
+                                {
+                                    "turn": turn_number,
+                                    "stage": self.stage,
+                                    "reason": budget_error.reason,
+                                    "budget": budget_error.budget,
+                                },
+                            )
+                        raise
+
+                    last_id = exc.response_id
+                    request_timings.append(
+                        {
+                            "turn": turn_number,
+                            "stage": self.stage,
+                            **exc.timing,
+                            **context_metrics,
+                            "input_tokens": int(
+                                exc.usage.get("input_tokens", 0) or 0
+                            ),
+                            "output_tokens": int(
+                                exc.usage.get("output_tokens", 0) or 0
+                            ),
+                            "total_tokens": int(
+                                exc.usage.get("total_tokens", 0) or 0
+                            ),
+                        }
+                    )
+                    for key in total_usage:
+                        total_usage[key] += int(exc.usage.get(key, 0) or 0)
+                    terminal_response = {
+                        "status": "truncated",
+                        "finish_reason": "length",
+                        "response_id": exc.response_id,
+                        "usage": dict(exc.usage),
+                        "timing": dict(exc.timing),
+                        "discarded_message": dict(exc.discarded_message),
+                    }
+                    session.recorder.record(
+                        "model.failed",
+                        {
+                            "turn": turn_number,
+                            "stage": self.stage,
+                            "provider_error": exc.public_dict(
+                                secrets=(self.config.api_key,)
+                            ),
+                        },
+                    )
+                    if budget_error is not None:
+                        session.recorder.record(
+                            "agent.budget_exceeded",
+                            {
+                                "turn": turn_number,
+                                "stage": self.stage,
+                                "reason": budget_error.reason,
+                                "budget": budget_error.budget,
+                            },
+                        )
+                        if budget_error.reason in MODEL_EXECUTION_BUDGET_TERMINATIONS:
+                            raise budget_execution_failure(
+                                budget_error,
+                                turns=turn_number,
+                                terminal_response=terminal_response,
+                            ) from budget_error
+                        raise budget_error from exc
+                    ensure_within_deadline()
+                    raise execution_failure(
+                        "Terminal submit_result response was truncated by the provider "
+                        "output limit.",
+                        reason="terminal_submission_truncated",
+                        turns=turn_number,
+                        observed_terminal_tool=OUTPUT_LIMIT_TERMINAL,
+                        terminal_response=terminal_response,
+                    ) from exc
                 except ProviderError as exc:
                     if self.budget is not None and reservation is not None:
                         self.budget.cancel_model_call(reservation)
@@ -2725,15 +3020,16 @@ class SpreadsheetAgent:
                         },
                     )
                     raise
-                expected_forced_tool = (
-                    self.forced_tool_prefix[forced_prefix_index]
-                    if forced_prefix_index < len(self.forced_tool_prefix)
-                    else None
-                )
-                if expected_forced_tool is None and final_turn_code_recovery:
-                    expected_forced_tool = "code_interpreter"
-                if expected_forced_tool is None and terminal_route_forced:
+                if terminal_route_forced:
                     expected_forced_tool = TERMINAL_TOOL_NAME
+                else:
+                    expected_forced_tool = (
+                        self.forced_tool_prefix[forced_prefix_index]
+                        if forced_prefix_index < len(self.forced_tool_prefix)
+                        else None
+                    )
+                    if expected_forced_tool is None and recovery_turn_code_forced:
+                        expected_forced_tool = "code_interpreter"
                 observed_forced_prefix_tool: str | None = None
                 if expected_forced_tool is not None:
                     observed_forced_tools = [
@@ -2806,9 +3102,12 @@ class SpreadsheetAgent:
                             f"{expected_forced_tool!r} call; observed {observed_forced_tools!r}"
                         )
                     assert observed_forced_tool is not None
-                    if forced_prefix_index == 0:
-                        observed_first_tool = observed_forced_tool
-                    if forced_prefix_index < len(self.forced_tool_prefix):
+                    if (
+                        not terminal_route_forced
+                        and forced_prefix_index < len(self.forced_tool_prefix)
+                    ):
+                        if forced_prefix_index == 0:
+                            observed_first_tool = observed_forced_tool
                         observed_forced_prefix_tool = observed_forced_tool
                 if self.required_tool_termination and len(function_calls) > 1:
                     observed_names = [
@@ -2896,15 +3195,42 @@ class SpreadsheetAgent:
                             observed_terminal_tool=TERMINAL_TOOL_NAME,
                             terminal_submissions=1,
                         ) from exc
-                    final_text = arguments.get("result") if isinstance(arguments, dict) else None
-                    if not isinstance(final_text, str) or not final_text.strip():
-                        raise execution_failure(
-                            f"Terminal tool {TERMINAL_TOOL_NAME!r} requires a non-empty result",
-                            reason="terminal_submission_invalid",
-                            turns=turn_number,
-                            observed_terminal_tool=TERMINAL_TOOL_NAME,
-                            terminal_submissions=1,
+                    if self.terminal_result_required:
+                        valid_evidence_arguments = bool(
+                            isinstance(arguments, dict)
+                            and set(arguments) == {"result"}
+                            and isinstance(arguments.get("result"), str)
+                            and arguments["result"].strip()
                         )
+                        if not valid_evidence_arguments:
+                            raise execution_failure(
+                                f"Terminal tool {TERMINAL_TOOL_NAME!r} requires exactly one "
+                                "non-empty string argument named 'result'",
+                                reason="terminal_submission_invalid",
+                                turns=turn_number,
+                                observed_terminal_tool=TERMINAL_TOOL_NAME,
+                                terminal_submissions=1,
+                            )
+                        final_text = arguments["result"]
+                        acknowledgement = {
+                            "mode": "evidence_result",
+                            "result_chars": len(final_text),
+                            "result_sha256": hashlib.sha256(
+                                final_text.encode("utf-8")
+                            ).hexdigest(),
+                        }
+                    else:
+                        if arguments != {}:
+                            raise execution_failure(
+                                f"Terminal tool {TERMINAL_TOOL_NAME!r} requires an empty "
+                                "acknowledgement object",
+                                reason="terminal_submission_invalid",
+                                turns=turn_number,
+                                observed_terminal_tool=TERMINAL_TOOL_NAME,
+                                terminal_submissions=1,
+                            )
+                        final_text = _TERMINAL_SUCCESS_TEXT
+                        acknowledgement = {}
                     if stalled_edit_recovery_active:
                         if turn_number < self.max_turns:
                             recent_items = list(turn.output)
@@ -3014,6 +3340,11 @@ class SpreadsheetAgent:
                             observed_terminal_tool=TERMINAL_TOOL_NAME,
                             terminal_submissions=1,
                         )
+                    terminal_response = {
+                        "status": "accepted",
+                        "response_id": last_id,
+                        "acknowledgement": acknowledgement,
+                    }
                     result = AgentResult(
                         final_text=final_text,
                         turns=turn_number,
@@ -3033,6 +3364,7 @@ class SpreadsheetAgent:
                         terminal_tool=TERMINAL_TOOL_NAME,
                         observed_terminal_tool=TERMINAL_TOOL_NAME,
                         terminal_submissions=1,
+                        terminal_response=terminal_response,
                     )
                     session.recorder.record(
                         "agent.terminal_submitted",
@@ -3040,6 +3372,7 @@ class SpreadsheetAgent:
                             "stage": self.stage,
                             "turn": turn_number,
                             "terminal_tool": TERMINAL_TOOL_NAME,
+                            "terminal_response": terminal_response,
                         },
                     )
                     session.recorder.record("agent.completed", result.to_dict())
@@ -3061,8 +3394,8 @@ class SpreadsheetAgent:
                                     and "code_interpreter" in tool_names
                                     else (
                                         "Your previous response was empty. Continue by calling "
-                                        "one available tool if work remains, or finish by calling "
-                                        f"{TERMINAL_TOOL_NAME} / returning a concise final answer."
+                                        "one available workbook tool if work remains. When the "
+                                        f"stage is complete, {terminal_submission_requirement}"
                                     )
                                 )
                                 recent_items.append(
@@ -3197,31 +3530,40 @@ class SpreadsheetAgent:
                                 turns=turn_number,
                                 observed_terminal_tool=ASSISTANT_TEXT_TERMINAL,
                             )
-                        result = AgentResult(
-                            final_text=final_text,
-                            turns=turn_number,
-                            tool_calls=calls,
-                            usage=total_usage,
-                            response_id=last_id,
-                            request_timings=request_timings,
-                            context_policy=dict(CONTEXT_POLICY),
-                            budget=(
-                                self.budget.to_dict()
-                                if self.budget is not None
-                                else None
-                            ),
-                            stage=self.stage,
-                            tool_trace=tool_trace,
-                            first_tool_choice=self.first_tool_choice,
-                            observed_first_tool=observed_first_tool,
-                            forced_tool_prefix=list(self.forced_tool_prefix),
-                            observed_forced_tool_prefix=observed_forced_tool_prefix,
-                            post_prefix_tool_choice="auto",
-                            terminal_tool=TERMINAL_TOOL_NAME,
-                            observed_terminal_tool=ASSISTANT_TEXT_TERMINAL,
-                        )
+                        if turn_number < self.max_turns:
+                            recent_items = list(turn.output)
+                            recent_items.append(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": (
+                                                "A text-only response cannot finish this "
+                                                "required-tool stage. Continue with one available "
+                                                "workbook tool if work remains. When the stage is "
+                                                f"complete, {terminal_submission_requirement}"
+                                            ),
+                                        }
+                                    ],
+                                }
+                            )
+                            recent_summaries = []
+                            recent_raw_tool_output_chars = 0
+                            recent_image_bytes = 0
+                            recent_image_count = 0
+                            session.recorder.record(
+                                "agent.text_required_response_reprompted",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "terminal_tool": TERMINAL_TOOL_NAME,
+                                    "observed_terminal_tool": ASSISTANT_TEXT_TERMINAL,
+                                },
+                            )
+                            continue
                         session.recorder.record(
-                            "agent.terminal_submitted",
+                            "agent.routing_failed",
                             {
                                 "stage": self.stage,
                                 "turn": turn_number,
@@ -3229,8 +3571,10 @@ class SpreadsheetAgent:
                                 "observed_terminal_tool": ASSISTANT_TEXT_TERMINAL,
                             },
                         )
-                        session.recorder.record("agent.completed", result.to_dict())
-                        return result
+                        raise AgentRoutingError(
+                            "Required-tool stage returned text without calling "
+                            f"{TERMINAL_TOOL_NAME!r}"
+                        )
                     result = AgentResult(
                         final_text=turn.text,
                         turns=turn_number,
@@ -3267,7 +3611,6 @@ class SpreadsheetAgent:
                     else None
                 )
                 turn_had_failed_edit = False
-                turn_successful_code_call = False
                 for function_call, call_id in function_calls:
                     ensure_within_deadline()
                     calls += 1
@@ -3306,8 +3649,6 @@ class SpreadsheetAgent:
                             safe_edit_recovery_diagnostics(outcome_data)
                             or latest_edit_recovery_diagnostics
                         )
-                    if name == "code_interpreter" and outcome_data.get("ok") is True:
-                        turn_successful_code_call = True
                     next_recent_items.append(
                         _replayed_function_call(
                             function_call,
@@ -3469,9 +3810,6 @@ class SpreadsheetAgent:
                     and changed_after_tools
                     and not turn_had_failed_edit
                 )
-                final_code_recovery_succeeded = (
-                    turn_successful_code_call and state_recovery_succeeded
-                )
                 stalled_edit_recovery_active = bool(
                     self.require_workbook_change
                     and was_stalled_edit_recovery_active
@@ -3479,48 +3817,6 @@ class SpreadsheetAgent:
                 )
                 if state_recovery_succeeded:
                     latest_edit_recovery_diagnostics = None
-                if (
-                    self.required_tool_termination
-                    and self.force_code_on_stalled_edit
-                    and final_agent_turn
-                    and final_turn_code_recovery
-                    and final_code_recovery_succeeded
-                ):
-                    result = AgentResult(
-                        final_text=(
-                            "Workbook edited and saved during the final recovery "
-                            "code_interpreter call."
-                        ),
-                        turns=turn_number,
-                        tool_calls=calls,
-                        usage=total_usage,
-                        response_id=last_id,
-                        request_timings=request_timings,
-                        context_policy=dict(CONTEXT_POLICY),
-                        budget=(
-                            self.budget.to_dict() if self.budget is not None else None
-                        ),
-                        stage=self.stage,
-                        tool_trace=tool_trace,
-                        first_tool_choice=self.first_tool_choice,
-                        observed_first_tool=observed_first_tool,
-                        forced_tool_prefix=list(self.forced_tool_prefix),
-                        observed_forced_tool_prefix=observed_forced_tool_prefix,
-                        post_prefix_tool_choice="auto",
-                        terminal_tool=TERMINAL_TOOL_NAME,
-                        observed_terminal_tool=FINAL_RECOVERY_TERMINAL,
-                    )
-                    session.recorder.record(
-                        "agent.final_recovery_completed",
-                        {
-                            "stage": self.stage,
-                            "turn": turn_number,
-                            "terminal_tool": TERMINAL_TOOL_NAME,
-                            "observed_terminal_tool": FINAL_RECOVERY_TERMINAL,
-                        },
-                    )
-                    session.recorder.record("agent.completed", result.to_dict())
-                    return result
                 if (
                     self.require_workbook_change
                     and stalled_edit_recovery_active
@@ -3582,34 +3878,6 @@ class SpreadsheetAgent:
                             "tool_calls": calls,
                             "turn_had_failed_edit": turn_had_failed_edit,
                         },
-                    )
-                if (
-                    self.require_workbook_change
-                    and self.force_code_on_stalled_edit
-                    and "code_interpreter" in tool_names
-                    and final_agent_turn
-                    and final_turn_code_recovery
-                ):
-                    session.recorder.record(
-                        "agent.routing_failed",
-                        {
-                            "stage": self.stage,
-                            "turn": turn_number,
-                            "reason": "failed_workbook_tool_on_final_turn",
-                        },
-                    )
-                    reason = (
-                        "edit_recovery_exhausted"
-                        if final_turn_recovery_was_active
-                        or turn_had_failed_edit
-                        else "workbook_unchanged"
-                    )
-                    raise execution_failure(
-                        "Final workbook recovery did not produce a saved workbook change "
-                        "before the turn limit",
-                        reason=reason,
-                        turns=turn_number,
-                        observed_terminal_tool=FINAL_RECOVERY_TERMINAL,
                     )
                 if (
                     self.require_workbook_change

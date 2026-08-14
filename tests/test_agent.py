@@ -28,6 +28,7 @@ from spreadsheet_harness.errors import (
     AgentRoutingError,
     HarnessError,
     ProviderError,
+    ProviderOutputLimitError,
 )
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
@@ -84,6 +85,195 @@ class FakeResponsesClient:
             "Done",
             {"input_tokens": 20, "output_tokens": 3, "total_tokens": 23},
         )
+
+
+def _output_limit_error(*, total_tokens: int = 12) -> ProviderOutputLimitError:
+    usage = {
+        "input_tokens": max(total_tokens - 4, 0),
+        "output_tokens": min(total_tokens, 4),
+        "total_tokens": total_tokens,
+    }
+    attempt_history: list[dict[str, object]] = [
+        {
+            "attempt": 1,
+            "outcome": "error",
+            "error_type": "ProviderOutputLimitError",
+            "phase": "response_body",
+            "status_code": 200,
+            "retryable": False,
+            "safe_to_retry": False,
+            "automatic_retry_scheduled": False,
+            "delivery_state": "terminal_seen",
+        }
+    ]
+    timing: dict[str, object] = {
+        "attempts": 1,
+        "elapsed_seconds": 0.25,
+        "first_event_seconds": 0.1,
+        "headers_seconds": 0.1,
+        "terminal_seconds": 0.2,
+        "terminal_event": "chat.completion",
+        "status_code": 200,
+        "sse_events": 0,
+        "logical_request_id": "logical-output-limit",
+        "client_request_id": "logical-output-limit-1",
+        "request_payload_sha256": "a" * 64,
+        "response_headers": {},
+        "delivery_state": "terminal_seen",
+        "pacing_wait_seconds_total": 0.0,
+        "attempt_history": attempt_history,
+    }
+    return ProviderOutputLimitError(
+        "provider output limit",
+        response_id="response-output-limit",
+        usage=usage,
+        timing=timing,
+        discarded_message={
+            "sha256": "b" * 64,
+            "serialized_chars": 91,
+            "serialized_bytes": 91,
+            "top_level_field_count": 3,
+            "content_item_count": 1,
+            "tool_call_count": 1,
+        },
+        retryable=False,
+        phase="response_body",
+        status_code=200,
+        safe_to_retry=False,
+        delivery_state="terminal_seen",
+        attempt_history=attempt_history,
+    )
+
+
+def test_chat_completions_length_is_typed_and_discards_partial_message_before_conversion(
+    monkeypatch: Any,
+) -> None:
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "test-model",
+        api_protocol="chat-completions",
+        max_retries=0,
+    )
+    partial_secret = "partial-secret-must-never-be-retained"
+    message = {
+        "role": "assistant",
+        "content": partial_secret,
+        "tool_calls": [
+            {
+                "id": "malicious-call",
+                "type": "function",
+                "function": {
+                    "name": "delete_rows",
+                    "arguments": '{"sheet_name":"Sheet1","start_row":1',
+                },
+            }
+        ],
+    }
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat-output-limit",
+                "choices": [{"message": message, "finish_reason": "length"}],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "completion_tokens": 5,
+                    "total_tokens": 22,
+                },
+            },
+        )
+
+    def forbidden_conversion(_: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+        raise AssertionError("a length-limited message must never be converted")
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent._chat_message_to_output", forbidden_conversion
+    )
+    client = ChatCompletionsClient(config)
+    client._client.close()
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+    streamed: list[str] = []
+    try:
+        with pytest.raises(ProviderOutputLimitError) as caught:
+            client.create(
+                {
+                    "model": config.model,
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "submit_result",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                            },
+                        }
+                    ],
+                    "tool_choice": {"type": "function", "name": "submit_result"},
+                },
+                on_text=streamed.append,
+            )
+    finally:
+        client.close()
+
+    error = caught.value
+    assert error.response_id == "chat-output-limit"
+    assert error.usage == {
+        "input_tokens": 17,
+        "output_tokens": 5,
+        "total_tokens": 22,
+    }
+    assert error.status_code == 200
+    assert error.retryable is False
+    assert error.safe_to_retry is False
+    assert error.delivery_state == "terminal_seen"
+    assert error.timing["attempts"] == 1
+    assert error.timing["status_code"] == 200
+    assert error.timing["terminal_event"] == "chat.completion"
+    assert error.timing["delivery_state"] == "terminal_seen"
+    attempt = error.timing["attempt_history"][0]
+    assert attempt["outcome"] == "error"
+    assert attempt["error_type"] == "ProviderOutputLimitError"
+    assert attempt["automatic_retry_scheduled"] is False
+    assert error.discarded_message == {
+        "sha256": hashlib.sha256(
+            json.dumps(
+                message,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest(),
+        "serialized_chars": len(
+            json.dumps(
+                message,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        ),
+        "serialized_bytes": len(
+            json.dumps(
+                message,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ),
+        "top_level_field_count": 3,
+        "content_item_count": 1,
+        "tool_call_count": 1,
+    }
+    persisted = json.dumps(error.public_dict(), ensure_ascii=False)
+    assert partial_secret not in persisted
+    assert "delete_rows" not in persisted
+    assert "sheet_name" not in persisted
+    assert streamed == []
 
 
 @pytest.mark.parametrize(
@@ -199,7 +389,7 @@ def test_agent_rejects_unchanged_workbook_submit(
                         "id": "fc-2",
                         "call_id": "call-2",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "done"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -666,7 +856,7 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "verified result"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -699,7 +889,18 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
     assert any(
         tool["name"] == "submit_result" for tool in RequiredClient.requests[1]["tools"]
     )
-    assert result.final_text == "verified result"
+    terminal_schema = next(
+        tool
+        for tool in RequiredClient.requests[1]["tools"]
+        if tool["name"] == "submit_result"
+    )
+    assert terminal_schema["parameters"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+    assert result.final_text == "Spreadsheet task completed."
     assert result.tool_calls == 1
     assert result.terminal_submissions == 1
     assert result.to_dict()["function_calls_total"] == 2
@@ -709,6 +910,11 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
     assert result.post_prefix_tool_choice == "auto"
     assert result.terminal_tool == "submit_result"
     assert result.observed_terminal_tool == "submit_result"
+    assert result.terminal_response == {
+        "status": "accepted",
+        "response_id": "response-submit",
+        "acknowledgement": {},
+    }
     events = [
         json.loads(line)
         for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
@@ -757,7 +963,7 @@ def test_forced_code_interpreter_keeps_full_output_token_budget(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "done"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -851,7 +1057,10 @@ def test_agent_forces_code_recovery_after_stalled_edit(
                 assert payload["tool_choice"] == "auto"
                 return code_turn(self.turn, "print('still inspect only')")
             if self.turn == 5:
-                assert payload["tool_choice"] == "auto"
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
                 return code_turn(
                     self.turn,
                     "import sheet_harness\n"
@@ -867,7 +1076,7 @@ def test_agent_forces_code_recovery_after_stalled_edit(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "edited and verified"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -889,7 +1098,7 @@ def test_agent_forces_code_recovery_after_stalled_edit(
         max_turns=6,
     ).run("Edit the workbook")
 
-    assert result.final_text == "edited and verified"
+    assert result.final_text == "Spreadsheet task completed."
     assert result.tool_trace[3] == {"name": "code_interpreter", "ok": True}
     assert len(tools.invocations) == 5
     assert tools.invocations[-1]["arguments"]["code"].count("save_workbook") == 1
@@ -911,7 +1120,7 @@ def test_agent_forces_code_recovery_after_stalled_edit(
     assert continued[0]["payload"]["turn"] == 4
 
 
-def test_agent_allows_final_turn_code_recovery_after_actual_rollback(
+def test_agent_forces_penultimate_recovery_and_reserves_final_submit_after_rollback(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
     code_schema = {
@@ -944,7 +1153,7 @@ def test_agent_allows_final_turn_code_recovery_after_actual_rollback(
                 workbook.save(self.session.workbook_path)
                 workbook.close()
                 return ToolOutcome({"ok": True, "workbook_changed": True})
-            if self.calls == 3:
+            if self.calls == 2:
                 return ToolOutcome(
                     {
                         "ok": False,
@@ -999,20 +1208,42 @@ def test_agent_allows_final_turn_code_recovery_after_actual_rollback(
                     "wb.active['A1'] = 'edited'\n"
                     "sheet_harness.save_workbook(wb)\n",
                 )
-            if self.turn <= 3:
+            if self.turn == 2:
+                assert payload["tool_choice"] == "auto"
                 return code_turn(self.turn, "print('verify: H7 is empty - needs formula')")
+            if self.turn == 3:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
+                assert [tool["name"] for tool in payload["tools"]] == [
+                    "code_interpreter"
+                ]
+                return code_turn(
+                    self.turn,
+                    "import sheet_harness\n"
+                    "wb = sheet_harness.load_workbook()\n"
+                    "wb.active['A2'] = 'edited'\n"
+                    "sheet_harness.save_workbook(wb)\n",
+                )
             assert self.turn == 4
             assert payload["tool_choice"] == {
                 "type": "function",
-                "name": "code_interpreter",
+                "name": "submit_result",
             }
-            assert [tool["name"] for tool in payload["tools"]] == ["code_interpreter"]
-            return code_turn(
-                self.turn,
-                "import sheet_harness\n"
-                "wb = sheet_harness.load_workbook()\n"
-                "wb.active['A2'] = 'edited'\n"
-                "sheet_harness.save_workbook(wb)\n",
+            assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
             )
 
     monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", FinalRecoveryClient)
@@ -1029,9 +1260,10 @@ def test_agent_allows_final_turn_code_recovery_after_actual_rollback(
         max_turns=4,
     ).run("Edit the workbook")
 
-    assert result.observed_terminal_tool == "final_recovery_code_interpreter"
+    assert result.observed_terminal_tool == "submit_result"
+    assert result.terminal_submissions == 1
     assert result.turns == 4
-    assert result.final_text.startswith("Workbook edited and saved")
+    assert result.final_text == "Spreadsheet task completed."
     events = [
         json.loads(line)
         for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
@@ -1044,7 +1276,7 @@ def test_agent_allows_final_turn_code_recovery_after_actual_rollback(
     assert forced[0]["payload"]["turn_had_failed_edit"] is True
 
 
-def test_agent_keeps_final_turn_for_submit_after_successful_workbook_change(
+def test_agent_reprompts_text_after_change_and_keeps_final_turn_for_submit(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
     code_schema = {
@@ -1103,6 +1335,18 @@ def test_agent_keeps_final_turn_for_submit_after_successful_workbook_change(
                     "",
                     {},
                 )
+            if self.turn == 2:
+                assert payload["tool_choice"] == "auto"
+                return ResponseTurn(
+                    "response-text",
+                    [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }],
+                    "done",
+                    {},
+                )
             assert payload["tool_choice"] == {
                 "type": "function",
                 "name": "submit_result",
@@ -1115,7 +1359,7 @@ def test_agent_keeps_final_turn_for_submit_after_successful_workbook_change(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "edited and verified"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -1133,11 +1377,19 @@ def test_agent_keeps_final_turn_for_submit_after_successful_workbook_change(
         required_tool_termination=True,
         require_workbook_change=True,
         force_code_on_stalled_edit=True,
-        max_turns=2,
+        max_turns=3,
     ).run("Edit the workbook")
 
-    assert result.final_text == "edited and verified"
+    assert result.final_text == "Spreadsheet task completed."
     assert result.observed_terminal_tool == "submit_result"
+    final_input = ChangedWorkbookClient.requests[2]["input"]
+    assert any(
+        "text-only response cannot finish" in content.get("text", "")
+        and "Call submit_result exactly once with an empty JSON object"
+        in content.get("text", "")
+        for item in final_input
+        for content in item.get("content", [])
+    )
 
 
 def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(
@@ -1244,7 +1496,10 @@ def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(
                 assert "verify the requested change and nearby cells" in recovery_input
                 return code_turn(3, "sheet_harness.save_workbook(wb)")
             if self.turn == 4:
-                assert payload["tool_choice"] == "auto"
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
                 assert "code_interpreter" in [
                     tool["name"] for tool in payload["tools"]
                 ]
@@ -1257,7 +1512,7 @@ def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "corrected and verified"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -1279,7 +1534,7 @@ def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(
         max_turns=5,
     ).run("Edit the workbook")
 
-    assert result.final_text == "corrected and verified"
+    assert result.final_text == "Spreadsheet task completed."
     assert result.tool_trace == [
         {"name": "code_interpreter", "ok": True},
         {"name": "code_interpreter", "ok": False},
@@ -1409,7 +1664,7 @@ def test_agent_keeps_recovery_diagnostics_after_empty_and_inspect_only_responses
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "recovered"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -1430,7 +1685,7 @@ def test_agent_keeps_recovery_diagnostics_after_empty_and_inspect_only_responses
         max_turns=5,
     ).run("Edit the workbook")
 
-    assert result.final_text == "recovered"
+    assert result.final_text == "Spreadsheet task completed."
     assert len(RecoveryClient.requests) == 5
 
 
@@ -1551,7 +1806,7 @@ def test_agent_keeps_prerecovery_inspection_failure_and_redacts_provider_key(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "edited"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -1572,7 +1827,7 @@ def test_agent_keeps_prerecovery_inspection_failure_and_redacts_provider_key(
         max_turns=5,
     ).run("Edit the workbook")
 
-    assert result.final_text == "edited"
+    assert result.final_text == "Spreadsheet task completed."
     assert provider_key not in session.paths.trajectory.read_text(encoding="utf-8")
     fourth_input = json.dumps(InspectionClient.requests[3]["input"])
     assert provider_key not in fourth_input
@@ -1687,7 +1942,7 @@ def test_unchanged_terminal_reprompt_forces_code_recovery(
             if self.turn == 2:
                 assert payload["tool_choice"] == "auto"
                 if premature_terminal == "submit_result":
-                    return call("submit_result", 2, {"result": "premature"})
+                    return call("submit_result", 2, {})
                 return ResponseTurn(
                     "response-2",
                     [
@@ -1703,7 +1958,10 @@ def test_unchanged_terminal_reprompt_forces_code_recovery(
                     {},
                 )
             if self.turn == 3:
-                assert payload["tool_choice"] == "auto"
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
                 assert "code_interpreter" in [
                     tool["name"] for tool in payload["tools"]
                 ]
@@ -1713,7 +1971,7 @@ def test_unchanged_terminal_reprompt_forces_code_recovery(
                     {"code": "sheet_harness.save_workbook(wb)"},
                 )
             assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
-            return call("submit_result", 4, {"result": "recovered"})
+            return call("submit_result", 4, {})
 
     monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", RecoveryClient)
     session = WorkbookSession.create(sample_workbook, tmp_path / premature_terminal)
@@ -1729,7 +1987,7 @@ def test_unchanged_terminal_reprompt_forces_code_recovery(
         max_turns=4,
     ).run("Edit the workbook")
 
-    assert result.final_text == "recovered"
+    assert result.final_text == "Spreadsheet task completed."
     assert tools.calls == 2
 
 
@@ -1836,7 +2094,7 @@ def test_agent_recovery_replaces_stale_diagnostics_and_clears_them_after_success
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "done"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -1857,7 +2115,7 @@ def test_agent_recovery_replaces_stale_diagnostics_and_clears_them_after_success
         max_turns=6,
     ).run("Edit the workbook")
 
-    assert result.final_text == "done"
+    assert result.final_text == "Spreadsheet task completed."
 
 
 def test_agent_does_not_force_edit_recovery_after_read_only_tool_failure(
@@ -1948,7 +2206,7 @@ def test_agent_does_not_force_edit_recovery_after_read_only_tool_failure(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "edited"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -1969,17 +2227,15 @@ def test_agent_does_not_force_edit_recovery_after_read_only_tool_failure(
         max_turns=3,
     ).run("Edit the workbook")
 
-    assert result.final_text == "edited"
+    assert result.final_text == "Spreadsheet task completed."
     events = session.paths.trajectory.read_text(encoding="utf-8")
     assert "agent.recent_tool_failure_recovery_forced" not in events
 
 
-@pytest.mark.parametrize("reported_change", [False, True])
-def test_agent_fails_closed_when_final_edit_recovery_does_not_change_workbook(
+def test_agent_final_turn_is_submit_only_when_penultimate_recovery_fails(
     sample_workbook: Path,
     tmp_path: Path,
     monkeypatch: Any,
-    reported_change: bool,
 ) -> None:
     code_schema = {
         "type": "function",
@@ -2016,7 +2272,7 @@ def test_agent_fails_closed_when_final_edit_recovery_does_not_change_workbook(
                         "workbook_rolled_back": True,
                     }
                 )
-            return ToolOutcome({"ok": True, "workbook_changed": reported_change})
+            raise AssertionError("the final turn must not execute another edit recovery")
 
     class FinalFailureClient:
         def __init__(self, _: ProviderConfig) -> None:
@@ -2030,20 +2286,39 @@ def test_agent_fails_closed_when_final_edit_recovery_does_not_change_workbook(
 
         def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
             self.turn += 1
+            if self.turn <= 2:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
+                return ResponseTurn(
+                    f"response-{self.turn}",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": f"call-{self.turn}",
+                            "name": "code_interpreter",
+                            "arguments": json.dumps(
+                                {"code": "sheet_harness.save_workbook(wb)"}
+                            ),
+                        }
+                    ],
+                    "",
+                    {},
+                )
             assert payload["tool_choice"] == {
                 "type": "function",
-                "name": "code_interpreter",
+                "name": "submit_result",
             }
+            assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
             return ResponseTurn(
-                f"response-{self.turn}",
+                "response-submit",
                 [
                     {
                         "type": "function_call",
-                        "call_id": f"call-{self.turn}",
-                        "name": "code_interpreter",
-                        "arguments": json.dumps(
-                            {"code": "sheet_harness.save_workbook(wb)"}
-                        ),
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -2054,12 +2329,11 @@ def test_agent_fails_closed_when_final_edit_recovery_does_not_change_workbook(
     session = WorkbookSession.create(sample_workbook, tmp_path / "final-failure-run")
     config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
 
-    with pytest.raises(
-        AgentExecutionFailure, match="Final workbook recovery did not produce"
-    ) as caught:
+    tools = FinalFailureTools(session)
+    with pytest.raises(AgentExecutionFailure, match="submitted after a failed") as caught:
         SpreadsheetAgent(
             config,
-            FinalFailureTools(session),  # type: ignore[arg-type]
+            tools,  # type: ignore[arg-type]
             forced_tool_prefix=("code_interpreter", "code_interpreter"),
             required_tool_termination=True,
             require_workbook_change=True,
@@ -2068,6 +2342,9 @@ def test_agent_fails_closed_when_final_edit_recovery_does_not_change_workbook(
         ).run("Edit the workbook")
     assert caught.value.reason == "edit_recovery_exhausted"
     assert caught.value.agent_result.turns == 3
+    assert caught.value.agent_result.observed_terminal_tool == "submit_result"
+    assert caught.value.agent_result.terminal_submissions == 1
+    assert tools.calls == 2
 
 
 def test_failed_managed_save_after_prior_change_blocks_submission(
@@ -2138,15 +2415,20 @@ def test_failed_managed_save_after_prior_change_blocks_submission(
                     {},
                 )
             if self.turn == 3:
-                assert payload["tool_choice"] == "auto"
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
                 return ResponseTurn(
-                    "response-submit",
+                    "response-recovery",
                     [
                         {
                             "type": "function_call",
-                            "call_id": "call-submit",
-                            "name": "submit_result",
-                            "arguments": json.dumps({"result": "done"}),
+                            "call_id": "call-recovery",
+                            "name": "code_interpreter",
+                            "arguments": json.dumps(
+                                {"code": "sheet_harness.save_workbook(wb)"}
+                            ),
                         }
                     ],
                     "",
@@ -2154,18 +2436,16 @@ def test_failed_managed_save_after_prior_change_blocks_submission(
                 )
             assert payload["tool_choice"] == {
                 "type": "function",
-                "name": "code_interpreter",
+                "name": "submit_result",
             }
             return ResponseTurn(
-                "response-final-recovery",
+                "response-submit",
                 [
                     {
                         "type": "function_call",
-                        "call_id": "call-final-recovery",
-                        "name": "code_interpreter",
-                        "arguments": json.dumps(
-                            {"code": "sheet_harness.save_workbook(wb)"}
-                        ),
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -2189,9 +2469,7 @@ def test_failed_managed_save_after_prior_change_blocks_submission(
         ).run("Edit the workbook")
 
     assert caught.value.reason == "edit_recovery_exhausted"
-    assert caught.value.agent_result.observed_terminal_tool == (
-        "final_recovery_code_interpreter"
-    )
+    assert caught.value.agent_result.observed_terminal_tool == "submit_result"
 
 
 def test_failed_inspection_code_with_incomplete_marker_does_not_force_recovery(
@@ -2271,7 +2549,7 @@ def test_failed_inspection_code_with_incomplete_marker_does_not_force_recovery(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "edited"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -2294,7 +2572,7 @@ def test_failed_inspection_code_with_incomplete_marker_does_not_force_recovery(
         max_turns=3,
     ).run("Edit the workbook")
 
-    assert result.final_text == "edited"
+    assert result.final_text == "Spreadsheet task completed."
     events = session.paths.trajectory.read_text(encoding="utf-8")
     assert "agent.recent_tool_failure_recovery_forced" not in events
 
@@ -2339,7 +2617,7 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "final turn result"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -2358,7 +2636,7 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
         required_tool_termination=True,
     ).run("inspect")
 
-    assert result.final_text == "final turn result"
+    assert result.final_text == "Spreadsheet task completed."
     assert [tool["name"] for tool in FinalTurnClient.requests[0]["tools"]] == [
         "list_sheets",
         "inspect_range",
@@ -2384,7 +2662,81 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
         "type": "function",
         "name": "submit_result",
     }
-    assert FinalTurnClient.requests[1]["max_output_tokens"] == 1024
+    assert FinalTurnClient.requests[1]["max_output_tokens"] == 128
+
+
+def test_required_tool_termination_rejects_unadvanced_prefix_on_final_turn(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class EmptyPrefixThenSubmitClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> EmptyPrefixThenSubmitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            if len(self.requests) == 1:
+                return ResponseTurn(
+                    "response-empty-prefix",
+                    [{"type": "message", "role": "assistant", "content": []}],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-submit",
+                [{
+                    "type": "function_call",
+                    "call_id": "call-submit",
+                    "name": "submit_result",
+                    "arguments": "{}",
+                }],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", EmptyPrefixThenSubmitClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "prefix-final-submit")
+
+    with pytest.raises(AgentRoutingError, match="Forced tool prefix remained incomplete"):
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            SpreadsheetToolRegistry(session, enable_code=False),
+            max_turns=2,
+            forced_tool_prefix=("list_sheets",),
+            required_tool_termination=True,
+        ).run("inspect")
+
+    assert [
+        request["tool_choice"] for request in EmptyPrefixThenSubmitClient.requests
+    ] == [{"type": "function", "name": "list_sheets"}]
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    failures = [
+        event
+        for event in events
+        if event["event"] == "agent.routing_failed"
+    ]
+    assert failures[-1]["payload"] == {
+        "stage": None,
+        "turn": 2,
+        "forced_prefix_index": 0,
+        "next_forced_tool": "list_sheets",
+        "remaining_forced_tool_prefix": ["list_sheets"],
+        "terminal_tool": "submit_result",
+        "reservation_basis": ["max_turns"],
+        "reason": "forced_prefix_incomplete_before_terminal",
+    }
 
 
 def test_required_tool_termination_reserves_last_shared_budget_call_for_submit(
@@ -2410,7 +2762,7 @@ def test_required_tool_termination_reserves_last_shared_budget_call_for_submit(
                     "type": "function_call",
                     "call_id": "call-submit",
                     "name": "submit_result",
-                    "arguments": json.dumps({"result": "submitted within budget"}),
+                    "arguments": "{}",
                 }],
                 "",
                 {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
@@ -2430,7 +2782,7 @@ def test_required_tool_termination_reserves_last_shared_budget_call_for_submit(
         required_tool_termination=True,
     ).run("inspect")
 
-    assert result.final_text == "submitted within budget"
+    assert result.final_text == "Spreadsheet task completed."
     assert result.turns == 1
     assert BudgetTerminalClient.requests[0]["tool_choice"] == {
         "type": "function",
@@ -2439,6 +2791,277 @@ def test_required_tool_termination_reserves_last_shared_budget_call_for_submit(
     assert [tool["name"] for tool in BudgetTerminalClient.requests[0]["tools"]] == [
         "submit_result"
     ]
+
+
+def test_required_tool_termination_rejects_prefix_on_last_shared_budget_call(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class BudgetPrefixPreemptionClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> BudgetPrefixPreemptionClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            return ResponseTurn(
+                "response-submit",
+                [{
+                    "type": "function_call",
+                    "call_id": "call-submit",
+                    "name": "submit_result",
+                    "arguments": "{}",
+                }],
+                "",
+                {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", BudgetPrefixPreemptionClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "prefix-budget-submit")
+    budget = RunBudget(max_model_calls=2, max_total_tokens=100)
+    reservation = budget.begin_model_call(stage="prior")
+    budget.record_response(reservation, {"total_tokens": 2}, stage="prior")
+
+    with pytest.raises(AgentRoutingError, match="Forced tool prefix remained incomplete"):
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            SpreadsheetToolRegistry(session, enable_code=False),
+            max_turns=5,
+            budget=budget,
+            forced_tool_prefix=("list_sheets",),
+            required_tool_termination=True,
+        ).run("inspect")
+
+    assert BudgetPrefixPreemptionClient.requests == []
+    assert budget.to_dict()["used"]["model_calls"] == 1
+    assert budget.to_dict()["used"]["total_tokens"] == 2
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    failures = [
+        event
+        for event in events
+        if event["event"] == "agent.routing_failed"
+    ]
+    assert failures[-1]["payload"] == {
+        "stage": None,
+        "turn": 1,
+        "forced_prefix_index": 0,
+        "next_forced_tool": "list_sheets",
+        "remaining_forced_tool_prefix": ["list_sheets"],
+        "terminal_tool": "submit_result",
+        "reservation_basis": ["max_model_calls"],
+        "reason": "forced_prefix_incomplete_before_terminal",
+    }
+
+
+def test_reserved_submit_only_output_limit_is_auditable_execution_failure(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class TruncatedTerminalClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> TruncatedTerminalClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            raise _output_limit_error()
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", TruncatedTerminalClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "truncated-terminal")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    invocations = 0
+    original_invoke = tools.invoke
+
+    def counted_invoke(name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        nonlocal invocations
+        invocations += 1
+        return original_invoke(name, arguments)
+
+    monkeypatch.setattr(tools, "invoke", counted_invoke)
+    budget = RunBudget(max_model_calls=1, max_total_tokens=100)
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            tools,
+            max_turns=5,
+            budget=budget,
+            stage="solve",
+            required_tool_termination=True,
+        ).run("inspect")
+
+    failure = caught.value
+    assert failure.reason == "terminal_submission_truncated"
+    result = failure.agent_result
+    assert result.final_text == (
+        "Terminal submit_result response was truncated by the provider output limit."
+    )
+    assert result.turns == 1
+    assert result.tool_calls == 0
+    assert result.terminal_submissions == 0
+    assert result.to_dict()["function_calls_total"] == 0
+    assert result.terminal_tool == "submit_result"
+    assert result.observed_terminal_tool == "submit_result_length"
+    assert result.response_id == "response-output-limit"
+    assert result.usage == {
+        "input_tokens": 8,
+        "output_tokens": 4,
+        "total_tokens": 12,
+    }
+    assert result.request_timings[0]["total_tokens"] == 12
+    assert result.request_timings[0]["terminal_event"] == "chat.completion"
+    assert result.budget["used"]["model_calls"] == 1
+    assert result.budget["used"]["total_tokens"] == 12
+    assert result.terminal_response == {
+        "status": "truncated",
+        "finish_reason": "length",
+        "response_id": "response-output-limit",
+        "usage": {
+            "input_tokens": 8,
+            "output_tokens": 4,
+            "total_tokens": 12,
+        },
+        "timing": _output_limit_error().timing,
+        "discarded_message": _output_limit_error().discarded_message,
+    }
+    assert result.to_dict()["terminal_response"] == result.terminal_response
+    assert invocations == 0
+    request = TruncatedTerminalClient.requests[0]
+    assert request["tool_choice"] == {
+        "type": "function",
+        "name": "submit_result",
+    }
+    assert request["max_output_tokens"] == 128
+    assert len(request["tools"]) == 1
+    assert request["tools"][0]["name"] == "submit_result"
+    assert request["tools"][0]["parameters"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not any(event["event"] == "model.responded" for event in events)
+    failed = [event for event in events if event["event"] == "agent.execution_failed"]
+    assert failed[0]["payload"]["reason"] == "terminal_submission_truncated"
+    assert failed[0]["payload"]["agent"]["terminal_response"] == (
+        result.terminal_response
+    )
+
+
+def test_output_limit_outside_exact_reserved_submit_route_remains_provider_error(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class EarlyOutputLimitClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> EarlyOutputLimitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            raise _output_limit_error()
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", EarlyOutputLimitClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "early-output-limit")
+    budget = RunBudget(max_model_calls=2, max_total_tokens=10)
+
+    with pytest.raises(ProviderOutputLimitError):
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            SpreadsheetToolRegistry(session, enable_code=False),
+            max_turns=2,
+            budget=budget,
+            required_tool_termination=True,
+        ).run("inspect")
+
+    assert EarlyOutputLimitClient.requests[0]["tool_choice"] == "auto"
+    assert budget.to_dict()["used"]["model_calls"] == 1
+    assert budget.to_dict()["used"]["total_tokens"] == 12
+    assert budget.to_dict()["termination"]["reason"] == "max_total_tokens"
+
+
+def test_reserved_submit_output_limit_token_overage_wins(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class OverBudgetOutputLimitClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> OverBudgetOutputLimitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
+            raise _output_limit_error(total_tokens=12)
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", OverBudgetOutputLimitClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "output-limit-overage")
+    budget = RunBudget(max_model_calls=1, max_total_tokens=10)
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            SpreadsheetToolRegistry(session, enable_code=False),
+            max_turns=3,
+            budget=budget,
+            stage="solve",
+            required_tool_termination=True,
+        ).run("inspect")
+
+    failure = caught.value
+    assert failure.reason == "budget_exhausted"
+    result = failure.agent_result
+    assert result.turns == 1
+    assert result.terminal_submissions == 0
+    assert result.observed_terminal_tool == "budget_exhausted"
+    assert result.usage["total_tokens"] == 12
+    assert result.budget["used"]["model_calls"] == 1
+    assert result.budget["used"]["total_tokens"] == 12
+    assert result.budget["termination"]["reason"] == "max_total_tokens"
+    assert result.terminal_response["status"] == "truncated"
+    assert result.terminal_response["finish_reason"] == "length"
 
 
 def test_reserved_terminal_route_rejects_wrong_tool(
@@ -2503,16 +3126,16 @@ def test_reserved_terminal_route_rejects_wrong_tool(
     assert invocations == 0
 
 
-def test_required_tool_termination_accepts_nonempty_text_as_terminal_fallback(
+def test_required_tool_termination_reprompts_nonempty_text_until_submit_result(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
-    class TextFallbackClient:
+    class TextThenSubmitClient:
         requests: list[dict[str, Any]] = []
 
         def __init__(self, _: ProviderConfig) -> None:
             pass
 
-        def __enter__(self) -> TextFallbackClient:
+        def __enter__(self) -> TextThenSubmitClient:
             return self
 
         def __exit__(self, *_: Any) -> None:
@@ -2520,6 +3143,18 @@ def test_required_tool_termination_accepts_nonempty_text_as_terminal_fallback(
 
         def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
             self.requests.append(payload)
+            if len(self.requests) == 2:
+                return ResponseTurn(
+                    "response-submit",
+                    [{
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }],
+                    "",
+                    {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                )
             return ResponseTurn(
                 "response-text",
                 [
@@ -2538,7 +3173,9 @@ def test_required_tool_termination_accepts_nonempty_text_as_terminal_fallback(
                 {"input_tokens": 4, "output_tokens": 6, "total_tokens": 10},
             )
 
-    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", TextFallbackClient)
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", TextThenSubmitClient
+    )
     session = WorkbookSession.create(sample_workbook, tmp_path / "text-fallback-run")
     tools = SpreadsheetToolRegistry(session, enable_code=False)
     config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
@@ -2546,22 +3183,50 @@ def test_required_tool_termination_accepts_nonempty_text_as_terminal_fallback(
     result = SpreadsheetAgent(
         config,
         tools,
+        max_turns=2,
         required_tool_termination=True,
     ).run("inspect")
 
-    assert result.final_text == "The workbook has been updated and verified."
+    assert result.final_text == "Spreadsheet task completed."
     assert result.terminal_tool == "submit_result"
-    assert result.observed_terminal_tool == "assistant_text"
-    assert result.terminal_submissions == 0
-    assert result.to_dict()["function_calls_total"] == 0
+    assert result.observed_terminal_tool == "submit_result"
+    assert result.terminal_submissions == 1
+    assert result.to_dict()["function_calls_total"] == 1
+    assert result.terminal_response == {
+        "status": "accepted",
+        "response_id": "response-submit",
+        "acknowledgement": {},
+    }
+    assert TextThenSubmitClient.requests[1]["tool_choice"] == {
+        "type": "function",
+        "name": "submit_result",
+    }
+    assert [
+        tool["name"] for tool in TextThenSubmitClient.requests[1]["tools"]
+    ] == ["submit_result"]
+    second_input = TextThenSubmitClient.requests[1]["input"]
+    assert any(
+        "text-only response cannot finish" in content.get("text", "")
+        and "Call submit_result exactly once with an empty JSON object"
+        in content.get("text", "")
+        for item in second_input
+        for content in item.get("content", [])
+    )
     events = [
         json.loads(line)
         for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
     ]
-    submitted = [
-        event for event in events if event["event"] == "agent.terminal_submitted"
+    reprompted = [
+        event
+        for event in events
+        if event["event"] == "agent.text_required_response_reprompted"
     ]
-    assert submitted[0]["payload"]["observed_terminal_tool"] == "assistant_text"
+    assert reprompted[0]["payload"] == {
+        "stage": None,
+        "turn": 1,
+        "terminal_tool": "submit_result",
+        "observed_terminal_tool": "assistant_text",
+    }
 
 
 def test_toolless_text_stage_records_assistant_terminal_provenance(
@@ -2637,7 +3302,7 @@ def test_required_tool_termination_reprompts_empty_response_before_final_turn(
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "submitted after reprompt"}),
+                        "arguments": "{}",
                     }
                 ],
                 "",
@@ -2658,7 +3323,7 @@ def test_required_tool_termination_reprompts_empty_response_before_final_turn(
         required_tool_termination=True,
     ).run("inspect")
 
-    assert result.final_text == "submitted after reprompt"
+    assert result.final_text == "Spreadsheet task completed."
     assert len(EmptyThenSubmitClient.requests) == 2
     second_input = EmptyThenSubmitClient.requests[1]["input"]
     assert any(
@@ -2706,7 +3371,7 @@ def test_agent_required_tool_termination_rejects_multiple_calls_before_execution
                         "type": "function_call",
                         "call_id": "call-submit",
                         "name": "submit_result",
-                        "arguments": json.dumps({"result": "premature"}),
+                        "arguments": "{}",
                     },
                 ],
                 "",
@@ -2741,8 +3406,8 @@ def test_agent_required_tool_termination_rejects_multiple_calls_before_execution
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        ('{"result":"truncated"', "returned invalid JSON"),
-        (json.dumps({"result": ""}), "requires a non-empty result"),
+        ('{"unexpected":', "returned invalid JSON"),
+        (json.dumps({"unexpected": True}), "requires an empty acknowledgement"),
     ],
 )
 def test_agent_classifies_invalid_terminal_submission_as_execution_failure(
@@ -2809,6 +3474,80 @@ def test_agent_classifies_invalid_terminal_submission_as_execution_failure(
     ]
     failed = [event for event in events if event["event"] == "agent.execution_failed"]
     assert failed[0]["payload"]["reason"] == "terminal_submission_invalid"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"result": ""},
+        {"result": "   "},
+        {"result": 7},
+        {"result": "valid evidence", "unexpected": True},
+    ],
+)
+def test_evidence_terminal_requires_exact_nonempty_result_argument(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+    arguments: dict[str, Any],
+) -> None:
+    class InvalidEvidenceTerminalClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> InvalidEvidenceTerminalClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "submit_result",
+            }
+            return ResponseTurn(
+                "response-invalid-evidence-terminal",
+                [{
+                    "type": "function_call",
+                    "call_id": "call-submit",
+                    "name": "submit_result",
+                    "arguments": json.dumps(arguments),
+                }],
+                "",
+                {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient",
+        InvalidEvidenceTerminalClient,
+    )
+    session = WorkbookSession.create(
+        sample_workbook,
+        tmp_path / "invalid-evidence-terminal-run",
+    )
+
+    with pytest.raises(
+        AgentExecutionFailure,
+        match="requires exactly one non-empty string argument named 'result'",
+    ) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            SpreadsheetToolRegistry(session, enable_code=False),
+            max_turns=1,
+            required_tool_termination=True,
+            terminal_result_required=True,
+        ).run("inspect")
+
+    failure = caught.value
+    assert failure.reason == "terminal_submission_invalid"
+    assert failure.agent_result.terminal_submissions == 1
+    assert failure.agent_result.observed_terminal_tool == "submit_result"
+    assert failure.agent_result.terminal_response is None
+    assert failure.agent_result.usage["total_tokens"] == 12
 
 
 def test_responses_client_does_not_infer_safe_retry_from_message(
@@ -3132,7 +3871,6 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
 @pytest.mark.parametrize(
     ("finish_reason", "message"),
     [
-        ("length", {"role": "assistant", "content": "truncated result"}),
         ("content_filter", {"role": "assistant", "content": "partial result"}),
         (
             "stop",

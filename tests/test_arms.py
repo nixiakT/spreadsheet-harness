@@ -277,6 +277,79 @@ def test_paper_vision_three_turn_required_route_attaches_image_and_submits_yaml(
     assert stage.read_only_verified is True
 
 
+def test_toolless_paper_reconcile_returns_text_evidence(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    evidence = (
+        "summary: reconciled workbook sketch\n"
+        "provenance:\n"
+        "- source_stage: reconcile\n"
+        "  sheet: Sales\n"
+        "  range: A1:D5"
+    )
+
+    class ReconcileClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> ReconcileClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            return ResponseTurn(
+                "response-reconcile",
+                [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": evidence}],
+                }],
+                evidence,
+                {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ReconcileClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "reconcile-stage")
+    stage = arms._run_stage(
+        name="reconcile",
+        config=_config(),
+        session=session,
+        skills=None,
+        prompt="Reconcile the supplied evidence into YAML.",
+        base_instructions="Read only.",
+        allowed_tools=arms.PAPER_RECONCILIATION_TOOLS,
+        max_turns=1,
+        max_output_tokens=2_000,
+        arm_started=time.monotonic(),
+        max_elapsed_seconds=60,
+        budget=RunBudget(
+            max_model_calls=1,
+            max_total_tokens=100,
+            max_elapsed_seconds=60,
+        ),
+        task_included=False,
+        preview_included=False,
+        user_task="hidden task",
+        preview="hidden preview",
+        read_only=True,
+        require_evidence=True,
+    )
+
+    assert stage.result.terminal_tool == "assistant_text"
+    assert stage.result.observed_terminal_tool == "assistant_text"
+    assert stage.result.terminal_response is None
+    assert stage.normalized_evidence is not None
+    assert "reconciled workbook sketch" in stage.normalized_evidence
+    assert "tools" not in ReconcileClient.requests[0]
+
+
 def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     sample_workbook: Path,
     tmp_path: Path,
@@ -312,7 +385,18 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     assert arms.PAPER_EXTRACTION_TOOLS == {"list_sheets", "inspect_range"}
     assert arms.PAPER_VISION_TOOLS == {"render_workbook", "view_image"}
     assert arms.PAPER_LATEX_TOOLS == {"range_to_latex"}
-    assert ours_call["tools"].allowed_tools is None
+    assert ours_call["tools"].allowed_tools == set(arms.OURS_TOOLS)
+    assert arms.OURS_TOOLS == {
+        "code_interpreter",
+        "fill_formula",
+        "inspect_range",
+        "recalculate_and_read",
+        "render_workbook",
+        "view_image",
+    }
+    assert arms.OURS_TOOLS.isdisjoint(
+        {"clear_range", "delete_columns", "delete_rows", "manage_sheet", "write_range"}
+    )
     assert [call["tools"].enable_code for call in paper_calls] == [
         False,
         False,
@@ -353,6 +437,13 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         False,
         True,
     ]
+    assert [call["terminal_result_required"] for call in paper_calls] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
     assert ours_call["required_tool_termination"] is True
     assert ours_call["require_workbook_change"] is True
     assert ours_call["force_code_on_stalled_edit"] is True
@@ -383,6 +474,12 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         assert "sheet_harness.save_workbook(wb)" in base
         assert "never spell" in base
         assert "list[dict]" in base
+        assert (
+            "exactly these keys: `index` (zero-based integer), `name`, `dimension`, "
+            "`max_row`,"
+        ) in base
+        assert "`max_column`, `tables` (name-to-range mapping)" in base
+        assert "`merged_ranges` (list of range strings)" in base
         assert "cell.formula" in base
         assert "ws.merged_ranges" in base
         assert "Formula" in base or "formula" in base
@@ -479,7 +576,7 @@ def test_ours_consumes_deterministic_profile_with_skills(
     )
     ours_call = FakeAgent.calls[-1]
 
-    assert ours_call["tools"].allowed_tools is None
+    assert ours_call["tools"].allowed_tools == set(arms.OURS_TOOLS)
     assert ours_call["skills"] is skills
     assert ours_call["require_workbook_change"] is True
     assert ours_call["force_code_on_stalled_edit"] is True
@@ -494,60 +591,82 @@ def test_ours_consumes_deterministic_profile_with_skills(
     assert len(profile_events) == 1
     assert profile_events[0]["payload"]["consumer_arm"] == "ours"
     assert len(profile_events[0]["payload"]["profile_sha256"]) == 64
+    instructions = " ".join(ours_call["base_instructions"].split())
+    assert "exactly six work tools" in instructions
+    assert "Do not spend calls rediscovering structure" in instructions
+    assert "any mismatch blocks submission" in instructions
+
+
+def test_spreadsheet_core_skill_blocks_unverified_formula_submission() -> None:
+    skill = (
+        Path(__file__).parents[1] / "skills" / "spreadsheet-core" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Define the exact expected target cells before editing" in skill
+    assert "first, middle, and last target positions" in skill
+    assert "both the horizontal and vertical axes" in skill
+    assert "absolute rows, absolute columns" in skill
+    assert "recalculate_and_read" in skill
+    assert "unexpected blank" in skill
+    assert "last-N, date-filtered, blank-aware, or lookup logic" in skill
+    assert "duplicate key" in skill
+    assert "blocks submission" in skill
+    assert "`list_sheets`" not in skill
+    assert "`format_range`" not in skill
+    assert "data_only=True" in skill
 
 
 def test_compact_ours_profile_keeps_bounded_values_formats_and_provenance() -> None:
-    rendered = arms._compact_ours_profile(
-        {
-            "schema_version": "deterministic-workbook-profile-v1",
-            "profile_sha256": "a" * 64,
-            "source": {"format": "xlsx", "sha256": "b" * 64},
-            "backend": {"reader": "openpyxl"},
-            "task_independent": True,
-            "sheets": [
-                {
-                    "name": "Data",
-                    "state": "visible",
-                    "used_region": "A1:B2",
-                    "counts": {"nonempty_cells": 4},
-                    "regions": [
-                        {
-                            "range": "A1:B2",
-                            "header_rows": 1,
-                            "data_start_row": 2,
-                            "row_count": 2,
-                            "column_count": 2,
-                            "type_counts": {"text": 2, "number": 2},
-                            "number_formats": {"0.00": 2},
-                            "unit_hints": [{"unit": "USD", "cells": ["B1"]}],
-                            "sample": [
-                                {"cell": "A1", "kind": "text", "value": "Amount"},
-                                {"cell": "B2", "kind": "number", "value": 42},
-                            ],
-                            "confidence": "medium",
-                            "provenance": {
-                                "method": "deterministic-four-neighbor-components",
-                                "sheet": "Data",
-                                "range": "A1:B2",
-                                "sample_cells": ["A1", "B2"],
-                            },
-                        }
-                    ],
-                    "formula_clusters": [],
-                    "merges": [],
-                    "tables": [],
-                    "confidence": {"inventory": "high"},
-                    "provenance": {
-                        "method": "openpyxl-read-only-profile",
-                        "sheet": "Data",
+    profile = {
+        "schema_version": "deterministic-workbook-profile-v1",
+        "profile_sha256": "a" * 64,
+        "source": {"format": "xlsx", "sha256": "b" * 64},
+        "backend": {"reader": "openpyxl"},
+        "task_independent": True,
+        "sheets": [
+            {
+                "name": "Data",
+                "state": "visible",
+                "used_region": "A1:B2",
+                "counts": {"nonempty_cells": 4},
+                "regions": [
+                    {
                         "range": "A1:B2",
-                    },
-                    "truncation": {},
-                }
-            ],
-            "truncation": {"sheets": False},
-        }
-    )
+                        "header_rows": 1,
+                        "data_start_row": 2,
+                        "row_count": 2,
+                        "column_count": 2,
+                        "type_counts": {"text": 2, "number": 2},
+                        "number_formats": {"0.00": 2},
+                        "unit_hints": [{"unit": "USD", "cells": ["B1"]}],
+                        "sample": [
+                            {"cell": "A1", "kind": "text", "value": "Amount"},
+                            {"cell": "B2", "kind": "number", "value": 42},
+                        ],
+                        "confidence": "medium",
+                        "provenance": {
+                            "method": "deterministic-four-neighbor-components",
+                            "sheet": "Data",
+                            "range": "A1:B2",
+                            "sample_cells": ["A1", "B2"],
+                        },
+                    }
+                ],
+                "formula_clusters": [],
+                "merges": [],
+                "tables": [],
+                "confidence": {"inventory": "high"},
+                "provenance": {
+                    "method": "openpyxl-read-only-profile",
+                    "sheet": "Data",
+                    "range": "A1:B2",
+                },
+                "truncation": {},
+            }
+        ],
+        "truncation": {"sheets": False},
+    }
+    rendered = arms._compact_ours_profile(profile)
     compact = json.loads(rendered)
     sheet = compact["sheets"][0]
     region = sheet["regions"][0]
@@ -563,6 +682,141 @@ def test_compact_ours_profile_keeps_bounded_values_formats_and_provenance() -> N
     assert sheet["provenance"]["sheet"] == "Data"
     assert compact["backend"] == {"reader": "openpyxl"}
     assert compact["task_independent"] is True
+
+    expanded = json.loads(json.dumps(profile))
+    template = expanded["sheets"][0]
+    expanded["bounds"] = {"max_rendered_chars": 12_000}
+    expanded["sheets"] = []
+    for sheet_index in range(8):
+        sheet_copy = json.loads(json.dumps(template))
+        sheet_copy["name"] = f"Data {sheet_index + 1}"
+        sheet_copy["formula_clusters"] = [
+            {
+                "cells": [f"B{cluster_index + 2}"],
+                "cell_count": 1,
+                "references": [f"A{cluster_index + 2}"],
+                "sample_formulas": [
+                    {
+                        "cell": f"B{cluster_index + 2}",
+                        "formula": f"=$A{cluster_index + 2}*B$1",
+                        "truncated": False,
+                    }
+                ],
+                "confidence": "high",
+                "provenance": {
+                    "method": "openpyxl-formula-token-pattern",
+                    "cells": [f"B{cluster_index + 2}"],
+                    "truncated": False,
+                },
+            }
+            for cluster_index in range(6)
+        ]
+        expanded["sheets"].append(sheet_copy)
+
+    bounded_text = arms._compact_ours_profile(expanded)
+    bounded = json.loads(bounded_text)
+
+    assert len(bounded_text) <= 12_000
+    assert bounded["truncation"]["rendered"] is True
+    assert all(sheet["formula_clusters"] for sheet in bounded["sheets"])
+    assert all(sheet["regions"][0]["sample"] for sheet in bounded["sheets"])
+    assert all(sheet["regions"][0]["number_formats"] for sheet in bounded["sheets"])
+    assert all(sheet["provenance"]["sheet"] for sheet in bounded["sheets"])
+
+
+def test_compact_ours_profile_hard_caps_long_number_formats() -> None:
+    sheets: list[dict[str, Any]] = []
+    for sheet_index in range(8):
+        number_formats = {}
+        unit_hints = []
+        for format_index in range(6):
+            prefix = f'"fmt-{sheet_index}-{format_index}-'
+            suffix = '"$#,##0.00'
+            number_format = prefix + ("0" * (250 - len(prefix) - len(suffix))) + suffix
+            assert len(number_format) == 250
+            number_formats[number_format] = 1
+            unit_hints.append(
+                {
+                    "unit": "currency",
+                    "confidence": "format-derived",
+                    "provenance": {
+                        "cell": f"{chr(ord('A') + format_index)}1",
+                        "number_format": number_format,
+                        "method": "number-format",
+                    },
+                }
+            )
+        sheets.append(
+            {
+                "name": f"Formats {sheet_index + 1}",
+                "state": "visible",
+                "used_region": "A1:F1",
+                "counts": {"nonempty_cells": 6, "formulas": 0},
+                "regions": [
+                    {
+                        "range": "A1:F1",
+                        "header_rows": 0,
+                        "data_start_row": 1,
+                        "row_count": 1,
+                        "column_count": 6,
+                        "type_counts": {"number": 6},
+                        "number_formats": number_formats,
+                        "unit_hints": unit_hints,
+                        "sample": [],
+                        "confidence": "high",
+                        "provenance": {
+                            "method": "deterministic-four-neighbor-components",
+                            "sheet": f"Formats {sheet_index + 1}",
+                            "range": "A1:F1",
+                            "sample_cells": [],
+                        },
+                    }
+                ],
+                "formula_clusters": [],
+                "merges": [],
+                "tables": [],
+                "confidence": {"inventory": "high"},
+                "provenance": {
+                    "method": "openpyxl-read-only-profile",
+                    "sheet": f"Formats {sheet_index + 1}",
+                    "range": "A1:F1",
+                },
+                "truncation": {},
+            }
+        )
+    profile = {
+        "schema_version": "deterministic-workbook-profile-v1",
+        "profile_sha256": "a" * 64,
+        "source": {"format": "xlsx", "sha256": "b" * 64},
+        "backend": {"reader": "openpyxl"},
+        "task_independent": True,
+        "bounds": {
+            "max_scalar_chars": 96,
+            "max_rendered_chars": 12_000,
+        },
+        "sheets": sheets,
+        "truncation": {"sheets": False, "rendered": False},
+    }
+
+    rendered = arms._compact_ours_profile(profile)
+
+    assert len(rendered) <= 12_000
+    assert arms._compact_ours_profile(profile) == rendered
+    compact = json.loads(rendered)
+    assert compact["truncation"]["rendered"] is True
+    assert len(compact["sheets"]) == 8
+    assert all(sheet["regions"] for sheet in compact["sheets"])
+    assert all(
+        sheet["truncation"]["prompt_format_metadata"] is True
+        for sheet in compact["sheets"]
+    )
+    assert all(
+        region["number_formats"] == {}
+        and region["number_formats_truncated"] is True
+        and region["unit_hints"] == []
+        for sheet in compact["sheets"]
+        for region in sheet["regions"]
+    )
 
 
 def test_paper_stages_share_budget_and_aggregate_usage_and_timings(

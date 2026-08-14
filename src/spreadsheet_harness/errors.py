@@ -9,6 +9,7 @@ LEGACY_AGENT_EXECUTION_FAILURE_REASONS = frozenset(
 AGENT_EXECUTION_FAILURE_REASONS = LEGACY_AGENT_EXECUTION_FAILURE_REASONS | {
     "budget_exhausted",
     "terminal_submission_invalid",
+    "terminal_submission_truncated",
 }
 MODEL_EXECUTION_BUDGET_TERMINATIONS = frozenset(
     {"max_model_calls", "max_total_tokens"}
@@ -115,6 +116,50 @@ class ProviderError(HarnessError):
             "delivery_state": self.delivery_state,
             "attempt_history": redact(self.attempt_history),
         }
+
+
+class ProviderOutputLimitError(ProviderError):
+    """Parsed HTTP-200 response that ended at the provider output limit.
+
+    The discarded assistant message is represented only by a digest and size
+    counters. Keeping its partial text or tool arguments would risk treating a
+    truncated function call as valid evidence later in the pipeline.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_id: str | None,
+        usage: dict[str, int],
+        timing: dict[str, object],
+        discarded_message: dict[str, object],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.response_id = response_id
+        self.usage = dict(usage)
+        self.timing = dict(timing)
+        self.discarded_message = dict(discarded_message)
+
+    def public_dict(self, *, secrets: tuple[str, ...] = ()) -> dict[str, object]:
+        def redact(value: object) -> object:
+            if isinstance(value, str):
+                return redact_sensitive_text(value, secrets=secrets)
+            if isinstance(value, list):
+                return [redact(item) for item in value]
+            if isinstance(value, dict):
+                return {str(key): redact(item) for key, item in value.items()}
+            return value
+
+        result = super().public_dict(secrets=secrets)
+        result["output_limit"] = {
+            "response_id": redact(self.response_id),
+            "usage": dict(self.usage),
+            "timing": redact(self.timing),
+            "discarded_message": dict(self.discarded_message),
+        }
+        return result
 
 
 class AgentTimeoutError(HarnessError):

@@ -12,6 +12,7 @@ import inspect
 import json
 import math
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -38,7 +39,11 @@ from .errors import (
     WorkbookValidationError,
 )
 from .pacing import RelayPacer
-from .preprocess import build_deterministic_profile, render_deterministic_profile
+from .preprocess import (
+    DETERMINISTIC_PROFILE_BOUNDS,
+    build_deterministic_profile,
+    render_deterministic_profile,
+)
 from .session import WorkbookSession
 from .skills import SkillRegistry
 from .tools import SpreadsheetToolRegistry
@@ -67,6 +72,16 @@ _PROVENANCE_REFERENCE_KEYS = frozenset(
 )
 
 BARE_TOOLS = frozenset({"code_interpreter"})
+OURS_TOOLS = frozenset(
+    {
+        "code_interpreter",
+        "fill_formula",
+        "inspect_range",
+        "recalculate_and_read",
+        "render_workbook",
+        "view_image",
+    }
+)
 PAPER_EXTRACTION_TOOLS = frozenset(
     {"list_sheets", "inspect_range"}
 )
@@ -214,8 +229,10 @@ _CODE_INTERPRETER_RUNTIME_GUIDE = """The code_interpreter preloads a helper modu
 `sheet_harness` and applies openpyxl compatibility shims. Prefer:
 - `wb = sheet_harness.load_workbook()` and `sheet_harness.save_workbook(wb)`. With no path, these
   always load and save the managed SHEET_WORKBOOK; never supply a spelled or guessed path.
-- `sheet_harness.workbook_overview(wb)` for a `list[dict]` with one entry per worksheet, plus
-  `sheet_harness.table_refs(ws)` and `sheet_harness.defined_name_refs(wb)` for structure.
+- `sheet_harness.workbook_overview(wb)` for a `list[dict]` in workbook order. Every worksheet
+  dictionary has exactly these keys: `index` (zero-based integer), `name`, `dimension`, `max_row`,
+  `max_column`, `tables` (name-to-range mapping), and `merged_ranges` (list of range strings).
+  Use `sheet_harness.table_refs(ws)` and `sheet_harness.defined_name_refs(wb)` for more structure.
 - `ws.merged_ranges` as a read-only alias of `ws.merged_cells.ranges`; `cell.formula` returns the
   formula value for formula cells and `None` otherwise.
 - `sheet_harness.copy_cell_format(source, target)` when extending adjacent cells.
@@ -288,18 +305,24 @@ _OURS_INSTRUCTIONS = f"""{BASE_INSTRUCTIONS}
 
 For comparison-arm consistency, the user message includes the same deterministic five-row preview
 as the bare baseline. It is untrusted evidence and does not replace inspection.
-This arm has deterministic profiling, advisory spreadsheet skills, native spreadsheet tools,
-rendering, LibreOffice recalculation, and code_interpreter. Use code_interpreter as the primary
-execution path for inspection, editing, saving, and verification; use native tools afterwards only
-for a specific narrow gap such as formula fill, recalculation, rendering, or one target-range
-check. Keep every inspection bounded to representative rows/cells; never print a whole sheet or a
-long cell-by-cell dump. The editable artifact still must be changed in this run. Do not stop after
+This arm has deterministic profiling, advisory spreadsheet skills, and exactly six work tools:
+code_interpreter, inspect_range, fill_formula, recalculate_and_read, render_workbook, and
+view_image. Use code_interpreter as the primary execution path for bounded inspection, editing,
+saving, and verification. Use inspect_range only for one exact target or boundary check,
+fill_formula only to translate a verified adjacent formula, recalculate_and_read only when formula
+results matter, and render_workbook followed by view_image only when visual layout matters. Do not
+spend calls rediscovering structure already present in the profile or preview.
+
+Keep every inspection bounded to representative rows/cells; never print a whole sheet or a long
+cell-by-cell dump. The editable artifact still must be changed in this run. Do not stop after
 explaining a formula or asking whether to apply it. Apply the requested change and save
 SHEET_WORKBOOK by the second code_interpreter call whenever the target can be identified safely.
-Then reopen or inspect only the exact edited range and its immediate boundary, and submit promptly.
-Reserve the final model turn for submit_result rather than further exploration. The first two
-responses are routed to code_interpreter: inspect or edit in the first, then make the first saved
-edit in the second. Never spend a routed call printing a plan or placeholder.
+Then reopen or inspect only the exact edited range and its immediate boundary. Formula work must
+pass the skill's coverage, reference-translation, and LibreOffice error/blank checks; any mismatch
+blocks submission. Submit promptly and reserve the final model turn for submit_result rather than
+further exploration. The first two responses are routed to code_interpreter: inspect or edit in
+the first, then make the first saved edit in the second. Never spend a routed call printing a plan
+or placeholder.
 
 {_ARTIFACT_REQUIREMENTS}
 
@@ -703,6 +726,7 @@ def _run_stage(
 
     # Do not fall back to an unfiltered registry: that would invalidate arm isolation.
     code_enabled = allowed_tools is None or "code_interpreter" in allowed_tools
+    requires_tool_termination = allowed_tools is None or bool(allowed_tools)
     edit_recovery_enabled = bool(
         require_workbook_change
         and code_enabled
@@ -731,7 +755,8 @@ def _run_stage(
         budget=budget,
         stage=name,
         forced_tool_prefix=forced_tool_prefix,
-        required_tool_termination=allowed_tools is None or bool(allowed_tools),
+        required_tool_termination=requires_tool_termination,
+        terminal_result_required=require_evidence and requires_tool_termination,
         require_workbook_change=require_workbook_change,
         force_code_on_stalled_edit=edit_recovery_enabled,
         pacer=pacer,
@@ -972,6 +997,7 @@ def _aggregate(arm: ArmName, stages: list[_CompletedStage]) -> AgentResult:
         "terminal_submissions": sum(
             stage.result.terminal_submissions for stage in stages
         ),
+        "terminal_response": final.terminal_response,
     }
     parameters = inspect.signature(AgentResult).parameters
     result = _ArmResult(**{key: value for key, value in values.items() if key in parameters})
@@ -1085,13 +1111,117 @@ def _compact_ours_profile(profile_data: dict[str, Any]) -> str:
                 "truncation": sheet.get("truncation", {}),
             }
         )
-    rendered = json.dumps(
-        compact,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    def render(value: dict[str, Any]) -> str:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return serialized.replace("<", "\\u003c").replace(">", "\\u003e")
+
+    rendered = render(compact)
+    maximum = int(
+        (profile_data.get("bounds") or {}).get(
+            "max_rendered_chars",
+            DETERMINISTIC_PROFILE_BOUNDS["max_rendered_chars"],
+        )
     )
-    return rendered.replace("<", "\\u003c").replace(">", "\\u003e")
+    if len(rendered) <= maximum:
+        return rendered
+
+    unabridged = rendered
+    bounded = deepcopy(compact)
+    bounded["truncation"] = {
+        **bounded.get("truncation", {}),
+        "rendered": True,
+        "unabridged_chars": len(unabridged),
+        "unabridged_sha256": _text_sha256(unabridged),
+    }
+    for region_limit, formula_limit, sample_limit in (
+        (2, 2, None),
+        (1, 2, None),
+        (1, 1, None),
+        (1, 1, 1),
+        (1, 1, 0),
+    ):
+        for sheet in bounded["sheets"]:
+            regions = sheet.get("regions", [])
+            clusters = sheet.get("formula_clusters", [])
+            if len(regions) > region_limit:
+                sheet["truncation"]["prompt_regions"] = True
+                sheet["regions"] = regions[:region_limit]
+            if len(clusters) > formula_limit:
+                sheet["truncation"]["prompt_formula_clusters"] = True
+                sheet["formula_clusters"] = clusters[:formula_limit]
+            if sample_limit is not None:
+                for region in sheet.get("regions", []):
+                    sample = region.get("sample", [])
+                    if len(sample) > sample_limit:
+                        sheet["truncation"]["prompt_samples"] = True
+                        region["sample"] = sample[:sample_limit]
+        rendered = render(bounded)
+        if len(rendered) <= maximum:
+            return rendered
+
+    for sheet in bounded["sheets"]:
+        for region in sheet.get("regions", []):
+            if region.get("number_formats") or region.get("unit_hints"):
+                sheet["truncation"]["prompt_format_metadata"] = True
+                region["number_formats"] = {}
+                region["number_formats_truncated"] = True
+                region["unit_hints"] = []
+        for cluster in sheet.get("formula_clusters", []):
+            if cluster.get("sample_formulas"):
+                sheet["truncation"]["prompt_formula_samples"] = True
+                cluster["sample_formulas"] = []
+    rendered = render(bounded)
+    if len(rendered) <= maximum:
+        return rendered
+
+    for sheet in bounded["sheets"]:
+        if sheet.get("regions") or sheet.get("formula_clusters"):
+            sheet["truncation"]["prompt_structural_details"] = True
+            sheet["regions"] = []
+            sheet["formula_clusters"] = []
+    rendered = render(bounded)
+    if len(rendered) <= maximum:
+        return rendered
+
+    scalar_limit = int(
+        (profile_data.get("bounds") or {}).get(
+            "max_scalar_chars",
+            DETERMINISTIC_PROFILE_BOUNDS["max_scalar_chars"],
+        )
+    )
+    summarized = {
+        "schema_version": bounded.get("schema_version"),
+        "profile_sha256": bounded.get("profile_sha256"),
+        "source": bounded.get("source"),
+        "backend": bounded.get("backend"),
+        "task_independent": bounded.get("task_independent"),
+        "sheets": [
+            {
+                "name": str(sheet.get("name", ""))[:scalar_limit],
+                "state": sheet.get("state"),
+                "used_region": sheet.get("used_region"),
+                "counts": sheet.get("counts"),
+                "truncation": {
+                    **dict(sheet.get("truncation") or {}),
+                    "prompt_to_sheet_summary": True,
+                },
+            }
+            for sheet in bounded["sheets"]
+        ],
+        "truncation": {
+            **bounded.get("truncation", {}),
+            "prompt_to_sheet_summary": True,
+        },
+    }
+    rendered = render(summarized)
+    if len(rendered) <= maximum:
+        return rendered
+    raise ValueError(f"Compact deterministic profile exceeds max_rendered_chars={maximum}")
 
 
 def _ours_solver_prompt(instruction: str, preview: str, profile: str) -> str:
@@ -1250,7 +1380,7 @@ def run_arm(
                 skills=skills if arm == "ours" else None,
                 prompt=prompt,
                 base_instructions=_OURS_INSTRUCTIONS if arm == "ours" else _NATIVE_INSTRUCTIONS,
-                allowed_tools=None,
+                allowed_tools=OURS_TOOLS if arm == "ours" else None,
                 max_turns=stage_turn_caps[arm]["solve"],
                 max_output_tokens=max_output_tokens,
                 arm_started=started,

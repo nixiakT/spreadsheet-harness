@@ -35,9 +35,13 @@ from .comparison import (
     LEGACY_COMPARISON_PROTOCOL_VERSION,
     LEGACY_PILOT_MANIFEST_SHA256,
     RUN_SPEC_COPY_FILENAME,
+    TERMINAL_SUBMISSION_TRUNCATED_OBSERVED,
     V24_COMPARISON_CONFIGURATION_POLICIES,
     V24_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V24_COMPARISON_PROTOCOL_VERSION,
+    V25_COMPARISON_CONFIGURATION_POLICIES,
+    V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V25_COMPARISON_PROTOCOL_VERSION,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
@@ -62,6 +66,8 @@ class _AuditProtocolContract:
     allow_budget_exhaustion_evidence: bool = False
     allow_final_response_token_overage: bool = False
     require_exact_agent_evidence: bool = False
+    require_truncated_terminal_evidence: bool = False
+    require_accepted_terminal_evidence: bool = False
 
 
 _V23_AUDIT_CONTRACT = _AuditProtocolContract(
@@ -83,9 +89,9 @@ _V24_AUDIT_CONTRACT = _AuditProtocolContract(
     strict_current_source=False,
 )
 _V25_AUDIT_CONTRACT = _AuditProtocolContract(
-    protocol_version=COMPARISON_PROTOCOL_VERSION,
-    manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
-    configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    protocol_version=V25_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V25_COMPARISON_CONFIGURATION_POLICIES,
     allowed_model_failure_reasons=frozenset(
         {
             "budget_exhausted",
@@ -95,10 +101,31 @@ _V25_AUDIT_CONTRACT = _AuditProtocolContract(
         }
     ),
     require_v24_outcome_fields=True,
+    strict_current_source=False,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
+)
+_V26_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=frozenset(
+        {
+            "budget_exhausted",
+            "edit_recovery_exhausted",
+            "terminal_submission_invalid",
+            "terminal_submission_truncated",
+            "workbook_unchanged",
+        }
+    ),
+    require_v24_outcome_fields=True,
     strict_current_source=True,
     allow_budget_exhaustion_evidence=True,
     allow_final_response_token_overage=True,
     require_exact_agent_evidence=True,
+    require_truncated_terminal_evidence=True,
+    require_accepted_terminal_evidence=True,
 )
 
 
@@ -111,6 +138,11 @@ def _select_audit_contract(
         manifest.get("comparison_protocol_version"),
         manifest.get("schema_version"),
     )
+    if identity == (
+        _V26_AUDIT_CONTRACT.protocol_version,
+        _V26_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V26_AUDIT_CONTRACT
     if identity == (
         _V25_AUDIT_CONTRACT.protocol_version,
         _V25_AUDIT_CONTRACT.manifest_schema_version,
@@ -133,12 +165,14 @@ def _select_audit_contract(
         _V23_AUDIT_CONTRACT.manifest_schema_version,
         _V24_AUDIT_CONTRACT.manifest_schema_version,
         _V25_AUDIT_CONTRACT.manifest_schema_version,
+        _V26_AUDIT_CONTRACT.manifest_schema_version,
     }:
         _add_reason(reasons, "comparison_manifest_schema_mismatch")
     if manifest.get("comparison_protocol_version") not in {
         _V23_AUDIT_CONTRACT.protocol_version,
         _V24_AUDIT_CONTRACT.protocol_version,
         _V25_AUDIT_CONTRACT.protocol_version,
+        _V26_AUDIT_CONTRACT.protocol_version,
     }:
         _add_reason(reasons, "comparison_manifest_protocol_mismatch")
     return None
@@ -214,6 +248,490 @@ def _v25_budget_exhaustion(
         and termination["stage"]
     )
     return valid, termination if isinstance(termination, dict) else None
+
+
+_TERMINAL_RESPONSE_TIMING_FIELDS = frozenset(
+    {
+        "attempts",
+        "elapsed_seconds",
+        "first_event_seconds",
+        "headers_seconds",
+        "terminal_seconds",
+        "terminal_event",
+        "status_code",
+        "sse_events",
+        "logical_request_id",
+        "client_request_id",
+        "request_payload_sha256",
+        "response_headers",
+        "delivery_state",
+        "pacing_wait_seconds_total",
+        "attempt_history",
+    }
+)
+
+
+def _valid_sha256(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _v26_output_limit_attempt_observed(stages: list[dict[str, Any]]) -> bool:
+    for stage in stages:
+        stage_agent = stage.get("agent")
+        timings = (
+            stage_agent.get("request_timings")
+            if isinstance(stage_agent, dict)
+            else None
+        )
+        if not isinstance(timings, list):
+            continue
+        for timing in timings:
+            history = timing.get("attempt_history") if isinstance(timing, dict) else None
+            if isinstance(history, list) and any(
+                isinstance(attempt, dict)
+                and attempt.get("error_type") == "ProviderOutputLimitError"
+                for attempt in history
+            ):
+                return True
+    return False
+
+
+def _v26_truncated_terminal_evidence_valid(
+    row: dict[str, Any],
+    agent: dict[str, Any],
+    stages: list[dict[str, Any]],
+    *,
+    budget_exhaustion: bool,
+) -> bool:
+    """Bind a known-false truncation to its committed, unexecuted final response."""
+
+    budget = row.get("budget")
+    termination = budget.get("termination") if isinstance(budget, dict) else None
+    budget_precedence = bool(
+        row.get("model_failure_reason") == "budget_exhausted"
+        and budget_exhaustion
+        and isinstance(termination, dict)
+        and termination.get("reason") == "max_total_tokens"
+    )
+    if (
+        row.get("model_failure_reason") != "terminal_submission_truncated"
+        and not budget_precedence
+    ):
+        return False
+    if row.get("api_protocol") != "chat-completions" or row.get("provider_error"):
+        return False
+    if not stages or any("terminal_response" in stage for stage in stages):
+        return False
+
+    final_stage = stages[-1]
+    final_agent = final_stage.get("agent")
+    if not isinstance(final_agent, dict):
+        return False
+    if any(
+        stage.get("observed_terminal_tool")
+        == TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+        or (
+            isinstance(stage.get("agent"), dict)
+            and (
+                stage["agent"].get("observed_terminal_tool")
+                == TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+                or (
+                    isinstance(stage["agent"].get("terminal_response"), dict)
+                    and stage["agent"]["terminal_response"].get("status")
+                    == "truncated"
+                )
+            )
+        )
+        for stage in stages[:-1]
+    ):
+        return False
+
+    terminal_response = final_agent.get("terminal_response")
+    if not isinstance(terminal_response, dict) or set(terminal_response) != {
+        "status",
+        "finish_reason",
+        "response_id",
+        "usage",
+        "timing",
+        "discarded_message",
+    }:
+        return False
+    response_id = terminal_response.get("response_id")
+    if response_id is not None and (
+        not isinstance(response_id, str) or not response_id
+    ):
+        return False
+    if (
+        terminal_response.get("status") != "truncated"
+        or terminal_response.get("finish_reason") != "length"
+        or terminal_response != agent.get("terminal_response")
+        or response_id != final_agent.get("response_id")
+        or response_id != agent.get("response_id")
+    ):
+        return False
+
+    expected_observed_terminal = (
+        "budget_exhausted"
+        if budget_precedence
+        else TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+    )
+    if (
+        final_stage.get("terminal_tool") != "submit_result"
+        or final_stage.get("observed_terminal_tool")
+        != expected_observed_terminal
+        or final_agent.get("terminal_tool") != "submit_result"
+        or final_agent.get("observed_terminal_tool")
+        != expected_observed_terminal
+        or agent.get("terminal_tool") != "submit_result"
+        or agent.get("observed_terminal_tool")
+        != expected_observed_terminal
+        or final_stage.get("post_prefix_tool_choice") != "auto"
+        or final_agent.get("post_prefix_tool_choice") != "auto"
+        or agent.get("post_prefix_tool_choice") != "auto"
+        or final_agent.get("terminal_submissions") != 0
+        or final_agent.get("function_calls_total") != final_agent.get("tool_calls")
+    ):
+        return False
+    final_trace = final_agent.get("tool_trace")
+    if not isinstance(final_trace, list) or any(
+        isinstance(item, dict) and item.get("name") == "submit_result"
+        for item in final_trace
+    ):
+        return False
+    final_text = final_agent.get("final_text")
+    if (
+        not isinstance(final_text, str)
+        or not final_text
+        or agent.get("final_text") != final_text
+    ):
+        return False
+
+    forced_prefix = final_stage.get("forced_tool_prefix")
+    observed_prefix = final_stage.get("observed_forced_tool_prefix")
+    turns = _non_negative_int(final_agent.get("turns"))
+    max_turns = _non_negative_int(final_stage.get("max_turns"))
+    final_budget = final_agent.get("budget")
+    final_limit = final_budget.get("limit") if isinstance(final_budget, dict) else None
+    final_used = final_budget.get("used") if isinstance(final_budget, dict) else None
+    final_turn_basis = bool(turns is not None and max_turns is not None and turns == max_turns)
+    last_call_basis = bool(
+        isinstance(final_limit, dict)
+        and isinstance(final_used, dict)
+        and _non_negative_int(final_limit.get("model_calls")) is not None
+        and final_used.get("model_calls") == final_limit.get("model_calls")
+    )
+    if (
+        not isinstance(forced_prefix, list)
+        or observed_prefix != forced_prefix
+        or final_agent.get("forced_tool_prefix") != forced_prefix
+        or final_agent.get("observed_forced_tool_prefix") != forced_prefix
+        or turns is None
+        or turns <= len(forced_prefix)
+        or not (final_turn_basis or last_call_basis)
+    ):
+        return False
+
+    stage_timings = final_agent.get("request_timings")
+    aggregate_timings = agent.get("request_timings")
+    if (
+        not isinstance(stage_timings, list)
+        or not stage_timings
+        or not isinstance(aggregate_timings, list)
+        or not aggregate_timings
+    ):
+        return False
+    final_timing = stage_timings[-1]
+    if not isinstance(final_timing, dict):
+        return False
+    if (
+        final_timing.get("turn") != turns
+        or final_timing.get("stage") != final_stage.get("name")
+        or aggregate_timings[-1] != final_timing
+    ):
+        return False
+    response_timing = terminal_response.get("timing")
+    if (
+        not isinstance(response_timing, dict)
+        or set(response_timing) != _TERMINAL_RESPONSE_TIMING_FIELDS
+        or response_timing
+        != {field: final_timing.get(field) for field in _TERMINAL_RESPONSE_TIMING_FIELDS}
+        or response_timing.get("terminal_event") != "chat.completion"
+        or response_timing.get("status_code") != 200
+        or response_timing.get("delivery_state") != "terminal_seen"
+    ):
+        return False
+    attempts = _non_negative_int(response_timing.get("attempts"))
+    attempt_history = response_timing.get("attempt_history")
+    if (
+        attempts is None
+        or attempts < 1
+        or not isinstance(attempt_history, list)
+        or len(attempt_history) != attempts
+        or not isinstance(attempt_history[-1], dict)
+    ):
+        return False
+    final_attempt = attempt_history[-1]
+    if any(
+        final_attempt.get(field) != expected
+        for field, expected in {
+            "attempt": attempts,
+            "outcome": "error",
+            "error_type": "ProviderOutputLimitError",
+            "phase": "response_body",
+            "status_code": 200,
+            "terminal_event": "chat.completion",
+            "retryable": False,
+            "safe_to_retry": False,
+            "automatic_retry_scheduled": False,
+            "automatic_retry_suppressed_reason": "delivery_not_known_safe",
+            "delivery_state": "terminal_seen",
+            "api_protocol": "chat-completions",
+            "endpoint": "/chat/completions",
+        }.items()
+    ):
+        return False
+
+    response_usage = terminal_response.get("usage")
+    timing_usage = {
+        field: final_timing.get(field)
+        for field in ("input_tokens", "output_tokens", "total_tokens")
+    }
+    if (
+        not isinstance(response_usage, dict)
+        or set(response_usage) != set(timing_usage)
+        or _usage_triplet(response_usage) is None
+        or response_usage != timing_usage
+    ):
+        return False
+
+    discarded = terminal_response.get("discarded_message")
+    if not isinstance(discarded, dict) or set(discarded) != {
+        "sha256",
+        "serialized_chars",
+        "serialized_bytes",
+        "top_level_field_count",
+        "content_item_count",
+        "tool_call_count",
+    }:
+        return False
+    counts = {
+        field: _non_negative_int(discarded.get(field))
+        for field in (
+            "serialized_chars",
+            "serialized_bytes",
+            "top_level_field_count",
+            "content_item_count",
+            "tool_call_count",
+        )
+    }
+    discarded_valid = bool(
+        _valid_sha256(discarded.get("sha256"))
+        and all(value is not None for value in counts.values())
+        and int(counts["serialized_chars"] or 0) > 0
+        and int(counts["serialized_bytes"] or 0)
+        >= int(counts["serialized_chars"] or 0)
+        and int(counts["top_level_field_count"] or 0) > 0
+    )
+    if not discarded_valid:
+        return False
+    if budget_precedence:
+        limit = budget.get("limit") if isinstance(budget, dict) else None
+        used = budget.get("used") if isinstance(budget, dict) else None
+        ceiling = limit.get("total_tokens") if isinstance(limit, dict) else None
+        consumed = used.get("total_tokens") if isinstance(used, dict) else None
+        aggregate_token_timings = [
+            timing.get("total_tokens")
+            for timing in aggregate_timings
+            if isinstance(timing, dict)
+        ]
+        if not (
+            _non_negative_int(ceiling) is not None
+            and _non_negative_int(consumed) is not None
+            and len(aggregate_token_timings) == len(aggregate_timings)
+            and all(_non_negative_int(value) is not None for value in aggregate_token_timings)
+            and sum(aggregate_token_timings) == consumed
+            and sum(aggregate_token_timings[:-1]) < ceiling
+            and consumed > ceiling
+            and aggregate_token_timings[-1] == response_usage["total_tokens"]
+        ):
+            return False
+    return True
+
+
+_V26_PAPER_EVIDENCE_STAGES = frozenset(
+    {"extract", "vision_verify", "latex_verify"}
+)
+
+
+def _v26_stage_terminal_response_mode(arm: str, stage: str) -> str | None:
+    if arm == "paper":
+        if stage in _V26_PAPER_EVIDENCE_STAGES:
+            return "evidence_result"
+        if stage == "reconcile":
+            return "assistant_text"
+        if stage == "solve":
+            return "empty_ack"
+        return None
+    return "empty_ack" if stage == "solve" else None
+
+
+def _v26_accepted_terminal_response_valid(
+    terminal_response: Any,
+    result: dict[str, Any],
+    *,
+    acknowledgement_mode: str,
+) -> bool:
+    if not isinstance(terminal_response, dict) or set(terminal_response) != {
+        "status",
+        "response_id",
+        "acknowledgement",
+    }:
+        return False
+    response_id = terminal_response.get("response_id")
+    if response_id is not None and (
+        not isinstance(response_id, str) or not response_id
+    ):
+        return False
+    final_text = result.get("final_text")
+    acknowledgement = terminal_response.get("acknowledgement")
+    if (
+        terminal_response.get("status") != "accepted"
+        or response_id != result.get("response_id")
+        or not isinstance(final_text, str)
+        or not final_text
+        or not isinstance(acknowledgement, dict)
+    ):
+        return False
+    if acknowledgement_mode == "empty_ack":
+        return acknowledgement == {} and final_text == "Spreadsheet task completed."
+    if acknowledgement_mode != "evidence_result":
+        return False
+    return bool(
+        set(acknowledgement) == {"mode", "result_chars", "result_sha256"}
+        and acknowledgement.get("mode") == "evidence_result"
+        and _non_negative_int(acknowledgement.get("result_chars")) is not None
+        and acknowledgement.get("result_chars") == len(final_text)
+        and acknowledgement.get("result_sha256")
+        == hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+    )
+
+
+def _v26_completed_stage_terminal_response_valid(
+    stage: dict[str, Any],
+    *,
+    arm: str,
+) -> bool:
+    stage_agent = stage.get("agent")
+    name = stage.get("name")
+    if not isinstance(stage_agent, dict) or not isinstance(name, str):
+        return False
+    acknowledgement_mode = _v26_stage_terminal_response_mode(arm, name)
+    if acknowledgement_mode is None:
+        return False
+    terminal_response = stage_agent.get("terminal_response")
+    if acknowledgement_mode == "assistant_text":
+        return bool(
+            terminal_response is None
+            and stage.get("terminal_tool") == "assistant_text"
+            and stage.get("observed_terminal_tool") == "assistant_text"
+            and stage_agent.get("terminal_tool") == "assistant_text"
+            and stage_agent.get("observed_terminal_tool") == "assistant_text"
+            and stage_agent.get("terminal_submissions") == 0
+        )
+    return bool(
+        stage.get("terminal_tool") == "submit_result"
+        and stage.get("observed_terminal_tool") == "submit_result"
+        and stage_agent.get("terminal_tool") == "submit_result"
+        and stage_agent.get("observed_terminal_tool") == "submit_result"
+        and stage_agent.get("terminal_submissions") == 1
+        and _v26_accepted_terminal_response_valid(
+            terminal_response,
+            stage_agent,
+            acknowledgement_mode=acknowledgement_mode,
+        )
+    )
+
+
+def _v26_model_failure_terminal_response_valid(
+    agent: dict[str, Any],
+    stages: list[dict[str, Any]],
+    *,
+    arm: str,
+) -> bool:
+    """Validate completed prior stages and reject a successful final acknowledgement."""
+
+    if not stages or any("terminal_response" in stage for stage in stages):
+        return False
+    final_agent = stages[-1].get("agent")
+    if not isinstance(final_agent, dict):
+        return False
+    aggregate_response = agent.get("terminal_response")
+    final_response = final_agent.get("terminal_response")
+    if not (
+        (aggregate_response is None and final_response is None)
+        or (
+            isinstance(aggregate_response, dict)
+            and isinstance(final_response, dict)
+            and aggregate_response.get("status") == "truncated"
+            and final_response.get("status") == "truncated"
+        )
+    ):
+        return False
+    return all(
+        _v26_completed_stage_terminal_response_valid(stage, arm=arm)
+        for stage in stages[:-1]
+    )
+
+
+def _v26_success_terminal_evidence_valid(
+    row: dict[str, Any],
+    agent: dict[str, Any],
+    stages: list[dict[str, Any]],
+    *,
+    arm: str,
+) -> bool:
+    if (
+        row.get("status") != "completed"
+        or row.get("outcome_kind") != "scored"
+        or not stages
+        or any("terminal_response" in stage for stage in stages)
+        or not all(
+            _v26_completed_stage_terminal_response_valid(stage, arm=arm)
+            for stage in stages
+        )
+    ):
+        return False
+
+    final_stage = stages[-1]
+    final_agent = final_stage.get("agent")
+    if not isinstance(final_agent, dict):
+        return False
+    terminal_response = final_agent.get("terminal_response")
+    final_name = final_stage.get("name")
+    final_mode = (
+        _v26_stage_terminal_response_mode(arm, final_name)
+        if isinstance(final_name, str)
+        else None
+    )
+    return bool(
+        final_mode in {"empty_ack", "evidence_result"}
+        and _v26_accepted_terminal_response_valid(
+            terminal_response,
+            final_agent,
+            acknowledgement_mode=str(final_mode),
+        )
+        and agent.get("terminal_response") == terminal_response
+        and agent.get("final_text") == final_agent.get("final_text")
+        and agent.get("response_id") == final_agent.get("response_id")
+        and agent.get("terminal_tool") == "submit_result"
+        and agent.get("observed_terminal_tool") == "submit_result"
+        and _non_negative_int(agent.get("terminal_submissions")) is not None
+        and agent.get("terminal_submissions") >= 1
+    )
 
 
 def _text_sha256(value: str) -> str:
@@ -832,7 +1350,14 @@ def _audit_manifest_contract(
         }
         if manifest.get("forced_tool_prefix_routing") != expected_prefixes:
             _add_reason(reasons, "comparison_manifest_forced_routing_mismatch")
-        if manifest.get("stage_allowed_tools") != _stage_allowed_tools_policy(arms):
+        if manifest.get("stage_allowed_tools") != _stage_allowed_tools_policy(
+            arms,
+            protocol_version=(
+                contract.protocol_version
+                if contract is not None
+                else COMPARISON_PROTOCOL_VERSION
+            ),
+        ):
             _add_reason(reasons, "comparison_manifest_stage_tools_mismatch")
         if manifest.get("allowed_observed_terminals") != (
             _allowed_observed_terminals_policy(
@@ -1312,6 +1837,53 @@ def _audit_completed_agent(
         )
     ):
         _add_reason(reasons, "agent_final_stage_budget_mismatch")
+    if contract is not None and contract.require_truncated_terminal_evidence:
+        truncation_claimed = bool(
+            row.get("model_failure_reason") == "terminal_submission_truncated"
+            or agent.get("observed_terminal_tool")
+            == TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+            or (
+                isinstance(agent.get("terminal_response"), dict)
+                and agent["terminal_response"].get("status") == "truncated"
+            )
+            or any(
+                stage.get("observed_terminal_tool")
+                == TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+                or (
+                    isinstance(stage.get("agent"), dict)
+                    and isinstance(stage["agent"].get("terminal_response"), dict)
+                    and stage["agent"]["terminal_response"].get("status")
+                    == "truncated"
+                )
+                for stage in stages
+            )
+            or _v26_output_limit_attempt_observed(stages)
+        )
+        if truncation_claimed and not _v26_truncated_terminal_evidence_valid(
+            row,
+            agent,
+            stages,
+            budget_exhaustion=budget_exhaustion,
+        ):
+            _add_reason(reasons, "terminal_submission_truncated_evidence_invalid")
+    if (
+        contract is not None
+        and contract.require_accepted_terminal_evidence
+        and row.get("status") == "completed"
+    ):
+        outcome_kind = row.get("outcome_kind")
+        if outcome_kind == "scored":
+            terminal_evidence_valid = _v26_success_terminal_evidence_valid(
+                row, agent, stages, arm=arm
+            )
+        elif outcome_kind == "model_execution_failure":
+            terminal_evidence_valid = _v26_model_failure_terminal_response_valid(
+                agent, stages, arm=arm
+            )
+        else:
+            terminal_evidence_valid = True
+        if not terminal_evidence_valid:
+            _add_reason(reasons, "accepted_terminal_response_evidence_invalid")
 
 
 def _audit_completed_row(

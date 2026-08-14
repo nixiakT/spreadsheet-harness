@@ -25,7 +25,6 @@ from .agent import (
     ASSISTANT_TEXT_TERMINAL,
     BUDGET_EXHAUSTED_TERMINAL,
     CONNECT_RETRY_MIN_SECONDS,
-    FINAL_RECOVERY_TERMINAL,
     OVERLOAD_RETRY_MIN_SECONDS,
     RETRY_BACKOFF_MAX_SECONDS,
     SAFE_AUTOMATIC_RETRY_REASONS,
@@ -37,6 +36,7 @@ from .arms import (
     COMPARISON_EDIT_RECOVERY_POLICY_VERSION,
     COMPARISON_FORCED_TOOL_PREFIX_POLICY,
     COMPARISON_TURN_CAP_POLICY_VERSION,
+    OURS_TOOLS,
     PAPER_EXTRACTION_TOOLS,
     PAPER_LATEX_TOOLS,
     PAPER_RECONCILIATION_TOOLS,
@@ -97,10 +97,20 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
+TERMINAL_SUBMISSION_TRUNCATED_OBSERVED = "submit_result_length"
+HISTORICAL_FINAL_RECOVERY_TERMINAL = "final_recovery_code_interpreter"
 V24_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v24"
 V24_COMPARISON_MANIFEST_SCHEMA_VERSION = 13
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v25"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 14
+V25_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v25"
+V25_COMPARISON_MANIFEST_SCHEMA_VERSION = 14
+V25_RUN_SPEC_SOURCE_CONTRACT = {
+    "schema_version": 1,
+    "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
+    "sha256": "3ce79390a288a039fd411e0f77f81c879a83f653a242f85ed305da64c159ad0b",
+    "file_count": 21,
+}
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v26"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 15
 PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
 PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
 PILOT_RUN_SPEC_FILENAME = "qwen35-trace2skill-local-pilot16-run-spec-v1.json"
@@ -146,9 +156,23 @@ V24_COMPARISON_CONFIGURATION_POLICIES = {
     ),
     "circuit_breaker_nonbreaker_categories": ["model_execution_failure"],
 }
-COMPARISON_CONFIGURATION_POLICIES = {
+V25_COMPARISON_CONFIGURATION_POLICIES = {
     **V24_COMPARISON_CONFIGURATION_POLICIES,
+    "model_execution_failure_reasons": [
+        "budget_exhausted",
+        "edit_recovery_exhausted",
+        "terminal_submission_invalid",
+        "workbook_unchanged",
+    ],
+}
+COMPARISON_CONFIGURATION_POLICIES = {
+    **V25_COMPARISON_CONFIGURATION_POLICIES,
     "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
+    "terminal_submission_policy": "empty-ack-harness-final-text-v1",
+    "edit_recovery_terminal_policy": "penultimate-recovery-final-submit-v1",
+    "ours_tool_policy": "fixed-six-code-first-v1",
+    "deterministic_profile_policy": "representative-evidence-12k-v1",
+    "formula_verification_skill_policy": "trajectory-local-transfer-gate-v1",
 }
 
 
@@ -205,6 +229,17 @@ RUN_SPEC_ANCHORS = (
         schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
         phase="post_optimization_confirmation",
         split_manifest_id="qwen35-trace2skill-local-confirm16-v1",
+        comparison_protocol_version=V25_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V25_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
+    ),
+    RunSpecAnchor(
+        run_spec_id="qwen36-local-v26-confirm-eval16-v1-bare-ours-seed41",
+        filename="qwen35-trace2skill-local-v26-confirm16-run-spec-v1.json",
+        sha256="4bca7fe452c9ba2dadc31c374f29abcda575cb243e5f960789f2f50b4191884a",
+        schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
+        phase="v26_post_optimization_confirmation",
+        split_manifest_id="qwen35-trace2skill-local-v26-confirm16-v1",
         comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
         comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
         launchable=True,
@@ -588,7 +623,10 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
         },
         "skills_for_ours_only": configuration.get("skills_for_ours_only"),
     }
-    if manifest.get("comparison_protocol_version") == COMPARISON_PROTOCOL_VERSION:
+    protocol_version = manifest.get("comparison_protocol_version")
+    if protocol_version == V25_COMPARISON_PROTOCOL_VERSION:
+        contract["source_contract"] = dict(V25_RUN_SPEC_SOURCE_CONTRACT)
+    elif protocol_version == COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = _run_spec_source_fingerprint()
     return contract
 
@@ -597,13 +635,25 @@ def _run_key(task_id: str, arm: str) -> str:
     return f"{task_id}::{arm}"
 
 
-def _stage_allowed_tools_policy(arms: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+def _stage_allowed_tools_policy(
+    arms: tuple[str, ...],
+    *,
+    protocol_version: str = COMPARISON_PROTOCOL_VERSION,
+) -> dict[str, dict[str, Any]]:
     return {
         arm: (
             {"solve": sorted(BARE_TOOLS)}
             if arm in {"bare", "profile"}
             else {"solve": "all"}
-            if arm in {"native", "ours"}
+            if arm == "native"
+            else {
+                "solve": (
+                    sorted(OURS_TOOLS)
+                    if protocol_version == COMPARISON_PROTOCOL_VERSION
+                    else "all"
+                )
+            }
+            if arm == "ours"
             else {
                 "extract": sorted(PAPER_EXTRACTION_TOOLS),
                 "vision_verify": sorted(PAPER_VISION_TOOLS),
@@ -628,17 +678,26 @@ def _allowed_observed_terminals_policy(
                     ASSISTANT_TEXT_TERMINAL,
                     *(
                         [BUDGET_EXHAUSTED_TERMINAL]
-                        if protocol_version == COMPARISON_PROTOCOL_VERSION
+                        if protocol_version
+                        in {
+                            V25_COMPARISON_PROTOCOL_VERSION,
+                            COMPARISON_PROTOCOL_VERSION,
+                        }
                         else []
                     ),
                 ]
                 if arm == "paper" and stage == "reconcile"
                 else [
                     TERMINAL_TOOL_NAME,
-                    ASSISTANT_TEXT_TERMINAL,
                     *(
-                        [FINAL_RECOVERY_TERMINAL]
+                        [ASSISTANT_TEXT_TERMINAL]
+                        if protocol_version != COMPARISON_PROTOCOL_VERSION
+                        else []
+                    ),
+                    *(
+                        [HISTORICAL_FINAL_RECOVERY_TERMINAL]
                         if stage == "solve"
+                        and protocol_version != COMPARISON_PROTOCOL_VERSION
                         and (
                             protocol_version != LEGACY_COMPARISON_PROTOCOL_VERSION
                             or arm == "ours"
@@ -646,8 +705,17 @@ def _allowed_observed_terminals_policy(
                         else []
                     ),
                     *(
-                        [BUDGET_EXHAUSTED_TERMINAL]
+                        [TERMINAL_SUBMISSION_TRUNCATED_OBSERVED]
                         if protocol_version == COMPARISON_PROTOCOL_VERSION
+                        else []
+                    ),
+                    *(
+                        [BUDGET_EXHAUSTED_TERMINAL]
+                        if protocol_version
+                        in {
+                            V25_COMPARISON_PROTOCOL_VERSION,
+                            COMPARISON_PROTOCOL_VERSION,
+                        }
                         else []
                     ),
                 ]
@@ -1591,7 +1659,10 @@ class ComparisonBenchmarkRunner:
                 "applies_to": "comparison stages with workbook tools after forced prefix",
                 "direct_text_stages": ["paper.reconcile"],
             },
-            "stage_allowed_tools": _stage_allowed_tools_policy(self.arms),
+            "stage_allowed_tools": _stage_allowed_tools_policy(
+                self.arms,
+                protocol_version=COMPARISON_PROTOCOL_VERSION,
+            ),
             "allowed_observed_terminals": _allowed_observed_terminals_policy(
                 self.stage_turn_caps
             ),
