@@ -11,9 +11,9 @@ tools \citep{chi2026spreadsheetrl}, or trajectory-distilled procedures
 to check its work, but the agent still decides whether its own check is
 sufficient.
 
-That trust is fragile. In SpreadsheetBench~2's analysis of unresolved Claude
-Opus~4.6 trajectories, insufficient inspection (42.3\%) and wrong-target
-selection (32.9\%) dominate the assigned failure causes
+That trust is fragile. In SpreadsheetBench~2's annotated sample of unsuccessful
+Claude Opus~4.6 trajectories, insufficient inspection (42.3\%) and wrong-target
+selection (32.9\%) dominate the assigned primary failure causes
 \citep{zhu2026spreadsheetbench2}. In one visualization trace, three attempted
 checks returned negative or empty observations, after which the agent claimed
 that the chart XML confirmed success. More generally, a verification can be
@@ -36,7 +36,17 @@ rewrites the file, whether formula values changed during recalculation, and
 whether later evidence covers those effects on the exact artifact that leaves
 the harness.
 
-We propose \method, illustrated in Figure~\ref{fig:overview}. Before an edit,
+We propose \method, illustrated in Figure~\ref{fig:overview}. The key obstacle
+is observational: two executions can expose exactly the same raw tool names,
+arguments, and observations while an opaque command changes different workbook
+semantics. Any deterministic monitor restricted to that projection must decide
+both executions identically, so on a valid/invalid pair it must either accept
+the invalid execution or reject the valid one. This lower bound motivates our
+contribution: lift workbook transitions into trusted semantic events before
+applying a policy, rather than asking a more elaborate policy to infer effects
+that its input does not contain.
+
+Operationally, before an edit,
 the model declares a finite candidate target and cites trusted observations of
 that scope on the current artifact. The edit runs on a staging copy; the
 harness, not the model, compares workbook states and requires the actual effect
@@ -52,26 +62,29 @@ on the final bytes. Only an accepted candidate receives a content-addressed
 accepted-deliverable certificate and byte-identical read-only scoring replica;
 other terminations receive an observer-only finalization integrity record.
 
-\input{figures/system_overview}
+\input{figures/mechanism_pair}
 
 Our contributions are:
 
 \begin{itemize}
+  \item an exact-pair indistinguishability construction that isolates the
+  information missing from raw spreadsheet traces, plus a same-policy test of
+  raw versus lifted semantic events with valid-control guardrails;
   \item a spreadsheet observation layer that turns pre/post OOXML state,
   including mutations made through an opaque Python interpreter, into trusted
-  semantic effect events and derived evidence obligations;
+  revision- and scope-bound effect events and derived evidence obligations;
   \item prospective target grounding that compares an inspected, declared
   target with the semantic footprint of an isolated staged edit;
-  \item explicit revision semantics for recalculation source/output and for
-  render manifest, sheet/page, and pixel identity; and
-  \item an accepted-deliverable lineage from the exact accepted attempt through
+  \item explicit target, recalculation, render, and accepted-deliverable
+  lineage from the exact accepted attempt through
   postprocessing to the exact byte-identical scoring replica, while reserving
   observer-only integrity records for noncompletion.
 \end{itemize}
 
 We evaluate these mechanisms without attributing novelty to generic temporal
-languages, artifact identifiers, or online gates. The controlled study
-separates prompts, tools, multi-format views, target elicitation, containment
-enforcement, offline replay, event enrichment, and postprocessing, using an
-independent ZIP/XML oracle and an instance-artifact-unseen 100-task debugging
-set.
+languages, artifact identifiers, or online gates. The controlled study first
+tests event sufficiency without a model, then tests online enforcement under a
+shared causal execution family. Secondary contrasts separate target
+elicitation, containment, and finalization lineage, using an independent
+ZIP/XML oracle and a publicly exposed versus artifact-unseen partition of a
+100-task debugging set.

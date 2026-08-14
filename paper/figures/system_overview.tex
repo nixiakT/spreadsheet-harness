@@ -45,7 +45,9 @@
   \node[outside, text width=1.75cm] (scorer) at (1.15,0.35)
       {isolated official scorer};
   \node[anchor=south west, font=\sffamily\bfseries\fontsize{6.8}{7.5}\selectfont,
-        text=slgray] at (0.2,7.18) {UNTRUSTED MODEL / EVALUATOR};
+        text=slgray] at (0.2,7.18) {UNTRUSTED MODEL};
+  \node[anchor=north west, font=\sffamily\bfseries\fontsize{6.5}{7.2}\selectfont,
+        text=slgray] at (0.05,0.02) {ISOLATED TRUSTED SCORER};
 
   \node[action, text width=1.25cm] (inspect) at (1.0,5.0)
       {\textbf{1}\enspace inspect\\source revision};
@@ -113,5 +115,5 @@ reason and attempt ledger are auditable, but no accepted deliverable is claimed.
 Frozen attempts are scored only after termination and never fed back. Double
 outlines denote immutable or content-bound records. The certificate is not a
 digital signature or hostile-host security mechanism.}
-\label{fig:overview}
+\label{fig:pipeline}
 \end{figure*}

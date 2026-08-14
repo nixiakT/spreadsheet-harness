@@ -1,61 +1,58 @@
 \begin{table*}[t]
-\caption{Preregistered outcomes and paired contrasts. Intervals cluster by
-task; Accuracy includes every selected task, and false completion (FC) is
-task-level. All cells remain \emph{TBD} until manifests, attempts, accepted-
-deliverable certificates, and all-row finalization records pass fresh audit.}
+\caption{Preregistered primary outcomes and evidence gates. Intervals cluster
+by task; Accuracy includes every selected task, and unsafe delivery is measured
+over all selected tasks. Full attempt, grounding, backend, and cost diagnostics
+appear in Appendix~\ref{app:secondary-results}. All cells remain \emph{TBD}
+until the complete execution families pass fresh audit.}
 \label{tab:main}
 \centering
 \begingroup
-\scriptsize
-\setlength{\tabcolsep}{2pt}
-\renewcommand{\arraystretch}{0.92}
+\footnotesize
+\setlength{\tabcolsep}{3.0pt}
+\renewcommand{\arraystretch}{1.10}
 \newcommand{\tbdres}{\textcolor{BrickRed}{TBD}}
-\begin{tabular}{@{}p{2.50cm}p{0.65cm}p{1.20cm}p{1.20cm}p{0.85cm}p{0.85cm}p{0.85cm}p{0.85cm}p{1.40cm}p{1.00cm}@{}}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{2.35cm}
+  >{\centering\arraybackslash}p{1.35cm}
+  >{\centering\arraybackslash}p{1.35cm}
+  >{\centering\arraybackslash}p{1.75cm}
+  >{\centering\arraybackslash}p{1.45cm}
+  >{\centering\arraybackslash}p{1.55cm}
+  >{\centering\arraybackslash}p{1.25cm}@{}}
 \toprule
-\multicolumn{10}{c}{\textbf{A. Debugging-100: primary Qwen3.5-35B-A3B; seeds 41/42/43}} \\
-\cmidrule(lr){1-10}
-Arm & $n{\times}s$ & Acc. [CI] & Mod. [CI] & 1st FC & Any FC & Acc. FC/all
-& Term. cov. & Submit rej./rec. & Tokens \\
+\multicolumn{7}{c}{\textbf{A. Debugging-100: primary checkpoint; seeds 41/42/43}} \\
+\cmidrule(lr){1-7}
+\textbf{Arm} & \textbf{Accuracy [CI]} & \textbf{Mod. [CI]} &
+\textbf{Unsafe delivery / all} & \textbf{Accepted coverage} &
+\textbf{Blocked / recovered} & \textbf{Tokens / task} \\
 \midrule
-B2 multi-format & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
-T2S procedure only & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
-B5 fixed shadow & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
-B6 fixed enforce & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres/\tbdres & \tbdres \\
-G0 no grounding & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres/\tbdres & \tbdres \\
-G1 advisory declaration & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres/\tbdres & \tbdres \\
-FULL/G2 (ours) & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres/\tbdres & \tbdres \\
+B0 code-only & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
+B1 native tools & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
+B2 multi-format & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
+T2S procedure only & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
+B5 shadow fork & \tbdres & \tbdres & \tbdres & \tbdres & n/a & \tbdres \\
+B6 enforce source & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres{} / \tbdres & \tbdres \\
+FULL/G2 (ours) & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres{} / \tbdres & \tbdres \\
 \bottomrule
 \end{tabular}
 
-\vspace{1.5pt}
-\begin{tabular}{@{}p{2.35cm}p{1.45cm}p{2.95cm}p{1.55cm}p{1.55cm}p{1.45cm}@{}}
+\vspace{3pt}
+\begin{tabular}{@{}
+  >{\centering\arraybackslash}p{0.75cm}
+  >{\raggedright\arraybackslash}p{2.15cm}
+  >{\raggedright\arraybackslash}p{2.35cm}
+  >{\centering\arraybackslash}p{1.45cm}
+  >{\centering\arraybackslash}p{1.45cm}
+  >{\raggedright\arraybackslash}p{3.25cm}@{}}
 \toprule
-\multicolumn{6}{c}{\textbf{B. Required mechanism diagnostics}} \\
+\multicolumn{6}{c}{\textbf{B. Conjunctive principal evidence gates}} \\
 \cmidrule(lr){1-6}
-Study & Dataset & Diagnostic & Estimate [CI] & Acc./term. cov. & Overhead \\
+\textbf{Gate} & \textbf{Contrast} & \textbf{Outcome} &
+\textbf{$\Delta$ [CI]} & \textbf{Paired test} &
+\textbf{Guardrail / decision} \\
 \midrule
-G1 versus G0 & Debug-100 & Declaration elicitation; target P/R; collateral & \tbdres & \tbdres & \tbdres \\
-G2 versus G1 & Debug-100 & Containment enforcement; grounding rej./rec. & \tbdres & \tbdres & \tbdres \\
-FULL & Vis.-24 & Official visual outcomes & \tbdres & \tbdres & \tbdres \\
-LO versus Excel & Subset & Value/render/score delta & \tbdres & \tbdres & \tbdres \\
-Event/policy $2\times2$ & Tamper & Invalid accept; valid reject & \tbdres & \tbdres & \tbdres \\
-FULL versus B6 & Finaliz. & Benign accept; stale/semantic reject & \tbdres & \tbdres & \tbdres \\
-Second family & Debug-100 & Four contrasts; no pooling & \tbdres & \tbdres & \tbdres \\
-\bottomrule
-\end{tabular}
-
-\vspace{1.5pt}
-\begin{tabular}{@{}p{1.65cm}p{1.35cm}p{2.05cm}p{1.55cm}p{1.55cm}p{0.85cm}p{0.85cm}p{1.05cm}@{}}
-\toprule
-\multicolumn{8}{c}{\textbf{C. Preregistered confirmatory contrasts}} \\
-\cmidrule(lr){1-8}
-Contrast & Dataset & Outcome & $\Delta$ [CI] & Pair stat. & Raw $p$ & Holm $p$ & Decision \\
-\midrule
-B6 $-$ B5 & Debug-100 & Accepted FC (all tasks) & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres \\
-FULL $-$ B6 & Debug-100 & Postproc. stale accept & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres \\
-G1 $-$ G0 & Debug-100 & Off-target rate (elicitation) & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres \\
-G2 $-$ G1 & Debug-100 & Off-target rate (enforcement) & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres \\
-Enr. $-$ raw & Tamper & Invalid-attack accept & \tbdres & \tbdres & \tbdres & \tbdres & \tbdres \\
+M & enriched $-$ raw, exact pairs & Invalid-attack acceptance & \tbdres & \tbdres & Valid-control rejection: \tbdres \\
+R & B6 $-$ B5, Debugging-100 & Unsafe delivery/all tasks & \tbdres & \tbdres & Accuracy and terminal coverage: \tbdres \\
 \bottomrule
 \end{tabular}
 \endgroup

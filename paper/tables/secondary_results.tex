@@ -1,0 +1,34 @@
+\begin{table*}[t]
+\caption{Preregistered secondary diagnostics. These analyses report paired
+effects and intervals but do not replace either principal evidence gate.
+Attempt-level false completion, target precision/recall, declared/reference and
+declared/actual area ratios, collateral effects, backend disagreement, calls,
+latency, and component CPU time are exported for every applicable row.}
+\label{tab:secondary}
+\centering
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{2.7pt}
+\renewcommand{\arraystretch}{1.08}
+\newcommand{\tbdsecondary}{\textcolor{BrickRed}{TBD}}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{2.00cm}
+  >{\raggedright\arraybackslash}p{1.70cm}
+  >{\raggedright\arraybackslash}p{4.30cm}
+  >{\centering\arraybackslash}p{1.75cm}
+  >{\centering\arraybackslash}p{2.55cm}@{}}
+\toprule
+\textbf{Study} & \textbf{Dataset} & \textbf{Outcome} &
+\textbf{Estimate [CI]} & \textbf{Utility / cost} \\
+\midrule
+G1 versus G0 & Debugging-100 & Declaration elicitation; target P/R; declared-area ratios & \tbdsecondary & \tbdsecondary{} / \tbdsecondary \\
+G2 versus G1 & Debugging-100 & Containment rejection/recovery; collateral effects & \tbdsecondary & \tbdsecondary{} / \tbdsecondary \\
+FULL versus B6 & Finalization & Benign acceptance; stale/semantic transition rejection & \tbdsecondary & \tbdsecondary{} / \tbdsecondary \\
+Event/policy $2\times2$ & Exact pairs & Invalid acceptance and valid-control rejection & \tbdsecondary & \tbdsecondary{} / \tbdsecondary \\
+LO versus Excel & Frozen subset & Value, render, and official-score disagreement & \tbdsecondary & \tbdsecondary{} / \tbdsecondary \\
+Second model family & Debugging-100 & Principal and secondary contrasts, without pooling & \tbdsecondary & \tbdsecondary{} / \tbdsecondary \\
+FULL & Vis.-24 & Official visual outcome and repeated-judge sensitivity & \tbdsecondary & \tbdsecondary{} / \tbdsecondary \\
+\bottomrule
+\end{tabular}
+\endgroup
+\end{table*}

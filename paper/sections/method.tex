@@ -1,6 +1,31 @@
 \section{Revision-aware spreadsheet evidence}
 \label{sec:method}
 
+\subsection{An observational lower bound}
+
+Let $\tau$ be an execution and $\pi_{\rm raw}(\tau)$ its raw monitor
+projection: model messages, tool names, serialized arguments, and returned
+observations, but not an independent interpretation of the workbook bytes
+before and after a tool. For the binary delivery decision, defer or abstain
+counts as rejection. We construct sealed valid/invalid pairs such that
+
+\begin{equation}
+  \begin{aligned}
+    \pi_{\rm raw}(\tau_k^+) &= \pi_{\rm raw}(\tau_k^-),
+    &y(\tau_k^+)&=1,\quad y(\tau_k^-)=0,\\
+    \mathbb{1}[M(\tau_k^-)=\mathrm{accept}]
+    &+\mathbb{1}[M(\tau_k^+)=\mathrm{reject}]=1.
+  \end{aligned}
+  \label{eq:raw-lower-bound}
+\end{equation}
+
+An independent OOXML oracle verifies the differing hidden semantics. Input
+equality forces any deterministic raw-only $M$ to make one decision, yielding
+the last identity (in expectation if $M$ is randomized). This does not constrain
+monitors that parse workbook state; it identifies the missing information that
+\method{} supplies to the same downstream policy. Appendix~\ref{app:raw-bound}
+gives the construction and proof.
+
 \subsection{Artifacts, effects, and scopes}
 
 Workbook artifact $\artifact_v=(v,h_v)$ pairs a monotonic publication index
@@ -38,6 +63,9 @@ earlier harness observations $I$ on the exact source artifact, requiring
   \forall i\in I:\operatorname{artifact}(i)=\artifact_v.
 \end{equation}
 
+Only successful materializing range reads enter $I$; overview, render, and
+worksheet-wildcard events cannot ground a declaration, and the protocol fixes a
+per-read cell cap. The evaluator-only target mask is never exposed to this path.
 After staging, publication additionally requires
 $\operatorname{scope}(\effects_v)\subseteq\widehat{\scope}$ for the complete
 native or opaque-code footprint. Unknown effects, stale citations, uninspected
@@ -81,11 +109,16 @@ A transactional failure that leaves the source unchanged creates no blocker;
 partial or uncertain recovery creates one cleared only by a later computed
 footprint covering its scope. This does not prove shared intent.
 
-Online \emph{shadow} and \emph{enforce} compute identical diagnostics; only
-enforce blocks submission. Because visible diagnostics can alter trajectories,
-offline replay of immutable no-monitor traces estimates detection, not recovery.
-Budgets remain fixed. Common observer instrumentation snapshots every submit
-before any gate, and post-termination attempt scores never return to the model.
+Shadow and enforce compute identical pre-decision diagnostics; only enforce
+returns a rejection. To identify that gate without a second stochastic rollout,
+the coordinator durably freezes the exact source prefix at the first gate-
+eligible submit, before feedback. Applying shadow acceptance to that prefix
+defines B5; B6 may then receive the rejection and continue. Thus B5 estimates
+the pre-feedback acceptance counterfactual, while B6 captures recovery under
+enforcement. Offline replay of separate no-monitor traces remains only a
+detection diagnostic. Budgets remain fixed. Common observer instrumentation
+snapshots every submit before any gate, and post-termination attempt scores
+never return to the model.
 
 \subsection{Postprocessing and finalization records}
 
@@ -113,6 +146,12 @@ and a workbook-scope final scan. Accepted visual evidence transfers only when a
 fresh render matches sheet/page and page bytes. The scan is not a model
 inspection. The accepted branch binds a read-only scoring replica; noncompletion
 binds only a diagnostic copy, never a deliverable.
+
+For the causal B6/FULL contrast, both rows reuse one terminal source execution
+and one deterministic material/finalization assessment. B6 records its factual
+control delivery outcome; FULL alone may authorize a SheetLedger certificate
+after the lineage checks. No additional model sample or post hoc reconstruction
+is counted as an observation.
 
 The canonical observer record contains outcome, optional accepted evidence,
 initial/candidate/final artifacts, transition/event-chain digests,
@@ -156,11 +195,3 @@ complete non-semantic transition, final scan, required pixel equivalence, and a
 byte-identical scoring replica. A noncompletion has only an observer integrity
 record binding artifact-to-diagnostic-copy lineage. Appendix~\ref{app:invariant}
 gives cases; neither invariant proves correctness or cryptographic security.
-
-\section{Contract provenance and procedure baselines}
-\label{sec:contract-provenance}
-
-The core uses one preregistered human-authored contract, fixed across shadow and
-enforce. Trace2Skill-inspired prose is a procedure-only whole-system baseline.
-Joint procedure/contract evolution remains outside the claims unless a separate
-same-pool factorial and cross-model transfer study is completed.

@@ -57,6 +57,27 @@ preconditions give the prospective and retrospective parts of the invariant.
 The argument assumes the stated trusted computing base and says nothing about
 whether a declared target or contract captures user intent.
 
+Figure~\ref{fig:pipeline} expands the accepted-candidate and audited-
+noncompletion paths that are compressed in the main-text mechanism figure.
+\input{figures/system_overview}
+
+\section{Raw-projection lower bound}
+\label{app:raw-bound}
+
+The raw projection contains model messages, tool names, serialized arguments,
+and returned observations, but no independent pre/post interpretation of
+workbook bytes. Each sealed template emits a valid control and a minimally
+invalid attack with byte-identical projection. The same visible command and
+observations conceal an independently verified difference in effect, revision,
+scope, or lineage. The terminal monitor is binary; defer or abstain counts as
+rejection because no artifact is delivered. A deterministic monitor is a
+function, so equal inputs imply one decision: acceptance contributes one
+invalid acceptance and rejection one valid-control rejection. Their sum is
+therefore one for every pair. For a randomized monitor, conditioning on the
+shared input gives the same identity in expectation. The argument says nothing
+about a monitor that independently parses workbook state; that is exactly the
+enriched condition under test.
+
 \section{Detailed prior-work boundaries}
 \label{app:prior-boundaries}
 
@@ -103,6 +124,18 @@ Randomization changes sheet names, range locations, formula offsets, and style
 values without changing the tested invariant. Valid controls prevent a trivial
 reject-all monitor from scoring well.
 
+\section{Secondary results and diagnostics}
+\label{app:secondary-results}
+
+\input{tables/secondary_results}
+
+Table~\ref{tab:secondary} separates mechanism diagnostics from the two
+principal gates in Table~\ref{tab:main}. The released row-level export retains
+all selected tasks, including errors, timeouts, rejected terminals, and audited
+noncompletions; no denominator is conditioned on successful execution. The
+second-family replication remains a separate fixed stratum and is never pooled
+with the primary checkpoint.
+
 \section{Benchmark splits, budgets, and audit}
 \label{app:protocol}
 
@@ -134,15 +167,31 @@ receive Wilson 95\% intervals. For repeated seeds, we first average within each
 task; the task-cluster bootstrap or permutation resamples tasks while preserving
 their complete arm-by-seed vector. We publish the random seed, draws, percentile
 interval, and BCa sensitivity analysis. Continuous Modification uses a paired
-task-cluster interval. Holm correction applies only to five scalar hypotheses:
-task-level accepted-terminal false completion over all selected tasks (B6 vs.
-B5), postprocess-stale acceptance (FULL vs. B6), declaration elicitation (G1
-vs. G0), staged-containment enforcement (G2 vs. G1), and sealed-oracle invalid-
-attack acceptance (enriched vs. raw events under the same generic policy).
-First/any-attempt false completion is diagnostic because those snapshots are
-captured before the submission gate can act. Accuracy and coverage are
-preregistered guardrails, not extra hidden tests. All raw estimates and
-intervals remain visible.
+task-cluster interval.
+
+Before observing the external outcomes, a dependency-free design script
+integrates this conditional exact test over a binomial discordant-pair count.
+For 100 tasks and 25\% expected discordance, the two-sided level-$0.05$ power
+for right-minus-left effects of 5, 10, 15, and 20 percentage points is 0.119,
+0.440, 0.837, and 0.991. This sensitivity calculation applies only to the
+single-seed binary superiority contrast. It neither treats repeated seeds as
+additional tasks nor chooses the non-inferiority margins; those guardrails use
+the separately frozen task-cluster design simulation.
+
+The headline claim is a conjunction of two principal evidence gates. Gate M is
+the same-policy, model-free reduction in invalid-attack acceptance from raw to
+enriched events on exact pairs satisfying
+Equation~\ref{eq:raw-lower-bound}; its guardrail is valid-control rejection.
+Gate R is the B6--B5 reduction in unsafe accepted delivery over all selected
+tasks; its guardrails are Accuracy and accepted-terminal coverage. Each gate
+uses its frozen level-$0.05$ paired test and confidence-bound guardrail. Because
+the claim is made only when both null components are rejected, this
+intersection--union rule controls the conjunction without treating secondary
+questions as additional confirmatory wins. FULL--B6, G1--G0, G2--G1, backend,
+visual, and cross-family analyses report paired effects and intervals but no
+confirmatory multiplicity claim. First/any-attempt false completion is
+diagnostic because those snapshots are captured before the submission gate can
+act. All estimates, intervals, and unresolved guardrails remain visible.
 
 \section{Failure taxonomy and annotation}
 

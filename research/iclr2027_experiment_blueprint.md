@@ -61,22 +61,25 @@ Tool descriptions, prompts, and service/checkpoint revisions are hashed or recor
 | B1 | Native tools | Spreadsheet-RL-inspired native-tool adapter (no RL-trained checkpoint), no skill or contract. |
 | B2 | Multi-format | SpreadsheetAgent-inspired multi-format adapter: B1 plus structure profile and text/image/range views. |
 | T2S | Procedure-only baseline | B2 plus a frozen Trace2Skill-inspired procedure; no evidence contract. |
-| B5 | Fixed-contract shadow | B2 plus the preregistered researcher-authored fixed contract and visible diagnostics, but no contract-based submission block. |
-| B6 | Fixed-contract enforce | Identical to B5 except that an unsatisfied submission is blocked. |
-| FULL | SheetLedger | B6 plus exact accepted-terminal, postprocessing, accepted-deliverable-certificate, and scoring-replica lineage enforcement. |
+| B5 | Fixed-contract shadow fork | Exact B6 source prefix frozen at the first gate-eligible submit, evaluated without returning rejection feedback. |
+| B6 | Fixed-contract enforce source | One online execution that may continue after its first rejected submit. |
+| FULL | SheetLedger authorization | The same B6 terminal and factual finalization assessment, plus exact accepted-terminal-to-replica lineage authorization. |
 | G0 | No target grounding | FULL with prospective declarations and containment disabled. |
 | G1 | Declaration advisory | FULL records declaration/footprint mismatch but does not block staging. |
 | G2 | Enforced target grounding | FULL's default: reject staged mutations whose actual footprint escapes an inspected declaration. |
 
 B0--B2, T2S, and the direct-prior adapters are whole-system references. They do not enter
-the core causal contrasts. The causal effect of online enforcement is B5 versus B6: model,
-fixed contract, tool surface, visible diagnostics, decoding, target-grounding setting,
-immutable-attempt instrumentation, and arm-level call/token/time ceilings are held fixed, and
-only the submission gate changes. The effect of finalization lineage is B6 versus FULL. G2 is
+the core causal contrasts. One B6 online source execution durably freezes B5 at its first
+gate-eligible submit, before any rejection feedback. B5 is neither a second model rollout nor
+a row reconstructed from B6's eventual outcome. B6 may continue after rejection, so the
+contrast includes enforcement-enabled recovery. B5/B6/FULL publish as one atomic family; a
+pre-terminal crash emits an interrupted seal and zero inference rows. The effect of
+finalization authorization is B6 versus FULL, which reuses B6's terminal source and factual
+assessment. G2 is
 the default FULL configuration, so G2 and FULL denote the same row unless an explicit
 grounding ablation is named; B5 and B6 also retain G2 so the enforcement and finalization
-contrasts hold grounding fixed. B6 and FULL execute identical deterministic postprocessing,
-recalculation, and scorer-copy operations; FULL alone enforces and records the accepted-
+contrasts hold grounding fixed. B6 and FULL reuse identical deterministic postprocessing,
+recalculation, final scan, and scorer-copy facts; FULL alone authorizes the accepted-
 terminal-to-final-to-copy lineage. G0 omits declarations, G1 adds elicitation and diagnostics
 without containment blocking, and G2 adds that enforcement. Therefore `G1 - G0` estimates
 declaration elicitation and `G2 - G1` estimates staged-containment enforcement; `G2 - G0` is
@@ -84,11 +87,10 @@ only the combined contrast and is never attributed to one gate. The fixed contra
 frozen from development data before any external instance is opened; it is not distilled
 jointly with a prose procedure.
 
-Online shadow diagnostics are visible to the model and can therefore change its trajectory.
-They are not described as a no-intervention counterfactual. Separately, frozen B2
-trajectories are replayed through the same fixed monitor offline to measure `would_block` on
-an identical trace. Offline replay estimates detection on observed trajectories but cannot
-estimate recovery after a block.
+The B5 fork receives no rejection feedback because it terminates at the shared pre-feedback
+submit. Separately, frozen B2 trajectories are replayed through the same fixed monitor offline
+to measure `would_block` on an identical trace. Offline replay estimates detection on
+observed trajectories but cannot estimate recovery after a block.
 
 Immutable completion-attempt capture is common measurement instrumentation, not a FULL-only
 treatment. Every detected submit is frozen before the gate, including rejected, invalid, and
@@ -298,6 +300,11 @@ Errors, timeouts, rejected submissions, and budget exhaustion remain failures.
   contract when the task does not authorize the change;
 - `target_precision_recall`: actual changed cells versus the gold target mask, used only by
   evaluation and never exposed at runtime;
+- `declaration_precision_recall`: declared cells versus the scorer-only reference mask, plus
+  declared/reference and declared/actual area ratios. Successful materializing range reads
+  are capped at 500 cells each; overview, render, worksheet, and workbook wildcard events do
+  not ground a declaration. These measures expose broad-declaration gaming and never enter
+  the runtime prompt or gate;
 - `finalization_record_validity`: a fresh auditor validates every row's candidate outcome,
   event chain, revision, observed finalization transitions, final scan, final artifact hash,
   and scorer-copy lineage. Only an accepted-candidate row additionally has
@@ -325,15 +332,16 @@ report formula-value, page-render, and official-score disagreement with paired i
 - Tasks, not task-seed rows, are the independent clusters. For repeated seeds, first average
   within task and then across tasks while preserving each complete arm-by-seed vector.
 - Model families are fixed replication strata, not independent draws from a population of
-  models. The four real-task confirmatory tests use preregistered Qwen3.5-35B-A3B; the
-  second family repeats those estimands with separate intervals and decisions, without
-  cross-family pooling. The sealed-oracle event contrast is model-free. Any broader
+  models. The real-task principal gate uses preregistered Qwen3.5-35B-A3B; the second family
+  repeats the estimand with a separate interval and decision, without cross-family pooling.
+  The sealed-oracle event gate is model-free. Any broader
   model-generalization statement remains descriptive.
 - Wilson intervals and exact two-sided McNemar tests are restricted to clearly labeled
   single-seed binary task pairs. Modification and multi-seed outcomes use paired task-cluster
   bootstrap/permutation intervals, with percentile and BCa sensitivity analyses.
-- Use Holm correction for the preregistered family of primary pairwise claims. Ablations are
-  secondary and report intervals rather than significance stars alone.
+- The headline claim is conjunctive: both the model-free mechanism gate and the real-task
+  enforcement gate must pass their frozen level-0.05 paired test and guardrail. This
+  intersection--union decision does not promote secondary contrasts into extra wins.
 - Failure-taxonomy labels are masked to arm identity where tool shape permits. Report sample
   size, Cohen's kappa or Krippendorff's alpha, annotator role, AI assistance, and adjudication;
   automated labels remain separate.
@@ -346,21 +354,26 @@ report formula-value, page-render, and official-score disagreement with paired i
   outcomes. A blinded design-stage simulation spans a conservative grid of paired discordance
   and intra-task seed correlation; if 100 tasks cannot resolve the chosen margins, the study
   may report utility descriptively but cannot claim preservation.
+- `scripts/design_mcnemar_power.py` provides a dependency-free exact design check for a
+  single-seed paired binary contrast. It integrates the conditional exact McNemar test over a
+  binomial discordant-pair count and explicitly does not treat repeated seeds as independent.
+  At 100 tasks, 25% discordance, and two-sided alpha 0.05, power for 5/10/15/20 percentage-point
+  right-minus-left effects is 0.119/0.440/0.837/0.991. Thus a small favorable point estimate
+  cannot be promoted into a powered superiority claim. This grid neither selects the
+  non-inferiority margins nor replaces the preregistered task-cluster simulation.
 
-Primary claim family (items 1--4 use Qwen3.5-35B-A3B and repeat separately on the second
-family; item 5 is model-free):
+Principal evidence gates:
 
-1. B6 versus B5: task-level accepted-terminal false-completion rate over all selected tasks;
-   Accuracy and accepted-terminal coverage are preregistered non-inferiority guardrails, not
-   extra hidden hypothesis tests. First/any-attempt false completion is diagnostic because
-   those attempts are recorded before enforcement can act.
-2. FULL versus B6: postprocess-stale acceptance rate; final Accuracy is a guardrail.
-3. G1 versus G0: off-target-change rate from declaration elicitation against the gold-only
-   mask; Accuracy is a guardrail.
-4. G2 versus G1: off-target-change rate from staged-containment enforcement against the
-   gold-only mask; Accuracy is a guardrail. G2 versus G0 is a descriptive total contrast.
-5. Enriched versus raw events under the same representative generic policy engine on sealed
-   oracle invalid-attack acceptance.
+1. Mechanism gate (model-free): enriched versus raw events under the same representative
+   generic policy on sealed exact pairs; outcome is invalid-attack acceptance and the
+   guardrail is valid-control rejection.
+2. Real-task gate (Qwen3.5-35B-A3B): B6 versus the durable pre-feedback B5 fork on task-level
+   unsafe accepted delivery over all selected tasks; Accuracy and accepted-terminal coverage
+   are preregistered non-inferiority guardrails. First/any-attempt false completion is
+   diagnostic because attempts are recorded before enforcement can act.
+
+FULL--B6, G1--G0, and G2--G1 are preregistered secondary mechanism contrasts. They report
+paired effects and intervals; G2--G0 remains only a descriptive total contrast.
 
 ## Promotion and success criteria
 
@@ -424,8 +437,8 @@ rerun an observed fresh cohort under a new label.
 
 ## Official ICLR 2027 submission gates
 
-Verified against the official Call for Papers, Author Guidelines, and AI Policy for Authors on
-2026-08-14; re-check the live pages immediately before abstract registration and upload.
+Verified against the live official Call for Papers, Author Guidelines, and AI Policy for Authors
+on 2026-08-15; re-check the pages immediately before abstract registration and upload.
 
 - Register a genuine abstract by 2026-09-18 AoE and the paper plus supplementary material by
   2026-09-25 AoE. No author may be added or removed after the abstract deadline; author order

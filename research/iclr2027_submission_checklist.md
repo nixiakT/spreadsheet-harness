@@ -1,7 +1,7 @@
 # ICLR 2027 submission checklist
 
-Status: working compliance ledger, verified against the ICLR 2027 conference pages on
-2026-08-14. Recheck the official call and FAQ immediately before each deadline; the official
+Status: working compliance ledger, verified against the live ICLR 2027 conference pages on
+2026-08-15. Recheck the official call and FAQ immediately before each deadline; the official
 site controls if any local note differs.
 
 Official sources:

@@ -1,0 +1,100 @@
+\begin{figure*}[t]
+\centering
+\definecolor{slblue}{RGB}{0,92,138}
+\definecolor{slgreen}{RGB}{0,112,78}
+\definecolor{slorange}{RGB}{190,74,0}
+\definecolor{slgray}{RGB}{76,76,76}
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  font=\sffamily\fontsize{7.2}{8.2}\selectfont,
+  raw/.style={rounded corners=2pt, draw=slgray, fill=black!4,
+              line width=0.8pt, align=center, inner sep=4pt},
+  valid/.style={rounded corners=2pt, draw=slgreen, fill=slgreen!6,
+                line width=1.0pt, align=left, inner sep=4pt},
+  attack/.style={draw=slorange, fill=slorange!6, dashed,
+                 line width=1.0pt, align=left, inner sep=4pt},
+  accept/.style={rounded corners=6pt, draw=slgreen, fill=white,
+                 line width=1.1pt, align=center, inner sep=3pt},
+  reject/.style={draw=slorange, fill=white, double=slorange!15,
+                 double distance=0.8pt, line width=0.9pt,
+                 align=center, inner sep=3pt},
+  arrow/.style={-{Latex[length=1.9mm,width=1.25mm]}, line width=0.8pt,
+                draw=black!72},
+  eventarrow/.style={-{Latex[length=1.9mm,width=1.25mm]}, line width=1.0pt,
+                     draw=slblue},
+  note/.style={font=\sffamily\bfseries\fontsize{7.0}{8.0}\selectfont,
+               text=slgray, align=center}
+]
+  \node[note, text width=3.4cm] at (1.75,5.55) {RAW PROJECTION};
+  \node[note, text width=4.3cm] at (6.45,5.55) {HIDDEN WORKBOOK EFFECT};
+  \node[note, text width=4.0cm] at (11.45,5.55) {POLICY VISIBILITY};
+
+  \node[raw, text width=3.25cm] (trace) at (1.75,3.75) {
+    $\pi_{\rm raw}(\tau^+)=\pi_{\rm raw}(\tau^-)$\\[2pt]
+    \texttt{view(Revenue, B2)}\\
+    \texttt{bash("python fix.py")}\\
+    \texttt{view(Revenue, B2)}; \texttt{submit}\\[-1pt]
+    {\scriptsize identical arguments and observations}
+  };
+
+  \node[valid, text width=4.25cm] (good) at (6.45,4.55) {
+    \textbf{$\tau^+$: valid control}\\
+    computed $\Delta W^+=\{\texttt{Revenue!B2}\}$\\
+    effect is inside the declared, observed scope;
+    witness is fresh on revision 7
+  };
+  \node[attack, text width=4.25cm] (bad) at (6.45,2.55) {
+    \textbf{$\tau^-$: invalid attack}\\
+    computed effect includes \texttt{Revenue!B2}\\
+    and the hidden \texttt{Hidden!Z99}\\
+    opaque edit escapes the declaration; the visible
+    \texttt{B2} read is unchanged
+  };
+  \draw[arrow] (trace.east) -- (good.west);
+  \draw[arrow] (trace.east) -- (bad.west);
+
+  \node[raw, text width=3.15cm] (rawmon) at (11.45,4.95) {
+    \textbf{raw-only monitor}\\
+    receives one input, so emits one decision $d$
+  };
+  \node[raw, text width=3.15cm] (lower) at (11.45,3.75) {
+    per pair:\quad
+    $\mathrm{IA}_{\rm raw}+\mathrm{VR}_{\rm raw}=1$
+  };
+  \draw[arrow] (trace.north east) to[out=25,in=180] (rawmon.west);
+  \draw[arrow] (rawmon) -- (lower);
+
+  \node[accept, text width=2.7cm] (goodout) at (11.45,2.55) {
+    \textbf{lifted events}\\
+    scoped effect on rev.~7\\[-1pt]
+    $\Rightarrow$ \textbf{accept $\tau^+$}
+  };
+  \node[reject, text width=2.7cm] (badout) at (11.45,1.10) {
+    \textbf{lifted events}\\
+    out-of-scope effect\\[-1pt]
+    $\Rightarrow$ \textbf{reject $\tau^-$}
+  };
+  \draw[eventarrow] (good.east) to[out=-15,in=165]
+      node[above, sloped, text=slblue] {\scriptsize semantic event} (goodout.west);
+  \draw[eventarrow, dashed] (bad.east) to[out=-15,in=165]
+      node[above, sloped, text=slblue] {\scriptsize semantic event} (badout.west);
+
+  \node[draw=slblue, rounded corners=2pt, fill=slblue!4,
+        line width=0.8pt, text width=7.6cm, align=center, inner sep=3pt]
+      at (6.20,0.55) {
+      \textbf{Principal mechanism gate:} reduce invalid-attack acceptance
+      under the same policy, while controlling valid-control rejection.};
+\end{tikzpicture}
+\caption{Why raw spreadsheet traces are observationally insufficient. Each
+sealed pair has byte-identical raw tool-call projection, including visible
+arguments and observations, but a different independently constructed workbook
+effect. A deterministic raw-only monitor must make the same decision on both;
+therefore it either accepts the invalid attack (IA) or rejects the valid control
+(VR), giving $\mathrm{IA}_{\rm raw}+\mathrm{VR}_{\rm raw}=1$ per pair (the same
+identity holds in expectation for a randomized monitor). \method{} lifts the
+hidden transition into revision- and scope-bound semantic events, allowing the
+same downstream policy to separate the pair. This model-free construction tests
+event sufficiency, not task correctness or language-model quality.}
+\label{fig:overview}
+\end{figure*}

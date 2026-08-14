@@ -12,7 +12,10 @@ evaluation to 321 business workflows with an average of 11.8 sheets and 593.5
 modified cells; its 100 debugging tasks hide both error type and location
 \citep{zhu2026spreadsheetbench2}. We reuse localized representations and native
 tools, but study when a verification observation is sufficient to authorize
-completion.
+completion. An interactive spreadsheet Plan Mode reduced refinement and
+improved user perceptions without a notable final-workbook difference
+\citep{kumar2026plans}; our declarations are instead machine-checked runtime
+objects, not user-facing plans.
 
 \paragraph{Spreadsheet correctness and provenance.}
 Spreadsheet Guardian separates spreadsheet test rules from their execution and
@@ -26,33 +29,36 @@ revision, postprocessing, and evaluator bytes.
 Trace2Skill analyzes successful and failed trajectories in parallel, proposes
 trajectory-local patches, and hierarchically consolidates them into a portable
 skill directory \citep{ni2026trace2skill}. We evaluate this as a
-procedure-only inspired baseline; \method's runtime contract and artifact lineage do not
-depend on how a procedure was authored. Joint procedure/contract evolution is
-kept outside the primary claims unless a same-pool factorial and cross-model
-transfer study are complete. Agent Workflow Memory also induces reusable
-workflows from trajectories \citep{wang2025agentworkflowmemory}; neither form of
-procedural memory itself enforces acceptance.
+procedure-only inspired baseline. Workflow-to-Skill instead decomposes traces
+into workflow, semantics, and runtime attachments \citep{zhang2026workflowtoskill}.
+\method's runtime contract and lineage do not depend on either authorship
+method; joint evolution remains outside the primary claims. Agent Workflow
+Memory induces reusable workflows from trajectories
+\citep{wang2025agentworkflowmemory}; procedural memory itself does not enforce
+acceptance.
 
 \paragraph{Runtime enforcement and trace conformance.}
 Runtime verification has long separated execution from trace-property monitors
 \citep{leucker2009runtimeverification}. AgentSpec provides customizable
 trigger/check/enforce rules \citep{wang2026agentspec}; VIGIL and AgentLTL add
 finite-trace, artifact/value-flow, and typed procedural constraints
-\citep{li2026vigil,elkoussy2026agentltl}, while guardrails separate policy from
-generation \citep{rebedea2023nemo}. Thus temporal enforcement and policy
-compilation are not our novelty. Our spreadsheet front end reveals computed
-Python effects, recalculation changes, and stale render identities absent from a
-raw call trace. We compare the same policy engine on raw and enriched events,
-not against a deliberately weak adapter.
+\citep{li2026vigil,elkoussy2026agentltl}; Causal Past Logic makes causally
+visible distributed-workflow guards executable \citep{bollig2026causalpast},
+while guardrails separate policy from generation \citep{rebedea2023nemo}.
+Thus temporal enforcement and policy compilation are not our novelty. Our
+front end reveals computed Python effects, recalculation changes, and stale
+render identities absent from a raw call trace. We compare one policy on raw
+and enriched events, not against a deliberately weak adapter.
 
 \paragraph{Artifact lineage.}
-Software supply-chain systems such as in-toto bind declared steps to materials
-and products using authenticated metadata \citep{torresarias2019intoto}. Our
-accepted-deliverable certificate instead hash-binds candidate evidence,
-recalculation, final checks, and scoring replica under a trusted host and
-storage; the
-all-row observer record provides only lineage consistency. Neither provides
-signatures, external transparency, or hostile-host authentication.
+Execution-lineage DAGs make dependencies and selective recomputation explicit
+for revisable agent work \citep{rosen2026executionlineage}; supply-chain systems
+such as in-toto bind declared steps to materials and products using authenticated
+metadata \citep{torresarias2019intoto}. Our certificate instead hash-binds
+candidate evidence, recalculation, final checks, and scoring replica under a
+trusted host and storage; the all-row observer record provides only consistency.
+Neither supplies signatures, external transparency, or hostile-host
+authentication.
 
 \input{tables/event_policy_boundary}
 

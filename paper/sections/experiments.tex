@@ -1,15 +1,12 @@
 \section{Experiments}
 \label{sec:experiments}
 
-We ask whether (Q1) enforcing the same fixed contract used in visible shadow
-mode reduces accepted-terminal false completion without unacceptable Accuracy
-or accepted-terminal coverage loss;
-(Q2) final-artifact lineage, target declaration elicitation, staged-containment
-enforcement, and workbook-enriched events address postprocessing drift,
-off-target edits, and hidden mutations;
-(Q3) effects persist across two model families, three seeds, Debugging-100,
-Visualization-24, and LibreOffice/Excel; and (Q4) what rejection, recovery,
-collateral damage, latency, token, and trusted-component costs result.
+We ask whether (Q1) semantic event lifting separates valid and invalid
+executions that are provably indistinguishable from their raw traces; (Q2)
+online enforcement reduces unsafe accepted delivery without unacceptable
+Accuracy or terminal-coverage loss; (Q3) grounding and finalization lineage
+address off-target edits and postprocessing drift; and (Q4) what rejection,
+recovery, collateral damage, latency, token, and trusted-component costs result.
 
 \input{tables/main_results}
 
@@ -30,14 +27,16 @@ per-workbook protocol (\texttt{agent\_per\_workbook}) have different units and
 are never pooled or presented as the same leaderboard setting.
 
 \paragraph{SpreadsheetBench~2.}
-The primary external study seals all 100 debugging instance files and
-identifiers before development \citep{zhu2026spreadsheetbench2}. They test
-unknown defects in multi-sheet workbooks and pre-edit grounding. ``Unseen''
-means instance-artifact-unseen to this study: paper-level aggregates and the
-published case were read, and model pretraining exposure is unknown. We check
-whether that case enters the split, disclose exclusions before launch, run
-Visualization-24 for visual claims, report official Modification and Accuracy,
-and never use these instances for artifact selection.
+The external study seals all 100 debugging instance files and identifiers
+before development \citep{zhu2026spreadsheetbench2}. At least three task
+descriptions are public, so a frozen metadata-only matcher partitions a
+publicly exposed stratum before workbook access. The primary confirmatory
+analysis uses the remaining artifact-unseen stratum; all 100 tasks form a
+preregistered sensitivity analysis, with exposed results shown separately.
+Artifact-unseen describes this project's access, not model-training freshness.
+We run Visualization-24 only as an exploratory visual study until typed object
+grounding is implemented, report official Modification and Accuracy, and never
+use these instances for artifact selection.
 
 \paragraph{Evidence-oracle suite.}
 Randomized workbooks cross value, formula, style, structure, visual, opaque-code,
@@ -73,18 +72,16 @@ adapter, adding structural, range, text, and rendered views. Trace2Skill is a
 procedure-only inspired whole-system baseline over B2. These three prior-work-
 derived rows are clean-room inspired adapters and are never called official
 reproductions unless the released implementation and its full protocol are
-actually used.
+actually used. The \method{} contract is researcher-authored and fixed across
+B5, B6, and FULL.
 
-With one preregistered researcher-authored fixed contract, B5 is visible shadow
-and B6 adds only unsatisfied-submit blocking; diagnostics, tools/model,
-grounding, attempt instrumentation, and budgets stay fixed. B6 and FULL execute
-equivalent deterministic postprocessing, recalculation, final-scan, and scorer-
-copy operations; FULL alone adds exact accepted-terminal-to-final-to-copy
-lineage enforcement. FULL includes G2 by default, and B5/B6 also keep G2 fixed.
-G0 omits target declarations, G1 elicits and diagnoses declarations without
-blocking staged edits, and G2 enforces staged-footprint containment. Therefore
-G1--G0 estimates elicitation and G2--G1 estimates enforcement; G2--G0 is only
-their total contrast, not the effect of one gate.
+One B6 online execution durably forks B5 at its first gate-eligible submit,
+before feedback; B5 is neither a second sample nor reconstructed from B6's
+later outcome. B6 may recover after rejection, while FULL shares B6's terminal
+and factual finalization assessment and adds only lineage authorization. The
+family publishes atomically or not at all. FULL, B5, and B6 hold G2 fixed. G0
+omits declarations, G1 elicits them without containment, and G2 enforces
+containment, so G1--G0 and G2--G1 isolate the two increments.
 
 A core, same-policy comparison crosses raw versus enriched events within a
 representative generic engine; the containing $2\times2$ also crosses
@@ -96,38 +93,36 @@ is frozen.
 
 \subsection{Metrics and statistics}
 
-Primary Accuracy includes every selected task. At task level we report
-first/any-attempt and accepted-terminal false completion; attempt and
-accepted-terminal coverage; submission and grounding rejection/recovery; audited
-noncompletion; target precision/recall; off-target and collateral effects; and
-tamper acceptance/valid-control rejection. Because attempts precede the gate,
-accepted-terminal false completion over all tasks is the enforcement estimand;
-Accuracy, terminal coverage, and conditional risk expose abstention.
+The headline requires two gates: same-policy enriched versus raw events on
+invalid-attack acceptance (valid-control-rejection guardrail), and B6 versus its
+pre-feedback B5 fork on unsafe accepted delivery (Accuracy and terminal-
+coverage guardrails). Failure of either blocks the claim. FULL--B6, G1--G0, and
+G2--G1 are secondary paired mechanism contrasts.
 
-Costs include tokens, logical/HTTP/tool calls, wall time, component CPU time,
-attempts, artifact transitions, and backend disagreement. For three seeds we
-first average within task, then use paired task-cluster bootstrap/permutation
-intervals preserving arm-by-seed vectors. Wilson/McNemar are limited to labeled
-single-seed binary analyses; Modification uses paired bootstrap. Four real-task
-Holm tests use the preregistered 35B checkpoint and one is model-free on the
-oracle; the second family repeats real-task estimands without cross-family pooling.
-Arm-masked annotation reports agreement, leakage, adjudication, role, and AI use.
-Margins and clustered procedures are frozen after design-stage precision
-analysis; unresolved guardrails preclude a utility-preservation claim.
+An \emph{unsafe accepted delivery} is a selected task whose path authorizes
+delivery but the official evaluator fails or required lineage is invalid; its
+rate over all tasks is the enforcement estimand. We also report attempts,
+coverage, rejection/recovery, audited noncompletion, target precision/recall,
+collateral effects, and conditional risk so abstention remains visible. Against
+scorer-only reference masks, declaration and actual-effect precision/recall plus
+area ratios expose the vacuous ``inspect and declare everything'' strategy.
+
+Costs cover tokens, calls, wall time, component CPU, transitions, and backend
+disagreement. Three-seed intervals resample task clusters while preserving each
+arm-by-seed vector. The headline uses an intersection--union decision: both
+principal gates must pass their frozen level-$0.05$ paired test and guardrail;
+secondary contrasts receive no confirmatory multiplicity claim. Model families
+are not pooled. Margins and procedures are frozen after design-stage precision
+analysis; Appendix~\ref{app:statistics} gives details.
 
 \subsection{Mechanism, robustness, and cost analyses}
 
-The oracle reports invalid-trace rejection and valid-control acceptance for all
-ablations and event/policy cells. Core model-free mechanism evidence comprises
-the same-policy raw/enriched comparison and a paired B6/FULL finalization
-challenge in which frozen candidate bytes are shared across arms.
-Real-task analyses stratify effect family,
-recovery/noncompletion, collateral damage, and accepted-candidate failures
-despite a consistent accepted-deliverable certificate. Visualization-24 and the
-backend subset test render/recalculation
-assumptions; accuracy--budget and reliability--budget curves test whether gains
-come only from extra calls. The fixed contract is unchanged across models;
-optional distilled-artifact transfer cannot support a main claim.
+The oracle reports attack acceptance and valid-control rejection for all
+ablations and event/policy cells, plus a paired B6/FULL finalization challenge
+with shared candidate bytes. Real-task analyses stratify effects, recovery,
+collateral damage, and certificate-consistent failures. Backend and budget
+curves test recalculation assumptions and extra-call explanations; optional
+distilled-artifact transfer cannot support a main claim.
 
 \paragraph{Results policy.}
 \pending{Populate Table~\ref{tab:main} and quantitative prose only from one

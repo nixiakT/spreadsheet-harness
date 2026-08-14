@@ -47,6 +47,13 @@ if rg -n 'Overfull \\hbox|Undefined control sequence|undefined references|Citati
   exit 1
 fi
 
+# XeTeX otherwise silently falls back from the official Times/Helvetica setup
+# to Latin Modern unless T1 font encoding is active.
+if rg -n 'Font shape .*TU/(ptm|phv|pcr).*undefined|defaults substituted' main.log; then
+  echo "paper build substituted an official text font" >&2
+  exit 1
+fi
+
 main_text_page=$(
   sed -n 's/.*newlabel{maintext:end}{{[^}]*}{\([0-9][0-9]*\)}.*/\1/p' main.aux |
     tail -n 1
@@ -66,6 +73,11 @@ if command -v pdfinfo >/dev/null 2>&1; then
     echo "paper is not US letter size: $page_size" >&2
     exit 1
   fi
+fi
+
+if command -v pdffonts >/dev/null 2>&1 && pdffonts main.pdf | awk 'NR > 2 && $4 == "no" { found = 1 } END { exit !found }'; then
+  echo "paper contains a non-embedded font" >&2
+  exit 1
 fi
 
 echo "paper checks passed: main text ends on page $main_text_page"

@@ -8,16 +8,28 @@ the superiority of one temporal language.}
 \centering
 \footnotesize
 \setlength{\tabcolsep}{3pt}
-\begin{tabular}{@{}p{2.8cm}p{2.9cm}p{3.0cm}p{4.0cm}@{}}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{2.45cm}
+  >{\raggedright\arraybackslash}p{2.65cm}
+  >{\raggedright\arraybackslash}p{3.25cm}
+  >{\raggedright\arraybackslash}p{4.35cm}@{}}
 \toprule
-Property & Raw spreadsheet call trace & Generic policy engine & SheetLedger event front end \\
+\textbf{Property} & \textbf{Raw call trace} & \textbf{Generic policy engine} &
+\textbf{SheetLedger event front end} \\
 \midrule
-Opaque-code workbook effect & Tool name and stdout & Testable if a trusted effect event is supplied & Computes pre/post XLSX semantic diff \\
-Changed-cell scope & Model/tool argument, possibly incomplete & Can enforce a supplied scope relation & Derives normalized scope from changed bytes \\
-Artifact identity and order & Path or call order & Artifact/value-flow relations are expressible & Emits monotonic revision plus exact SHA-256 \\
-Recalculation lineage & Backend call only & Source/output relation is expressible if visible & Binds backend source, output, and semantic drift \\
-Rendered-page identity & Image call/path & Manifest relation is expressible if visible & Binds artifact, manifest, sheet/page, and PNG digest \\
-Scoring-deliverable lineage & Usually outside trace & Enforceable if finalization events are supplied & Emits accepted final/replica hashes plus all-row observer records \\
+Opaque-code effect & Tool name and stdout & Tests a trusted effect event if supplied &
+Computes a pre/post OOXML semantic diff \\
+Changed-cell scope & Tool arguments; possibly incomplete & Enforces a supplied scope relation &
+Derives normalized scope from changed bytes \\
+Artifact identity & Path or call order & Expresses artifact/value-flow relations &
+Emits a monotonic revision and exact SHA-256 \\
+Recalculation lineage & Backend call only & Tests a visible input/output relation &
+Binds backend, input, output, and semantic drift \\
+Rendered-page identity & Image call or path & Tests a visible manifest relation &
+Binds artifact, sheet/page, manifest, and pixel digest \\
+Scoring lineage & Usually outside the trace & Enforces supplied finalization events &
+Binds accepted final/replica hashes and all-row records \\
 \bottomrule
 \end{tabular}
 \end{table*}

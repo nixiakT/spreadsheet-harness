@@ -1,25 +1,22 @@
 \begin{abstract}
 Spreadsheet agents can make plausible edits yet terminate after checking the
 wrong range, reusing evidence from an older workbook state, or invalidating a
-check during recalculation. Runtime policy engines can express artifact-aware
-rules, but their guarantees depend on trusted domain events: ordinary tool-call
-traces do not reveal what an opaque program changed inside a workbook. We
-introduce \method, a spreadsheet observation and delivery layer that computes
-semantic workbook effects, assigns monotonic artifact revisions, and supplies
-policy engines with affected cells, formulas, structure, and rendered pages.
-Prospective records bind a declared edit target to pre-edit observations before
-the actual staged footprint is known; retrospective obligations require fresh
-witnesses over that footprint. A submission is accepted only when harness-
-emitted witnesses cover the required scope on the candidate revision. For an
-accepted candidate, postprocessing emits a content-addressed consistency
-certificate for a byte-identical read-only scoring replica. The finalizer
-explicitly distinguishes that accepted deliverable from an audited
-noncompletion: the latter receives only an observer-generated finalization
-integrity record for its termination and artifact lineage, without claiming a
-successful submission, accepted deliverable, or task correctness. We evaluate
-the approach with controlled contract ablations,
-an independently implemented adversarial OOXML oracle, SpreadsheetBench, and an
-instance-artifact-unseen 100-task SpreadsheetBench~2 debugging study.
+check during recalculation. A deeper problem is observational: an opaque code
+call can produce valid and invalid workbook transitions with exactly the same
+raw tool-call trace. On such a pair, any raw-only deterministic monitor must
+either accept the invalid execution or reject the valid control. We introduce
+\method, which lifts workbook transitions into revision-, scope-, and lineage-
+bound semantic events before applying a runtime policy. It independently
+computes value, formula, style, structure, and visual effects; contains staged
+edits within pre-observed target declarations; requires fresh post-effect
+witnesses; and binds an accepted terminal through deterministic postprocessing
+to the exact read-only scoring replica. Noncompletion receives only an
+observer-generated integrity record and never an accepted-deliverable claim.
+We test the information added by event lifting on sealed identical-raw-trace
+pairs under the same policy, then test online enforcement in a single durable
+causal execution family. Secondary studies isolate grounding and finalization
+lineage on an independent OOXML oracle and a public-exposure-stratified
+SpreadsheetBench~2 Debugging-100 evaluation.
 \pending{Insert preregistered accuracy, false-completion, and overhead results
 only after fresh audits.}
 \end{abstract}
