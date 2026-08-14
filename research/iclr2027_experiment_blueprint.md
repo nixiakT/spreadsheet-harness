@@ -30,7 +30,9 @@ The paper must separate four kinds of evidence.
 
 1. **Historical deployment evidence.** Existing v23--v27 SpreadsheetBench runs test
    predecessor harness configurations. They cannot establish the effect of SheetLedger,
-   which was designed later.
+   which was designed later. The active v27 reserve run also incurred the interim-audit
+   deviation recorded in `research/protocol_deviations.md`; it is permanently exploratory
+   and cannot support confirmatory inference or method selection.
 2. **Component-development evidence.** Development and validation tasks may select
    prompts, tools, the researcher-authored fixed contract, and optional procedure artifacts.
    They are never

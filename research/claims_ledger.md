@@ -15,7 +15,7 @@ the statement remains absent unless its separately preregistered evidence is com
 | C6 | Optional jointly distilled procedure/contract artifacts add value beyond the frozen researcher-authored fixed contract. | Separately preregistered study with disjoint evolution, contract-unit, and selection layers; frozen candidate/query budgets; paired comparison against the unchanged fixed contract. | optional-blocked |
 | C7 | Optional distilled artifacts transfer across models. | Frozen author-model artifacts evaluated unchanged on another family/scale, reported separately from fixed-contract portability. | optional-blocked |
 | C8 | Runtime overhead is practical. | Tokens/task, calls, wall time, component CPU time, and accuracy-budget curves with intervals. | pending |
-| C9 | Historical predecessor harness favors `ours` over `bare` on the v27 reserve. | Complete 158-row fresh audit and frozen result report. | running |
+| C9 | Historical predecessor v27 deployment outcomes may be described only as exploratory context. | Complete 158-row fresh audit, frozen result report, and the disclosed interim-audit deviation in `research/protocol_deviations.md`; no confirmatory test, method-selection claim, or SheetLedger attribution is permitted. | exploratory-only |
 
 ## Allowed structural claim
 
