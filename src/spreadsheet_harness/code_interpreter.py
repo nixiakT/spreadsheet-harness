@@ -30,7 +30,7 @@ from openpyxl.utils import FORMULAE, column_index_from_string, coordinate_to_tup
 from .errors import CodeIsolationError, ToolInputError, redact_sensitive_text
 from .workbook_diff import WorkbookEffectDiff, diff_workbooks
 
-STRICT_ISOLATION_POLICY = "bubblewrap-strict-workspace-v1"
+STRICT_ISOLATION_POLICY = "bubblewrap-strict-workspace-v2"
 _PROBE_SENTINEL = "SHEET_STRICT_ISOLATION_OK"
 _MAX_SANDBOX_PROCESSES = 64
 _PROBE_LOCK = threading.Lock()
@@ -559,9 +559,10 @@ def _runtime_roots(workspace: Path) -> list[Path]:
             resolved == Path("/")
             or resolved_workspace == resolved
             or resolved in resolved_workspace.parents
+            or resolved_workspace in resolved.parents
         ):
             raise CodeIsolationError(
-                f"Refusing unsafe runtime mount that contains the task workspace: {absolute}"
+                f"Refusing unsafe runtime mount that overlaps the task workspace: {absolute}"
             )
         # /usr already includes common /usr/local base prefixes. Keep /lib and
         # /lib64 mount points themselves because dynamic loaders use those paths.
@@ -589,6 +590,66 @@ def _parent_directories(paths: list[Path]) -> list[Path]:
     return sorted(parents, key=lambda item: (len(item.parts), str(item)))
 
 
+def _is_below_temporary_root(path: Path) -> bool:
+    absolute = path.absolute()
+    return absolute != Path("/tmp") and Path("/tmp") in absolute.parents
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
+def _executable_bridge_bind(
+    runtime_roots: list[Path],
+    workspace: Path,
+) -> tuple[Path, Path] | None:
+    """Bridge an executable path when any symlink component leaves mounted roots."""
+
+    executable = Path(sys.executable).absolute()
+    pending = executable
+    seen: set[Path] = set()
+    external_destination: Path | None = None
+    while True:
+        if pending in seen:
+            raise CodeIsolationError("Active Python executable has a symlink cycle")
+        seen.add(pending)
+        containing_roots = [
+            root for root in runtime_roots if pending == root or root in pending.parents
+        ]
+        if not containing_roots:
+            external_destination = pending
+            break
+        root = max(containing_roots, key=lambda item: len(item.parts))
+        current = root
+        remaining = list(pending.relative_to(root).parts)
+        for index, component in enumerate(remaining):
+            candidate = current / component
+            if not candidate.is_symlink():
+                current = candidate
+                continue
+            raw_target = Path(os.readlink(candidate))
+            target = Path(os.path.abspath(candidate.parent / raw_target))
+            pending = Path(os.path.abspath(target.joinpath(*remaining[index + 1 :])))
+            break
+        else:
+            break
+    try:
+        source = executable.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise CodeIsolationError(
+            "Active Python executable has an unresolved symlink target"
+        ) from exc
+    if not source.is_file():
+        raise CodeIsolationError("Active Python executable is not a regular file")
+    if external_destination is None:
+        return None
+    if _paths_overlap(external_destination, workspace) or _paths_overlap(source, workspace):
+        raise CodeIsolationError(
+            "Refusing executable bridge that overlaps the task workspace"
+        )
+    return source, external_destination
+
+
 def _strict_command(
     workspace: Path,
     argv: list[str],
@@ -600,16 +661,33 @@ def _strict_command(
     resolved_workspace = workspace.resolve()
     bwrap = bubblewrap or _require_bubblewrap()
     runtime_roots = _runtime_roots(resolved_workspace)
-    runtime_files = [
-        path
+    runtime_file_binds = [
+        (path, path)
         for path in (
             Path("/etc/ld.so.cache"),
             Path("/etc/localtime"),
         )
         if path.is_file()
     ]
-    runtime_parent_paths = _parent_directories([*runtime_roots, *runtime_files])
-    workspace_parent_paths = _parent_directories([resolved_workspace])
+    executable_bridge = _executable_bridge_bind(runtime_roots, resolved_workspace)
+    if executable_bridge is not None:
+        runtime_file_binds.append(executable_bridge)
+    if any(
+        path.absolute() == Path("/tmp")
+        for path in [*runtime_roots, *(dest for _, dest in runtime_file_binds)]
+    ):
+        raise CodeIsolationError("Refusing unsafe runtime mount of the complete /tmp tree")
+    stable_runtime_roots = [path for path in runtime_roots if not _is_below_temporary_root(path)]
+    temporary_runtime_roots = [path for path in runtime_roots if _is_below_temporary_root(path)]
+    stable_runtime_file_binds = [
+        item for item in runtime_file_binds if not _is_below_temporary_root(item[1])
+    ]
+    temporary_runtime_file_binds = [
+        item for item in runtime_file_binds if _is_below_temporary_root(item[1])
+    ]
+    runtime_parent_paths = _parent_directories(
+        [*stable_runtime_roots, *(dest for _, dest in stable_runtime_file_binds)]
+    )
     command = [
         str(bwrap),
         "--die-with-parent",
@@ -623,26 +701,28 @@ def _strict_command(
     ]
     for parent in runtime_parent_paths:
         command.extend(["--dir", str(parent)])
-    for root in runtime_roots:
+    for root in stable_runtime_roots:
         command.extend(["--ro-bind", str(root), str(root)])
-    for runtime_file in runtime_files:
-        command.extend(["--ro-bind", str(runtime_file), str(runtime_file)])
-    command.extend(
-        [
-            "--tmpfs",
-            "/tmp",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-        ]
-    )
-    # A task workspace is commonly below /tmp during the startup probe. Create
-    # its mount-point hierarchy only after /tmp is replaced, then bind the
-    # exact workspace. Binding an ancestor would expose sibling arms or goldens.
-    for parent in workspace_parent_paths:
+    for source, dest in stable_runtime_file_binds:
+        command.extend(["--ro-bind", str(source), str(dest)])
+    command.extend(["--tmpfs", "/tmp"])
+    # Mount points below /tmp disappear when the private tmpfs is installed.
+    # Recreate them before binding an exact temporary venv and task workspace.
+    post_tmpfs_paths = [
+        *temporary_runtime_roots,
+        *(dest for _, dest in temporary_runtime_file_binds),
+        resolved_workspace,
+    ]
+    for parent in _parent_directories(post_tmpfs_paths):
         if parent != Path("/tmp"):
             command.extend(["--dir", str(parent)])
+    for root in temporary_runtime_roots:
+        command.extend(["--ro-bind", str(root), str(root)])
+    for source, dest in temporary_runtime_file_binds:
+        command.extend(["--ro-bind", str(source), str(dest)])
+    command.extend(["--proc", "/proc", "--dev", "/dev"])
+    # A task workspace may also live below /tmp. Bind only the exact workspace;
+    # binding an ancestor would expose sibling arms or goldens.
     command.extend(
         [
             "--bind",

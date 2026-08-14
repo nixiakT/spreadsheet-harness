@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import et_xmlfile
+import openpyxl
 import pytest
 from openpyxl import load_workbook
 
@@ -94,9 +96,373 @@ def test_venv_mount_is_exact_and_does_not_expose_its_repository(
     )
     triples = [command[index : index + 3] for index in range(len(command) - 2)]
 
-    assert ["--ro-bind", str(venv), str(venv)] in triples
+    venv_mount = ["--ro-bind", str(venv), str(venv)]
+    assert venv_mount in triples
     assert ["--ro-bind", str(repository), str(repository)] not in triples
     assert ["--bind", str(workspace), str(workspace)] in triples
+    venv_mount_index = triples.index(venv_mount)
+    tmpfs_index = command.index("--tmpfs")
+    assert tmpfs_index < venv_mount_index
+
+
+def test_strict_command_rejects_a_runtime_nested_in_the_writable_workspace(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "workspace"
+    executable = workspace / ".venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(workspace / ".venv"))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    with pytest.raises(CodeIsolationError, match="overlaps the task workspace"):
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-c", "print('unreachable')"],
+            bubblewrap=Path("/usr/bin/bwrap"),
+        )
+
+
+def test_strict_command_bridges_only_an_external_executable_symlink(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    venv = tmp_path / "venv"
+    executable = venv / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    external_executable = tmp_path / "external-runtime" / "python"
+    external_executable.parent.mkdir()
+    external_executable.symlink_to(Path(sys.executable).resolve())
+    executable.symlink_to(external_executable)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    command = code_interpreter._strict_command(
+        workspace,
+        [str(executable), "-c", "print('ok')"],
+        bubblewrap=Path("/usr/bin/bwrap"),
+    )
+    triples = [command[index : index + 3] for index in range(len(command) - 2)]
+
+    bridge = [
+        "--ro-bind",
+        str(external_executable.resolve()),
+        str(external_executable),
+    ]
+    assert bridge in triples
+    assert [
+        "--ro-bind",
+        str(external_executable.parent),
+        str(external_executable.parent),
+    ] not in triples
+    assert command.index("--tmpfs") < triples.index(bridge)
+
+
+def test_strict_command_bridges_an_external_parent_symlink(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    venv = tmp_path / "venv"
+    executable = venv / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    external_directory = tmp_path / "external-runtime"
+    external_directory.mkdir()
+    external_executable = external_directory / "python"
+    external_executable.symlink_to(Path(sys.executable).resolve())
+    shims = venv / "shims"
+    shims.symlink_to(external_directory, target_is_directory=True)
+    executable.symlink_to(Path("..") / "shims" / "python")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    command = code_interpreter._strict_command(
+        workspace,
+        [str(executable), "-c", "print('ok')"],
+        bubblewrap=Path("/usr/bin/bwrap"),
+    )
+    triples = [command[index : index + 3] for index in range(len(command) - 2)]
+
+    assert [
+        "--ro-bind",
+        str(external_executable.resolve()),
+        str(external_executable),
+    ] in triples
+    assert [
+        "--ro-bind",
+        str(external_directory),
+        str(external_directory),
+    ] not in triples
+
+
+def test_strict_command_rejects_an_executable_bridge_into_the_workspace(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    venv = tmp_path / "venv"
+    executable = venv / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace_executable = workspace / "python"
+    workspace_executable.touch()
+    executable.symlink_to(workspace_executable)
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    with pytest.raises(CodeIsolationError, match="bridge.*overlaps"):
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-c", "print('unreachable')"],
+            bubblewrap=Path("/usr/bin/bwrap"),
+        )
+
+
+def test_strict_command_rejects_a_parent_symlink_into_the_workspace(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace_executable = workspace / "python"
+    workspace_executable.touch()
+    (venv / "bin").symlink_to(workspace, target_is_directory=True)
+    executable = venv / "bin" / "python"
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    with pytest.raises(CodeIsolationError, match="bridge.*overlaps"):
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-c", "print('unreachable')"],
+            bubblewrap=Path("/usr/bin/bwrap"),
+        )
+
+
+def test_strict_command_rejects_a_broken_executable_symlink(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    venv = tmp_path / "venv"
+    executable = venv / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(tmp_path / "missing-runtime" / "python")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    with pytest.raises(CodeIsolationError, match="unresolved symlink"):
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-c", "print('unreachable')"],
+            bubblewrap=Path("/usr/bin/bwrap"),
+        )
+
+
+def test_strict_command_rejects_an_executable_symlink_cycle(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    venv = tmp_path / "venv"
+    executable = venv / "bin" / "python"
+    second_link = venv / "bin" / "python-cycle"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(second_link.name)
+    second_link.symlink_to(executable.name)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    with pytest.raises(CodeIsolationError, match="symlink cycle"):
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-c", "print('unreachable')"],
+            bubblewrap=Path("/usr/bin/bwrap"),
+        )
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("bwrap") is None,
+    reason="strict Bubblewrap integration requires Linux and bwrap",
+)
+def test_strict_probe_runs_with_a_copied_virtualenv_below_tmp(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    original_executable = sys.executable
+    original_base_prefix = sys.base_prefix
+    venv = tmp_path / "venv-copy"
+    subprocess.run(
+        [original_executable, "-m", "venv", "--copies", "--without-pip", str(venv)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    site_packages = (
+        venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    )
+    for package in (openpyxl, et_xmlfile):
+        source = Path(package.__file__).resolve().parent
+        shutil.copytree(source, site_packages / source.name)
+
+    executable = venv / "bin" / "python"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    script = workspace / "probe.py"
+    script.write_text(
+        "from openpyxl import Workbook\n"
+        "book = Workbook()\n"
+        "book.active['A1'] = 'ok'\n"
+        "book.save('probe.xlsx')\n"
+        "print('TMP_VENV_PROBE_OK')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", original_base_prefix)
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    completed = subprocess.run(
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-I", str(script)],
+            bubblewrap=Path(shutil.which("bwrap") or ""),
+        ),
+        cwd=workspace,
+        env=code_interpreter._environment(workspace, workspace / "probe.xlsx"),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "TMP_VENV_PROBE_OK" in completed.stdout
+    assert (workspace / "probe.xlsx").is_file()
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("bwrap") is None,
+    reason="strict Bubblewrap integration requires Linux and bwrap",
+)
+def test_strict_probe_runs_with_a_symlink_virtualenv_below_tmp(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    original_executable = sys.executable
+    original_base_prefix = sys.base_prefix
+    venv = tmp_path / "venv-symlink"
+    subprocess.run(
+        [original_executable, "-m", "venv", "--without-pip", str(venv)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    executable = venv / "bin" / "python"
+    assert executable.is_symlink()
+    workspace = tmp_path / "workspace-symlink"
+    workspace.mkdir()
+    hidden_sibling = tmp_path / "not-mounted.txt"
+    hidden_sibling.write_text("private", encoding="utf-8")
+    script = workspace / "probe.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        f"assert not Path({str(hidden_sibling)!r}).exists()\n"
+        "print('TMP_SYMLINK_VENV_PROBE_OK')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", original_base_prefix)
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    completed = subprocess.run(
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-I", str(script)],
+            bubblewrap=Path(shutil.which("bwrap") or ""),
+        ),
+        cwd=workspace,
+        env=code_interpreter._environment(workspace, workspace / "probe.xlsx"),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "TMP_SYMLINK_VENV_PROBE_OK" in completed.stdout
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or shutil.which("bwrap") is None,
+    reason="strict Bubblewrap integration requires Linux and bwrap",
+)
+def test_strict_probe_runs_through_an_external_parent_symlink(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    original_executable = sys.executable
+    original_base_prefix = sys.base_prefix
+    venv = tmp_path / "venv-parent-link"
+    subprocess.run(
+        [original_executable, "-m", "venv", "--copies", "--without-pip", str(venv)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    external_directory = tmp_path / "external-runtime"
+    external_directory.mkdir()
+    external_executable = external_directory / "python"
+    external_executable.symlink_to(Path(original_executable).resolve())
+    (external_directory / "not-mounted.txt").write_text("private", encoding="utf-8")
+    shims = venv / "shims"
+    shims.symlink_to(external_directory, target_is_directory=True)
+    executable = venv / "bin" / "python"
+    executable.unlink()
+    executable.symlink_to(Path("..") / "shims" / "python")
+    workspace = tmp_path / "workspace-parent-link"
+    workspace.mkdir()
+    script = workspace / "probe.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        f"assert not Path({str(external_directory / 'not-mounted.txt')!r}).exists()\n"
+        "print('TMP_PARENT_SYMLINK_PROBE_OK')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(code_interpreter.sys, "prefix", str(venv))
+    monkeypatch.setattr(code_interpreter.sys, "base_prefix", original_base_prefix)
+    monkeypatch.setattr(code_interpreter.sys, "executable", str(executable))
+
+    completed = subprocess.run(
+        code_interpreter._strict_command(
+            workspace,
+            [str(executable), "-I", str(script)],
+            bubblewrap=Path(shutil.which("bwrap") or ""),
+        ),
+        cwd=workspace,
+        env=code_interpreter._environment(workspace, workspace / "probe.xlsx"),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "TMP_PARENT_SYMLINK_PROBE_OK" in completed.stdout
 
 
 def test_required_isolation_fails_when_bubblewrap_is_missing(monkeypatch: Any) -> None:
