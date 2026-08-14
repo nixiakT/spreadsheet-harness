@@ -85,6 +85,7 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
     pilot_ids = list(benchmark_module.TRACE2SKILL_PILOT_TASK_IDS)
     postopt_ids = list(benchmark_module.TRACE2SKILL_POSTOPT_TASK_IDS)
     confirm_ids = list(benchmark_module.TRACE2SKILL_CONFIRM_TASK_IDS)
+    v26_confirm_ids = list(benchmark_module.TRACE2SKILL_V26_CONFIRM_TASK_IDS)
 
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization([pilot_ids[0]])
@@ -92,6 +93,8 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
         require_evaluation_task_authorization([postopt_ids[0]])
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization([confirm_ids[0]])
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        require_evaluation_task_authorization([v26_confirm_ids[0]])
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization(
             postopt_ids[:-1],
@@ -109,6 +112,11 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
         )
     with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
         require_evaluation_task_authorization(
+            v26_confirm_ids[:-1],
+            authorized_manifest_id=benchmark_module.TRACE2SKILL_V26_CONFIRM_MANIFEST_ID,
+        )
+    with pytest.raises(HarnessError, match="Protected evaluation task IDs"):
+        require_evaluation_task_authorization(
             [*confirm_ids, postopt_ids[0]],
             authorized_manifest_id=benchmark_module.TRACE2SKILL_CONFIRM_MANIFEST_ID,
         )
@@ -120,6 +128,10 @@ def test_protected_evaluation_tasks_require_exact_authorized_cohort() -> None:
     require_evaluation_task_authorization(
         confirm_ids,
         authorized_manifest_id=benchmark_module.TRACE2SKILL_CONFIRM_MANIFEST_ID,
+    )
+    require_evaluation_task_authorization(
+        v26_confirm_ids,
+        authorized_manifest_id=benchmark_module.TRACE2SKILL_V26_CONFIRM_MANIFEST_ID,
     )
 
 
@@ -348,6 +360,9 @@ DERIVATIVE_POSTOPT_MANIFEST = Path(
 DERIVATIVE_CONFIRM_MANIFEST = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-confirm16-v1.json"
 )
+DERIVATIVE_V26_CONFIRM_MANIFEST = Path(
+    "benchmarks/protocols/qwen35-trace2skill-local-v26-confirm16-v1.json"
+)
 LOCAL_EXPOSURE_EVIDENCE = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-exposure-evidence-v1.json"
 )
@@ -382,6 +397,7 @@ def _copy_derivative_manifest_tree(destination: Path) -> dict[str, Path]:
         "pilot": DERIVATIVE_PILOT_MANIFEST,
         "postopt": DERIVATIVE_POSTOPT_MANIFEST,
         "confirm": DERIVATIVE_CONFIRM_MANIFEST,
+        "v26_confirm": DERIVATIVE_V26_CONFIRM_MANIFEST,
         "evidence": LOCAL_EXPOSURE_EVIDENCE,
     }
     copies: dict[str, Path] = {}
@@ -462,6 +478,7 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         DERIVATIVE_PILOT_MANIFEST,
         DERIVATIVE_POSTOPT_MANIFEST,
         DERIVATIVE_CONFIRM_MANIFEST,
+        DERIVATIVE_V26_CONFIRM_MANIFEST,
         LOCAL_EXPOSURE_EVIDENCE,
     ]
     before = {path: _file_state(path) for path in watched}
@@ -477,6 +494,9 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
     )
     confirm = benchmark_module.verify_trace2skill_derivative_manifest(
         dataset, DERIVATIVE_CONFIRM_MANIFEST
+    )
+    v26_confirm = benchmark_module.verify_trace2skill_derivative_manifest(
+        dataset, DERIVATIVE_V26_CONFIRM_MANIFEST
     )
 
     assert pool["valid"] is True
@@ -503,6 +523,14 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
     assert confirm["task_ids_sha256"] == (
         "41fef0069fb4b5c7c0e14f5ce06e8dcb504685c33c00fe620675e5669250ee11"
     )
+    assert v26_confirm["valid"] is True
+    assert v26_confirm["manifest_id"] == (
+        "qwen35-trace2skill-local-v26-confirm16-v1"
+    )
+    assert v26_confirm["usable_tasks"] == 16
+    assert v26_confirm["task_ids_sha256"] == (
+        "f735283a19d2d464f46b10387764cc600598bb15f00a767ff4df17d154629d27"
+    )
     assert {path: _file_state(path) for path in watched} == before
 
 
@@ -514,6 +542,7 @@ def test_trace2skill_derivative_pool_and_pilot_verify_read_only() -> None:
         DERIVATIVE_PILOT_MANIFEST,
         DERIVATIVE_POSTOPT_MANIFEST,
         DERIVATIVE_CONFIRM_MANIFEST,
+        DERIVATIVE_V26_CONFIRM_MANIFEST,
     ],
 )
 def test_trace2skill_verified_reports_produce_canonical_provenance(
@@ -545,6 +574,7 @@ def test_trace2skill_verified_reports_produce_canonical_provenance(
         DERIVATIVE_PILOT_MANIFEST,
         DERIVATIVE_POSTOPT_MANIFEST,
         DERIVATIVE_CONFIRM_MANIFEST,
+        DERIVATIVE_V26_CONFIRM_MANIFEST,
     ],
 )
 def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys(
@@ -574,7 +604,7 @@ def test_trace2skill_derivative_manifest_rejects_invalid_utf8_and_duplicate_keys
 
 @pytest.mark.parametrize(
     "manifest_name",
-    ["v1", "pool", "pilot", "postopt", "confirm"],
+    ["v1", "pool", "pilot", "postopt", "confirm", "v26_confirm"],
 )
 def test_trace2skill_split_manifest_rejects_noncanonical_bytes(
     manifest_name: str,
@@ -597,6 +627,7 @@ def test_trace2skill_split_manifest_rejects_noncanonical_bytes(
         ("pilot", "pool"),
         ("postopt", "pool"),
         ("confirm", "pool"),
+        ("v26_confirm", "pool"),
     ],
 )
 def test_trace2skill_derivative_manifest_binds_parent_file_sha256(
@@ -641,7 +672,9 @@ def test_trace2skill_local_pool_requires_exact_regular_evidence_sibling(
         )
 
 
-@pytest.mark.parametrize("manifest_name", ["pool", "pilot", "postopt", "confirm"])
+@pytest.mark.parametrize(
+    "manifest_name", ["pool", "pilot", "postopt", "confirm", "v26_confirm"]
+)
 @pytest.mark.parametrize("parent_path", ["../parent.json", "/tmp/parent.json"])
 def test_trace2skill_derivative_manifest_rejects_non_sibling_parent_path(
     manifest_name: str,
@@ -660,7 +693,9 @@ def test_trace2skill_derivative_manifest_rejects_non_sibling_parent_path(
         )
 
 
-@pytest.mark.parametrize("manifest_name", ["pool", "pilot", "postopt", "confirm"])
+@pytest.mark.parametrize(
+    "manifest_name", ["pool", "pilot", "postopt", "confirm", "v26_confirm"]
+)
 def test_trace2skill_derivative_manifest_rejects_tampered_parent_hash_field(
     manifest_name: str,
     tmp_path: Path,
@@ -1059,6 +1094,165 @@ def test_trace2skill_confirmation_rejects_self_consistent_tampering(
     with pytest.raises(ValueError, match="anchors|prior"):
         benchmark_module.verify_trace2skill_derivative_manifest(
             dataset, copies["confirm"]
+        )
+
+
+def test_trace2skill_v26_confirmation_continues_ranking_outside_three_cohorts() -> None:
+    _require_pinned_derivative_manifests()
+    pool = _load_derivative_manifest(DERIVATIVE_POOL_MANIFEST)
+    pilot = _load_derivative_manifest(DERIVATIVE_PILOT_MANIFEST)
+    postopt = _load_derivative_manifest(DERIVATIVE_POSTOPT_MANIFEST)
+    confirm = _load_derivative_manifest(DERIVATIVE_CONFIRM_MANIFEST)
+    v26_confirm = _load_derivative_manifest(DERIVATIVE_V26_CONFIRM_MANIFEST)
+    pilot_set = set(pilot["task_ids"])
+    postopt_set = set(postopt["task_ids"])
+    confirm_set = set(confirm["task_ids"])
+    prior_set = pilot_set | postopt_set | confirm_set
+    original_candidates = [
+        task_id for task_id in pool["task_ids"] if task_id not in pilot_set
+    ]
+    original_ranked = sorted(
+        original_candidates,
+        key=lambda task_id: (
+            benchmark_module._trace2skill_postopt_rank_key(task_id),
+            task_id,
+        ),
+    )
+    candidates = [task_id for task_id in pool["task_ids"] if task_id not in prior_set]
+    ranked = sorted(
+        candidates,
+        key=lambda task_id: (
+            benchmark_module._trace2skill_postopt_rank_key(task_id),
+            task_id,
+        ),
+    )
+    selected_set = set(ranked[:16])
+    expected_selected = [
+        task_id for task_id in pool["task_ids"] if task_id in selected_set
+    ]
+    expected_remaining = [
+        task_id
+        for task_id in pool["task_ids"]
+        if task_id not in prior_set | selected_set
+    ]
+
+    assert ranked == original_ranked[32:]
+    assert set(original_ranked[:16]) == postopt_set
+    assert set(original_ranked[16:32]) == confirm_set
+    assert len(prior_set) == 48
+    assert v26_confirm["task_ids"] == expected_selected
+    assert v26_confirm["candidate_pool"] == {
+        "ordering": (
+            "parent_manifest_order_minus_prior_pilot_postopt_and_v25_confirmation"
+        ),
+        "task_count": 95,
+        "task_ids_sha256": _ordered_ids_sha256(candidates),
+    }
+    assert v26_confirm["selection"]["task_ids_sha256"] == _ordered_ids_sha256(
+        expected_selected
+    )
+    assert v26_confirm["remaining_reserve"] == {
+        "ordering": "parent_manifest_order_minus_all_four_frozen_cohorts",
+        "task_count": 79,
+        "task_ids_sha256": _ordered_ids_sha256(expected_remaining),
+    }
+    assert v26_confirm["derivation"][
+        "equivalent_original_candidate_ranks_inclusive"
+    ] == [33, 48]
+    assert v26_confirm["derivation"]["first_included_rank"] == {
+        "task_id": ranked[0],
+        "sha256": benchmark_module._trace2skill_postopt_rank_key(ranked[0]),
+    }
+    assert v26_confirm["derivation"]["last_included_rank"] == {
+        "task_id": ranked[15],
+        "sha256": benchmark_module._trace2skill_postopt_rank_key(ranked[15]),
+    }
+    assert v26_confirm["derivation"]["first_excluded_rank"] == {
+        "task_id": ranked[16],
+        "sha256": benchmark_module._trace2skill_postopt_rank_key(ranked[16]),
+    }
+
+
+@pytest.mark.parametrize("prior_name", ["pilot", "postopt", "confirm"])
+@pytest.mark.parametrize("failure_mode", ["missing", "tampered", "symlink"])
+def test_trace2skill_v26_confirmation_requires_all_prior_cohort_siblings(
+    tmp_path: Path,
+    prior_name: str,
+    failure_mode: str,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    sibling = copies[prior_name]
+    if failure_mode == "missing":
+        sibling.unlink()
+    elif failure_mode == "tampered":
+        sibling.write_bytes(sibling.read_bytes() + b"\n")
+    else:
+        outside = tmp_path / f"outside-{sibling.name}"
+        shutil.copy2(sibling, outside)
+        sibling.unlink()
+        try:
+            sibling.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(ValueError, match="prior|checksum"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies["v26_confirm"]
+        )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "membership",
+        "order",
+        "first_boundary",
+        "last_boundary",
+        "excluded_boundary",
+        "remaining",
+        "prior",
+    ],
+)
+def test_trace2skill_v26_confirmation_rejects_self_consistent_tampering(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    dataset = _require_pinned_derivative_manifests()
+    copies = _copy_derivative_manifest_tree(tmp_path / "protocols")
+    frozen = _load_derivative_manifest(copies["v26_confirm"])
+    pool = _load_derivative_manifest(copies["pool"])
+    prior_ids = set()
+    for name in ("pilot", "postopt", "confirm"):
+        prior_ids.update(_load_derivative_manifest(copies[name])["task_ids"])
+    if target == "membership":
+        replacement = next(
+            task_id
+            for task_id in pool["task_ids"]
+            if task_id not in prior_ids | set(frozen["task_ids"])
+        )
+        frozen["task_ids"][0] = replacement
+        frozen["task_ids_sha256"] = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["selection"]["task_ids_sha256"] = frozen["task_ids_sha256"]
+    elif target == "order":
+        frozen["task_ids"][:2] = reversed(frozen["task_ids"][:2])
+        frozen["task_ids_sha256"] = _ordered_ids_sha256(frozen["task_ids"])
+        frozen["selection"]["task_ids_sha256"] = frozen["task_ids_sha256"]
+    elif target == "first_boundary":
+        frozen["derivation"]["first_included_rank"]["task_id"] = "wrong"
+    elif target == "last_boundary":
+        frozen["derivation"]["last_included_rank"]["sha256"] = "0" * 64
+    elif target == "excluded_boundary":
+        frozen["derivation"]["first_excluded_rank"]["task_id"] = "wrong"
+    elif target == "remaining":
+        frozen["remaining_reserve"]["task_count"] -= 1
+    else:
+        frozen["prior_quarantined_cohorts"].reverse()
+    _write_derivative_manifest(copies["v26_confirm"], frozen)
+
+    with pytest.raises(ValueError, match="anchors|prior"):
+        benchmark_module.verify_trace2skill_derivative_manifest(
+            dataset, copies["v26_confirm"]
         )
 
 
