@@ -242,6 +242,8 @@ def test_pilot_compare_manifest_preflight_precedes_output_creation(
     provenance = {"run_spec_id": "test"}
     raw = b"fixed run spec"
     task = type("Task", (), {"task_id": "task-1"})()
+    split_preflight = object()
+    captured_preflight: list[Any] = []
 
     monkeypatch.setattr(
         cli,
@@ -256,8 +258,15 @@ def test_pilot_compare_manifest_preflight_precedes_output_creation(
     monkeypatch.setattr(cli, "load_verified_tasks", lambda _: [task])
     monkeypatch.setattr(
         cli,
+        "preflight_trace2skill_split_manifest",
+        lambda *_args, **_kwargs: split_preflight,
+    )
+    monkeypatch.setattr(
+        cli,
         "load_and_verify_trace2skill_split_manifest",
-        lambda *_: {"task_ids": ["task-1"]},
+        lambda _root, _path, preflight, **_kwargs: (
+            captured_preflight.append(preflight) or {"task_ids": ["task-1"]}
+        ),
     )
     monkeypatch.setattr(cli, "trace2skill_split_provenance", lambda _: {"split": True})
     monkeypatch.setattr(
@@ -306,7 +315,146 @@ def test_pilot_compare_manifest_preflight_precedes_output_creation(
     with pytest.raises(HarnessError, match="preflight rejected"):
         cli.cmd_benchmark_compare(args)
 
+    assert captured_preflight == [split_preflight]
     assert not output.exists()
+
+
+def test_split_private_provenance_preflight_precedes_dataset_access(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    provenance = tmp_path / "private.json"
+    split = tmp_path / "split.json"
+    calls: list[tuple[str, Any]] = []
+
+    def reject_preflight(path: Path, **kwargs: Any) -> None:
+        calls.append(("preflight", (path, kwargs["local_provenance_path"])))
+        raise ValueError("private provenance rejected")
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(("dataset", None))
+        raise AssertionError("dataset must not be accessed")
+
+    monkeypatch.setattr(cli, "preflight_trace2skill_split_manifest", reject_preflight)
+    monkeypatch.setattr(cli, "download_verified", forbidden)
+    monkeypatch.setattr(cli, "load_and_verify_trace2skill_split_manifest", forbidden)
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "split",
+            "--verify",
+            str(split),
+            "--local-provenance-file",
+            str(provenance),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="private provenance rejected"):
+        cli.cmd_benchmark_split(args)
+
+    assert calls == [("preflight", (split, provenance))]
+
+
+def test_split_verification_reuses_preflight_snapshot(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    split = tmp_path / "split.json"
+    dataset = tmp_path / "dataset"
+    split_preflight = object()
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        cli,
+        "preflight_trace2skill_split_manifest",
+        lambda *_args, **_kwargs: split_preflight,
+    )
+    monkeypatch.setattr(cli, "download_verified", lambda _cache: dataset)
+
+    def fake_verify(
+        root: Path,
+        path: Path,
+        preflight: Any,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        captured.update({"root": root, "path": path, "preflight": preflight})
+        return {"valid": True}
+
+    monkeypatch.setattr(cli, "load_and_verify_trace2skill_split_manifest", fake_verify)
+    args = cli.build_parser().parse_args(
+        ["benchmark", "split", "--verify", str(split)]
+    )
+
+    assert cli.cmd_benchmark_split(args) == 0
+    assert captured == {
+        "root": dataset,
+        "path": split,
+        "preflight": split_preflight,
+    }
+
+
+def test_compare_private_provenance_preflight_precedes_external_actions(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    provenance = tmp_path / "private.json"
+    dataset = tmp_path / "dataset"
+    split = tmp_path / "split.json"
+    output = tmp_path / "output"
+    spec = tmp_path / "run-spec.json"
+    key_file = tmp_path / "key"
+    calls: list[tuple[str, Any]] = []
+
+    def reject_preflight(path: Path, **kwargs: Any) -> None:
+        calls.append(("preflight", (path, kwargs["local_provenance_path"])))
+        raise ValueError("private provenance rejected")
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(("external", None))
+        raise AssertionError("no external action may precede provenance preflight")
+
+    monkeypatch.setattr(cli, "preflight_trace2skill_split_manifest", reject_preflight)
+    monkeypatch.setattr(cli, "download_verified", forbidden)
+    monkeypatch.setattr(cli, "load_verified_tasks", forbidden)
+    monkeypatch.setattr(cli, "load_and_verify_trace2skill_split_manifest", forbidden)
+    monkeypatch.setattr(cli, "_provider", forbidden)
+    monkeypatch.setattr(cli, "_skills", forbidden)
+    monkeypatch.setattr(cli, "_claim_fresh_pilot_output", forbidden)
+    monkeypatch.setattr(cli, "ComparisonBenchmarkRunner", forbidden)
+    monkeypatch.setattr(
+        cli,
+        "_load_pilot_run_spec_from_repository",
+        lambda _: ({}, {"run_spec_id": "test"}, b"spec"),
+    )
+    monkeypatch.setattr(cli, "require_launchable_run_spec", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_pilot_repository_paths",
+        lambda *_args, **_kwargs: (dataset, split, output),
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "compare",
+            "--run-spec",
+            str(spec),
+            "--dataset",
+            str(dataset),
+            "--split-manifest",
+            str(split),
+            "--output",
+            str(output),
+            "--api-key-file",
+            str(key_file),
+            "--local-provenance-file",
+            str(provenance),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="private provenance rejected"):
+        cli.cmd_benchmark_compare(args)
+
+    assert calls == [("preflight", (split, provenance))]
 
 
 def test_fresh_pilot_output_claim_publishes_complete_private_copy(
@@ -659,6 +807,7 @@ def test_pilot_seal_calls_public_locked_runner_entrypoint(
         "repository_relative_paths": {},
     }
     task = type("Task", (), {"task_id": "task-1"})()
+    split_preflight = object()
     monkeypatch.setattr(
         cli,
         "_load_pilot_run_spec_from_repository",
@@ -671,8 +820,16 @@ def test_pilot_seal_calls_public_locked_runner_entrypoint(
     )
     monkeypatch.setattr(
         cli,
+        "preflight_trace2skill_split_manifest",
+        lambda *_args, **_kwargs: split_preflight,
+    )
+    monkeypatch.setattr(
+        cli,
         "load_and_verify_trace2skill_split_manifest",
-        lambda *_: {"task_ids": ["task-1"]},
+        lambda _root, _path, preflight, **_kwargs: (
+            captured.__setitem__("split_preflight", preflight),
+            {"task_ids": ["task-1"]},
+        )[1],
     )
     monkeypatch.setattr(cli, "trace2skill_split_provenance", lambda _: {"split": True})
     monkeypatch.setattr(cli, "load_verified_tasks", lambda _: [task])
@@ -722,6 +879,70 @@ def test_pilot_seal_calls_public_locked_runner_entrypoint(
 
     assert cli.cmd_benchmark_seal_interrupted(args) == 0
     assert captured["tasks"] == [task]
+    assert captured["split_preflight"] is split_preflight
+
+
+def test_seal_private_provenance_preflight_precedes_external_actions(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    parser = cli.build_parser()
+    provenance = tmp_path / "private.json"
+    output = tmp_path / "pilot-output"
+    dataset = tmp_path / "dataset"
+    split = tmp_path / "split.json"
+    spec = tmp_path / "run-spec.json"
+    key_file = tmp_path / "key"
+    calls: list[tuple[str, Any]] = []
+
+    monkeypatch.setattr(
+        cli,
+        "_load_pilot_run_spec_from_repository",
+        lambda _: ({}, {"run_spec_id": "test"}, b"spec"),
+    )
+    monkeypatch.setattr(cli, "require_launchable_run_spec", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_pilot_repository_paths",
+        lambda *_args, **_kwargs: (dataset, split, output),
+    )
+
+    def reject_preflight(path: Path, **kwargs: Any) -> None:
+        calls.append(("preflight", (path, kwargs["local_provenance_path"])))
+        raise ValueError("private provenance rejected")
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(("external", None))
+        raise AssertionError("no external action may precede provenance preflight")
+
+    monkeypatch.setattr(cli, "preflight_trace2skill_split_manifest", reject_preflight)
+    monkeypatch.setattr(cli, "load_verified_tasks", forbidden)
+    monkeypatch.setattr(cli, "load_and_verify_trace2skill_split_manifest", forbidden)
+    monkeypatch.setattr(cli, "_provider", forbidden)
+    monkeypatch.setattr(cli, "_skills", forbidden)
+    monkeypatch.setattr(cli, "ComparisonBenchmarkRunner", forbidden)
+    args = parser.parse_args(
+        [
+            "benchmark",
+            "seal-interrupted",
+            str(output),
+            "--dataset",
+            str(dataset),
+            "--split-manifest",
+            str(split),
+            "--run-spec",
+            str(spec),
+            "--api-key-file",
+            str(key_file),
+            "--local-provenance-file",
+            str(provenance),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="private provenance rejected"):
+        cli.cmd_benchmark_seal_interrupted(args)
+
+    assert calls == [("preflight", (split, provenance))]
 
 
 def test_main_does_not_print_provider_echoed_configured_secret(

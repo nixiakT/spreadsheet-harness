@@ -31,6 +31,7 @@ from .benchmark import (
     download_verified,
     load_and_verify_trace2skill_split_manifest,
     load_verified_tasks,
+    preflight_trace2skill_split_manifest,
     require_evaluation_task_authorization,
     summarize_results,
     trace2skill_heldout_manifest,
@@ -526,6 +527,12 @@ def cmd_benchmark_download(args: argparse.Namespace) -> int:
 
 
 def cmd_benchmark_split(args: argparse.Namespace) -> int:
+    split_preflight = None
+    if args.verify:
+        split_preflight = preflight_trace2skill_split_manifest(
+            args.verify,
+            local_provenance_path=args.local_provenance_file,
+        )
     root = (
         Path(args.dataset).expanduser().resolve() if args.dataset else download_verified(args.cache)
     )
@@ -544,7 +551,12 @@ def cmd_benchmark_split(args: argparse.Namespace) -> int:
             }
         )
         return 0
-    report = load_and_verify_trace2skill_split_manifest(root, args.verify)
+    report = load_and_verify_trace2skill_split_manifest(
+        root,
+        args.verify,
+        split_preflight,
+        local_provenance_path=args.local_provenance_file,
+    )
     _json_print(report)
     return 0
 
@@ -614,8 +626,6 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         pilot_root, pilot_split_path, pilot_output = _pilot_repository_paths(
             args, run_spec_document, output_argument=args.output
         )
-        config = _provider(args)
-        skills = _skills(args).freeze()
     requested_ids = list(args.task_id or [])
     if args.split_manifest and (
         args.offset != 0
@@ -627,6 +637,18 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
             "--split-manifest selects a frozen task set; use a derivative manifest "
             "instead of additional task selectors"
         )
+    split_path: Path | None = None
+    split_preflight = None
+    if args.split_manifest:
+        split_path = (
+            pilot_split_path
+            if args.run_spec
+            else Path(args.split_manifest).expanduser().resolve()
+        )
+        split_preflight = preflight_trace2skill_split_manifest(
+            split_path,
+            local_provenance_path=args.local_provenance_file,
+        )
     root = (
         pilot_root
         if args.run_spec
@@ -634,18 +656,18 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         if args.dataset
         else download_verified(args.cache)
     )
-    tasks = load_verified_tasks(root)
     frozen_ids: list[str] = []
     split_provenance: dict[str, Any] | None = None
-    if args.split_manifest:
-        split_path = (
-            pilot_split_path
-            if args.run_spec
-            else Path(args.split_manifest).expanduser().resolve()
+    if split_path is not None:
+        split_report = load_and_verify_trace2skill_split_manifest(
+            root,
+            split_path,
+            split_preflight,
+            local_provenance_path=args.local_provenance_file,
         )
-        split_report = load_and_verify_trace2skill_split_manifest(root, split_path)
         frozen_ids = [str(task_id) for task_id in split_report["task_ids"]]
         split_provenance = trace2skill_split_provenance(split_report)
+    tasks = load_verified_tasks(root)
     if args.task_id_file:
         requested_ids.extend(
             line.strip()
@@ -781,9 +803,18 @@ def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
     root, split_path, output = _pilot_repository_paths(
         args, run_spec_document, output_argument=args.results
     )
+    split_preflight = preflight_trace2skill_split_manifest(
+        split_path,
+        local_provenance_path=args.local_provenance_file,
+    )
     if not output.is_dir():
         raise HarnessError("Pilot interruption sealing requires the existing output directory")
-    split_report = load_and_verify_trace2skill_split_manifest(root, split_path)
+    split_report = load_and_verify_trace2skill_split_manifest(
+        root,
+        split_path,
+        split_preflight,
+        local_provenance_path=args.local_provenance_file,
+    )
     split_provenance = trace2skill_split_provenance(split_report)
     tasks_by_id = {task.task_id: task for task in load_verified_tasks(root)}
     missing = [
@@ -960,6 +991,18 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_local_provenance_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--local-provenance-file",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Owner-only private provenance for local derivative splits; defaults to "
+            "the ignored benchmarks/private record"
+        ),
+    )
+
+
 def _add_agent_flags(parser: argparse.ArgumentParser) -> None:
     _add_provider_flags(parser)
     parser.add_argument("--skills", action="append", default=[], help="Additional skills root")
@@ -1021,6 +1064,7 @@ def build_parser() -> argparse.ArgumentParser:
     split_action = split.add_mutually_exclusive_group(required=True)
     split_action.add_argument("--write", type=Path, help="Create a new frozen JSON manifest")
     split_action.add_argument("--verify", type=Path, help="Verify an existing frozen JSON manifest")
+    _add_local_provenance_flag(split)
     split.set_defaults(handler=cmd_benchmark_split)
 
     benchmark_run = benchmark_commands.add_parser("run", help="Run Verified tasks")
@@ -1112,6 +1156,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--task-timeout", type=float, default=900)
     compare.add_argument("--arm-order-seed", type=int, default=20_260_811)
     compare.add_argument("--circuit-breaker", type=int, default=3)
+    _add_local_provenance_flag(compare)
     _add_provider_flags(compare)
     compare.set_defaults(handler=cmd_benchmark_compare)
 
@@ -1124,6 +1169,7 @@ def build_parser() -> argparse.ArgumentParser:
     seal_interrupted.add_argument("--split-manifest", type=Path, required=True)
     seal_interrupted.add_argument("--run-spec", type=Path, required=True)
     seal_interrupted.add_argument("--skills", action="append", default=[])
+    _add_local_provenance_flag(seal_interrupted)
     _add_provider_flags(seal_interrupted)
     seal_interrupted.set_defaults(handler=cmd_benchmark_seal_interrupted)
 

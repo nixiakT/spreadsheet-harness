@@ -381,6 +381,9 @@ DERIVATIVE_V27_RESERVE_MANIFEST = Path(
 LOCAL_EXPOSURE_EVIDENCE = Path(
     "benchmarks/protocols/qwen35-trace2skill-local-exposure-evidence-v1.json"
 )
+LOCAL_PROVENANCE = Path(
+    "benchmarks/private/qwen35-trace2skill-local-provenance-v1.json"
+)
 
 
 def _ordered_ids_sha256(task_ids: list[str]) -> str:
@@ -401,6 +404,8 @@ def _require_pinned_derivative_manifests() -> Path:
         pytest.skip("Pinned SpreadsheetBench dataset is not available")
     if not DERIVATIVE_POOL_MANIFEST.is_file() or not DERIVATIVE_PILOT_MANIFEST.is_file():
         pytest.skip("Frozen Trace2Skill derivative manifests are not available")
+    if not LOCAL_PROVENANCE.is_file():
+        pytest.skip("Private Trace2Skill provenance is required for derivative verification")
     return dataset
 
 

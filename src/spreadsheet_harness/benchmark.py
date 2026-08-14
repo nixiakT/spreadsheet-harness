@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import tarfile
 import urllib.request
 import uuid
@@ -366,7 +367,6 @@ def require_evaluation_task_authorization(
             "Protected evaluation task IDs may run only as their exact frozen cohort "
             "under its launchable registered run spec: " + ", ".join(conflicts)
         )
-TRACE2SKILL_LOCAL_SCAN_REVISION = "7af635617e8f78de34cd3cdbff9fec7e373f8ba5"
 TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC = "2026-08-13T15:50:24Z"
 TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_FILENAME = (
     "qwen35-trace2skill-local-exposure-evidence-v1.json"
@@ -377,12 +377,225 @@ TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SCHEMA_VERSION = (
 TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SHA256 = (
     "063dd66299cfb34a59d634d396f2d8df31b0980b29de315a33c467fb3569521e"
 )
-TRACE2SKILL_PILOT_FIRST_COMMITTED_REVISION = (
-    "ef45aed8bcf5cccfe3e13b63c9df457926fd76d1"
+TRACE2SKILL_LOCAL_PROVENANCE_SCHEMA_VERSION = (
+    "spreadsheetbench-local-provenance-private-v1"
 )
+TRACE2SKILL_LOCAL_PROVENANCE_RECORD_ID = "qwen35-trace2skill-local-provenance-v1"
+TRACE2SKILL_LOCAL_PROVENANCE_FILENAME = f"{TRACE2SKILL_LOCAL_PROVENANCE_RECORD_ID}.json"
+TRACE2SKILL_LOCAL_PROVENANCE_MAX_BYTES = 16 * 1024
 BENCHMARK_MANIFEST_SCHEMA_VERSION = 2
 BENCHMARK_PROTOCOL_VERSION = "agent_per_workbook_v2"
 _PROCESS_PACERS: dict[str, RelayPacer] = {}
+
+
+@dataclass(frozen=True, repr=False)
+class _Trace2SkillLocalProvenance:
+    local_scan_revision: str
+    pilot_first_committed_revision: str
+    record_sha256: str
+
+
+@dataclass(frozen=True)
+class _LocalProvenanceSnapshot:
+    data: bytes
+    identity: tuple[int, int, int, int, int, int, int, int]
+
+
+@dataclass(frozen=True, repr=False)
+class _Trace2SkillSplitPreflight:
+    requested_path: Path
+    resolved_path: Path
+    raw_manifest: bytes
+    local_provenance: _Trace2SkillLocalProvenance | None
+
+
+def _default_trace2skill_local_provenance_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "private"
+        / TRACE2SKILL_LOCAL_PROVENANCE_FILENAME
+    )
+
+
+def _canonical_local_provenance_bytes(value: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("ascii")
+
+
+def _local_provenance_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _validate_local_provenance_metadata(metadata: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_size <= 0
+        or metadata.st_size > TRACE2SKILL_LOCAL_PROVENANCE_MAX_BYTES
+    ):
+        raise ValueError("Private Trace2Skill local provenance file is not owner-only regular data")
+
+
+def _local_provenance_directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _open_local_provenance_parent(path: Path) -> tuple[int, str]:
+    absolute = Path(os.path.abspath(path))
+    if not absolute.is_absolute() or absolute.name in {"", ".", ".."}:
+        raise ValueError("Private Trace2Skill local provenance path is invalid")
+    descriptor = os.open("/", _local_provenance_directory_flags())
+    try:
+        for component in absolute.parts[1:-1]:
+            next_descriptor = os.open(
+                component,
+                _local_provenance_directory_flags(),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor, absolute.name
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _read_local_provenance_snapshot(path: Path) -> _LocalProvenanceSnapshot:
+    try:
+        parent_descriptor, filename = _open_local_provenance_parent(path)
+        path_metadata = os.stat(
+            filename,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _validate_local_provenance_metadata(path_metadata)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = os.open(filename, flags, dir_fd=parent_descriptor)
+    except (OSError, ValueError):
+        raise ValueError("Private Trace2Skill local provenance is unavailable or unsafe") from None
+    finally:
+        if "parent_descriptor" in locals():
+            os.close(parent_descriptor)
+    try:
+        opened = os.fstat(descriptor)
+        _validate_local_provenance_metadata(opened)
+        if _local_provenance_identity(opened) != _local_provenance_identity(path_metadata):
+            raise ValueError("Private Trace2Skill local provenance changed while opening")
+        chunks: list[bytes] = []
+        remaining = TRACE2SKILL_LOCAL_PROVENANCE_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(4096, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        finished = os.fstat(descriptor)
+        if (
+            len(data) > TRACE2SKILL_LOCAL_PROVENANCE_MAX_BYTES
+            or len(data) != finished.st_size
+            or _local_provenance_identity(finished) != _local_provenance_identity(opened)
+        ):
+            raise ValueError("Private Trace2Skill local provenance changed while reading")
+        return _LocalProvenanceSnapshot(
+            data=data,
+            identity=_local_provenance_identity(finished),
+        )
+    except (OSError, ValueError):
+        raise ValueError("Private Trace2Skill local provenance is unavailable or unsafe") from None
+    finally:
+        os.close(descriptor)
+
+
+def _load_trace2skill_local_provenance(
+    path: str | Path | None = None,
+) -> _Trace2SkillLocalProvenance:
+    candidate = (
+        Path(path).expanduser()
+        if path is not None
+        else _default_trace2skill_local_provenance_path()
+    )
+    first = _read_local_provenance_snapshot(candidate)
+    second = _read_local_provenance_snapshot(candidate)
+    if first != second:
+        raise ValueError("Private Trace2Skill local provenance changed between snapshot reads")
+    try:
+        text = first.data.decode("ascii")
+        document = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise ValueError("Private Trace2Skill local provenance is not strict JSON") from None
+    if not isinstance(document, dict) or set(document) != {
+        "schema_version",
+        "record_id",
+        "protocol_bindings",
+        "revisions",
+        "record_sha256",
+    }:
+        raise ValueError("Private Trace2Skill local provenance schema is invalid")
+    bindings = document.get("protocol_bindings")
+    revisions = document.get("revisions")
+    if (
+        document.get("schema_version") != TRACE2SKILL_LOCAL_PROVENANCE_SCHEMA_VERSION
+        or document.get("record_id") != TRACE2SKILL_LOCAL_PROVENANCE_RECORD_ID
+        or bindings
+        != {
+            "local_pool_manifest_id": TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID,
+            "pilot_manifest_id": TRACE2SKILL_PILOT_MANIFEST_ID,
+            "evidence_schema_version": TRACE2SKILL_LOCAL_EXPOSURE_EVIDENCE_SCHEMA_VERSION,
+        }
+        or not isinstance(revisions, dict)
+        or set(revisions)
+        != {"local_scan_revision", "pilot_first_committed_revision"}
+    ):
+        raise ValueError("Private Trace2Skill local provenance bindings are invalid")
+    local_scan_revision = revisions.get("local_scan_revision")
+    pilot_first_committed_revision = revisions.get("pilot_first_committed_revision")
+    record_sha256 = document.get("record_sha256")
+    if (
+        not isinstance(local_scan_revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", local_scan_revision) is None
+        or not isinstance(pilot_first_committed_revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", pilot_first_committed_revision) is None
+        or local_scan_revision == pilot_first_committed_revision
+        or not isinstance(record_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", record_sha256) is None
+    ):
+        raise ValueError("Private Trace2Skill local provenance revisions are invalid")
+    payload = {key: value for key, value in document.items() if key != "record_sha256"}
+    expected_sha256 = hashlib.sha256(_canonical_local_provenance_bytes(payload)).hexdigest()
+    if record_sha256 != expected_sha256 or first.data != _canonical_local_provenance_bytes(document):
+        raise ValueError("Private Trace2Skill local provenance canonical hash is invalid")
+    return _Trace2SkillLocalProvenance(
+        local_scan_revision=local_scan_revision,
+        pilot_first_committed_revision=pilot_first_committed_revision,
+        record_sha256=record_sha256,
+    )
 
 
 def _process_pacer(scope_id: str, interval_seconds: float) -> RelayPacer:
@@ -816,8 +1029,23 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _read_split_manifest(
     manifest_path: str | Path,
 ) -> tuple[Path, dict[str, Any], str]:
+    path, _, frozen, manifest_hash = _capture_split_manifest(manifest_path)
+    return path, frozen, manifest_hash
+
+
+def _capture_split_manifest(
+    manifest_path: str | Path,
+) -> tuple[Path, bytes, dict[str, Any], str]:
     path = Path(manifest_path).expanduser().resolve(strict=True)
     raw = path.read_bytes()
+    frozen, manifest_hash = _parse_split_manifest_bytes(path, raw)
+    return path, raw, frozen, manifest_hash
+
+
+def _parse_split_manifest_bytes(
+    path: Path,
+    raw: bytes,
+) -> tuple[dict[str, Any], str]:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -828,7 +1056,26 @@ def _read_split_manifest(
         raise ValueError(f"Invalid split manifest JSON: {path}") from exc
     if not isinstance(frozen, dict):
         raise ValueError("Split manifest must be a JSON object")
-    return path, frozen, hashlib.sha256(raw).hexdigest()
+    return frozen, hashlib.sha256(raw).hexdigest()
+
+
+def _split_manifest_requested_path(manifest_path: str | Path) -> Path:
+    return Path(os.path.abspath(Path(manifest_path).expanduser()))
+
+
+def _consume_trace2skill_split_preflight(
+    manifest_path: str | Path,
+    preflight: _Trace2SkillSplitPreflight,
+) -> tuple[Path, dict[str, Any], str]:
+    if not isinstance(preflight, _Trace2SkillSplitPreflight):
+        raise TypeError("Trace2Skill split preflight capability has an invalid type")
+    if _split_manifest_requested_path(manifest_path) != preflight.requested_path:
+        raise ValueError("Trace2Skill split preflight capability belongs to another path")
+    frozen, manifest_hash = _parse_split_manifest_bytes(
+        preflight.resolved_path,
+        preflight.raw_manifest,
+    )
+    return preflight.resolved_path, frozen, manifest_hash
 
 
 def _manifest_mismatch_fields(
@@ -869,9 +1116,17 @@ def _verify_trace2skill_heldout_document(
     }
 
 
-def trace2skill_local_unattempted_manifest(dataset_root: str | Path) -> dict[str, Any]:
+def trace2skill_local_unattempted_manifest(
+    dataset_root: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
+    _local_provenance: _Trace2SkillLocalProvenance | None = None,
+) -> dict[str, Any]:
     """Build the frozen local-exposure difference recorded at the v2 cutoff."""
 
+    local_provenance = _local_provenance or _load_trace2skill_local_provenance(
+        local_provenance_path
+    )
     parent = trace2skill_heldout_manifest(dataset_root)
     parent_ids = [str(task_id) for task_id in parent["task_ids"]]
     attempted_ids = parent_ids[:TRACE2SKILL_LOCAL_ATTEMPTED_TASK_COUNT]
@@ -915,7 +1170,7 @@ def trace2skill_local_unattempted_manifest(dataset_root: str | Path) -> dict[str
                 "locally_unattempted_and_not_substantively_selected_as_of_freeze"
             ),
             "freeze_scope": "local repository artifacts under the recorded scan policy",
-            "repository_revision_scanned": TRACE2SKILL_LOCAL_SCAN_REVISION,
+            "repository_revision_scanned": local_provenance.local_scan_revision,
             "artifact_scan_cutoff_utc": TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC,
             "scan_policy_version": "substantive-local-exposure-v1",
             "evidence_snapshot": {
@@ -963,10 +1218,19 @@ def trace2skill_local_unattempted_manifest(dataset_root: str | Path) -> dict[str
 
 def trace2skill_local_unattempted_pilot_manifest(
     dataset_root: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
+    _local_provenance: _Trace2SkillLocalProvenance | None = None,
 ) -> dict[str, Any]:
     """Build the fixed exploratory pilot selected from the v2 local pool."""
 
-    pool = trace2skill_local_unattempted_manifest(dataset_root)
+    local_provenance = _local_provenance or _load_trace2skill_local_provenance(
+        local_provenance_path
+    )
+    pool = trace2skill_local_unattempted_manifest(
+        dataset_root,
+        _local_provenance=local_provenance,
+    )
     pool_ids = [str(task_id) for task_id in pool["task_ids"]]
     pilot_ids = list(TRACE2SKILL_PILOT_TASK_IDS)
     if pilot_ids != [task_id for task_id in pool_ids if task_id in set(pilot_ids)]:
@@ -993,8 +1257,10 @@ def trace2skill_local_unattempted_pilot_manifest(
             "operation": "ordered_explicit_subset",
             "purpose": "exploratory_development_pilot",
             "selection": "explicit_fixed_order_before_inference",
-            "selection_based_on_repository_revision": TRACE2SKILL_LOCAL_SCAN_REVISION,
-            "first_committed_in_revision": TRACE2SKILL_PILOT_FIRST_COMMITTED_REVISION,
+            "selection_based_on_repository_revision": local_provenance.local_scan_revision,
+            "first_committed_in_revision": (
+                local_provenance.pilot_first_committed_revision
+            ),
             "freeze_time_utc": TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC,
             "state_rules": [
                 "Every pilot task enters development/quarantine when this manifest is frozen.",
@@ -1030,10 +1296,19 @@ def _trace2skill_postopt_rank_key(task_id: str) -> str:
 
 def trace2skill_local_postopt_manifest(
     dataset_root: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
+    _local_provenance: _Trace2SkillLocalProvenance | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic post-optimization split outside the old pilot."""
 
-    pool = trace2skill_local_unattempted_manifest(dataset_root)
+    local_provenance = _local_provenance or _load_trace2skill_local_provenance(
+        local_provenance_path
+    )
+    pool = trace2skill_local_unattempted_manifest(
+        dataset_root,
+        _local_provenance=local_provenance,
+    )
     pool_ids = [str(task_id) for task_id in pool["task_ids"]]
     prior_pilot_ids = list(TRACE2SKILL_PILOT_TASK_IDS)
     if prior_pilot_ids != [
@@ -1133,10 +1408,19 @@ def trace2skill_local_postopt_manifest(
 
 def trace2skill_local_confirmation_manifest(
     dataset_root: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
+    _local_provenance: _Trace2SkillLocalProvenance | None = None,
 ) -> dict[str, Any]:
     """Continue the frozen hash ranking outside both quarantined cohorts."""
 
-    pool = trace2skill_local_unattempted_manifest(dataset_root)
+    local_provenance = _local_provenance or _load_trace2skill_local_provenance(
+        local_provenance_path
+    )
+    pool = trace2skill_local_unattempted_manifest(
+        dataset_root,
+        _local_provenance=local_provenance,
+    )
     pool_ids = [str(task_id) for task_id in pool["task_ids"]]
     pilot_ids = list(TRACE2SKILL_PILOT_TASK_IDS)
     postopt_ids = list(TRACE2SKILL_POSTOPT_TASK_IDS)
@@ -1282,10 +1566,19 @@ def trace2skill_local_confirmation_manifest(
 
 def trace2skill_local_v26_confirmation_manifest(
     dataset_root: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
+    _local_provenance: _Trace2SkillLocalProvenance | None = None,
 ) -> dict[str, Any]:
     """Continue the frozen ranking outside all three observed cohorts."""
 
-    pool = trace2skill_local_unattempted_manifest(dataset_root)
+    local_provenance = _local_provenance or _load_trace2skill_local_provenance(
+        local_provenance_path
+    )
+    pool = trace2skill_local_unattempted_manifest(
+        dataset_root,
+        _local_provenance=local_provenance,
+    )
     pool_ids = [str(task_id) for task_id in pool["task_ids"]]
     prior_cohorts = (
         (
@@ -1471,10 +1764,19 @@ def trace2skill_local_v26_confirmation_manifest(
 
 def trace2skill_local_v27_reserve_manifest(
     dataset_root: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
+    _local_provenance: _Trace2SkillLocalProvenance | None = None,
 ) -> dict[str, Any]:
     """Select the entire fresh reserve outside all four frozen 16-task cohorts."""
 
-    pool = trace2skill_local_unattempted_manifest(dataset_root)
+    local_provenance = _local_provenance or _load_trace2skill_local_provenance(
+        local_provenance_path
+    )
+    pool = trace2skill_local_unattempted_manifest(
+        dataset_root,
+        _local_provenance=local_provenance,
+    )
     pool_ids = [str(task_id) for task_id in pool["task_ids"]]
     if (
         TRACE2SKILL_V27_RESERVE_TASK_COUNT
@@ -1675,7 +1977,11 @@ def _read_local_exposure_evidence(path: Path) -> tuple[dict[str, Any], str]:
     return evidence, evidence_hash
 
 
-def _verify_local_exposure_evidence(path: Path, pool: dict[str, Any]) -> None:
+def _verify_local_exposure_evidence(
+    path: Path,
+    pool: dict[str, Any],
+    local_provenance: _Trace2SkillLocalProvenance,
+) -> None:
     derivation = pool.get("derivation")
     if not isinstance(derivation, dict):
         raise ValueError("Local pool derivation must be a JSON object")
@@ -1714,7 +2020,7 @@ def _verify_local_exposure_evidence(path: Path, pool: dict[str, Any]) -> None:
         or not isinstance(observation, dict)
         or observation.get("cutoff_utc") != TRACE2SKILL_LOCAL_SCAN_CUTOFF_UTC
         or observation.get("source_repository_commit")
-        != TRACE2SKILL_LOCAL_SCAN_REVISION
+        != local_provenance.local_scan_revision
         or not isinstance(parent, dict)
         or parent.get("relative_path") != TRACE2SKILL_PARENT_MANIFEST_FILENAME
         or parent.get("sha256") != TRACE2SKILL_PARENT_MANIFEST_SHA256
@@ -1763,6 +2069,7 @@ def _verify_trace2skill_derivative_document(
     path: Path,
     frozen: dict[str, Any],
     manifest_hash: str,
+    local_provenance: _Trace2SkillLocalProvenance,
 ) -> dict[str, Any]:
     manifest_id = frozen.get("manifest_id")
     if manifest_id == TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID:
@@ -1771,42 +2078,60 @@ def _verify_trace2skill_derivative_document(
         expected_parent_schema = TRACE2SKILL_SPLIT_SCHEMA_VERSION
         expected_parent_count = TRACE2SKILL_HELDOUT_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_HELDOUT_TASK_IDS_SHA256
-        expected = trace2skill_local_unattempted_manifest(dataset_root)
+        expected = trace2skill_local_unattempted_manifest(
+            dataset_root,
+            _local_provenance=local_provenance,
+        )
     elif manifest_id == TRACE2SKILL_PILOT_MANIFEST_ID:
         expected_parent_filename = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME
         expected_parent_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
         expected_parent_schema = TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
         expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
-        expected = trace2skill_local_unattempted_pilot_manifest(dataset_root)
+        expected = trace2skill_local_unattempted_pilot_manifest(
+            dataset_root,
+            _local_provenance=local_provenance,
+        )
     elif manifest_id == TRACE2SKILL_POSTOPT_MANIFEST_ID:
         expected_parent_filename = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME
         expected_parent_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
         expected_parent_schema = TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
         expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
-        expected = trace2skill_local_postopt_manifest(dataset_root)
+        expected = trace2skill_local_postopt_manifest(
+            dataset_root,
+            _local_provenance=local_provenance,
+        )
     elif manifest_id == TRACE2SKILL_CONFIRM_MANIFEST_ID:
         expected_parent_filename = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME
         expected_parent_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
         expected_parent_schema = TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
         expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
-        expected = trace2skill_local_confirmation_manifest(dataset_root)
+        expected = trace2skill_local_confirmation_manifest(
+            dataset_root,
+            _local_provenance=local_provenance,
+        )
     elif manifest_id == TRACE2SKILL_V26_CONFIRM_MANIFEST_ID:
         expected_parent_filename = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME
         expected_parent_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
         expected_parent_schema = TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
         expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
-        expected = trace2skill_local_v26_confirmation_manifest(dataset_root)
+        expected = trace2skill_local_v26_confirmation_manifest(
+            dataset_root,
+            _local_provenance=local_provenance,
+        )
     elif manifest_id == TRACE2SKILL_V27_RESERVE_MANIFEST_ID:
         expected_parent_filename = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_FILENAME
         expected_parent_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
         expected_parent_schema = TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION
         expected_parent_count = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_COUNT
         expected_parent_ids_hash = TRACE2SKILL_LOCAL_UNATTEMPTED_TASK_IDS_SHA256
-        expected = trace2skill_local_v27_reserve_manifest(dataset_root)
+        expected = trace2skill_local_v27_reserve_manifest(
+            dataset_root,
+            _local_provenance=local_provenance,
+        )
     else:
         raise ValueError(f"Unsupported derivative split manifest_id: {manifest_id!r}")
     parent_reference = frozen.get("parent")
@@ -1816,7 +2141,11 @@ def _verify_trace2skill_derivative_document(
     if relative_path != expected_parent_filename or Path(str(relative_path)).is_absolute():
         raise ValueError("Derivative split parent path does not match its frozen sibling")
     parent_path = _resolve_derivative_parent(path, expected_parent_filename)
-    parent_report = load_and_verify_trace2skill_split_manifest(dataset_root, parent_path)
+    parent_report = load_and_verify_trace2skill_split_manifest(
+        dataset_root,
+        parent_path,
+        _local_provenance=local_provenance,
+    )
     if (
         parent_report["manifest_sha256"] != expected_parent_hash
         or parent_report["schema_version"] != expected_parent_schema
@@ -1840,7 +2169,9 @@ def _verify_trace2skill_derivative_document(
             artifact_label="prior development pilot",
         )
         prior_report = load_and_verify_trace2skill_split_manifest(
-            dataset_root, prior_pilot_path
+            dataset_root,
+            prior_pilot_path,
+            _local_provenance=local_provenance,
         )
         if (
             prior_report["manifest_sha256"] != TRACE2SKILL_PILOT_MANIFEST_SHA256
@@ -1922,7 +2253,9 @@ def _verify_trace2skill_derivative_document(
                 artifact_label=label,
             )
             sibling_report = load_and_verify_trace2skill_split_manifest(
-                dataset_root, sibling_path
+                dataset_root,
+                sibling_path,
+                _local_provenance=local_provenance,
             )
             if (
                 sibling_report["manifest_sha256"] != expected_hash
@@ -1939,7 +2272,7 @@ def _verify_trace2skill_derivative_document(
             + ", ".join(mismatches)
         )
     if manifest_id == TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID:
-        _verify_local_exposure_evidence(path, frozen)
+        _verify_local_exposure_evidence(path, frozen, local_provenance)
     if (
         manifest_id == TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID
         and manifest_hash != TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_SHA256
@@ -1983,33 +2316,118 @@ def _verify_trace2skill_derivative_document(
     }
 
 
+_TRACE2SKILL_LOCAL_DERIVATIVE_MANIFEST_IDS = frozenset(
+    {
+        TRACE2SKILL_LOCAL_UNATTEMPTED_MANIFEST_ID,
+        TRACE2SKILL_PILOT_MANIFEST_ID,
+        TRACE2SKILL_POSTOPT_MANIFEST_ID,
+        TRACE2SKILL_CONFIRM_MANIFEST_ID,
+        TRACE2SKILL_V26_CONFIRM_MANIFEST_ID,
+        TRACE2SKILL_V27_RESERVE_MANIFEST_ID,
+    }
+)
+
+
+def preflight_trace2skill_split_manifest(
+    manifest_path: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
+) -> _Trace2SkillSplitPreflight:
+    """Capture the exact split and private provenance before dataset access."""
+
+    requested_path = _split_manifest_requested_path(manifest_path)
+    path, raw_manifest, frozen, _ = _capture_split_manifest(manifest_path)
+    schema = frozen.get("schema_version")
+    if schema == TRACE2SKILL_SPLIT_SCHEMA_VERSION:
+        manifest_id = frozen.get("manifest_id")
+        if manifest_id not in {None, TRACE2SKILL_HELDOUT_MANIFEST_ID}:
+            raise ValueError(
+                f"Unsupported held-out split manifest_id: {manifest_id!r}"
+            )
+        return _Trace2SkillSplitPreflight(
+            requested_path=requested_path,
+            resolved_path=path,
+            raw_manifest=raw_manifest,
+            local_provenance=None,
+        )
+    if schema != TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported split manifest schema_version: {schema!r}")
+    if frozen.get("manifest_id") not in _TRACE2SKILL_LOCAL_DERIVATIVE_MANIFEST_IDS:
+        raise ValueError(
+            f"Unsupported derivative split manifest_id: {frozen.get('manifest_id')!r}"
+        )
+    local_provenance = _load_trace2skill_local_provenance(local_provenance_path)
+    return _Trace2SkillSplitPreflight(
+        requested_path=requested_path,
+        resolved_path=path,
+        raw_manifest=raw_manifest,
+        local_provenance=local_provenance,
+    )
+
+
 def verify_trace2skill_derivative_manifest(
-    dataset_root: str | Path, manifest_path: str | Path
+    dataset_root: str | Path,
+    manifest_path: str | Path,
+    *,
+    local_provenance_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Read-only verification of a recognized v2 derivative manifest."""
 
     path, frozen, manifest_hash = _read_split_manifest(manifest_path)
     if frozen.get("schema_version") != TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION:
         raise ValueError("Expected a frozen Trace2Skill derivative v2 manifest")
+    if frozen.get("manifest_id") not in _TRACE2SKILL_LOCAL_DERIVATIVE_MANIFEST_IDS:
+        raise ValueError(
+            f"Unsupported derivative split manifest_id: {frozen.get('manifest_id')!r}"
+        )
+    local_provenance = _load_trace2skill_local_provenance(local_provenance_path)
     return _verify_trace2skill_derivative_document(
-        dataset_root, path, frozen, manifest_hash
+        dataset_root,
+        path,
+        frozen,
+        manifest_hash,
+        local_provenance,
     )
 
 
 def load_and_verify_trace2skill_split_manifest(
-    dataset_root: str | Path, manifest_path: str | Path
+    dataset_root: str | Path,
+    manifest_path: str | Path,
+    preflight: _Trace2SkillSplitPreflight | None = None,
+    *,
+    local_provenance_path: str | Path | None = None,
+    _local_provenance: _Trace2SkillLocalProvenance | None = None,
 ) -> dict[str, Any]:
     """Verify a supported split exactly once and return its frozen task order."""
 
-    path, frozen, manifest_hash = _read_split_manifest(manifest_path)
+    if preflight is None:
+        path, frozen, manifest_hash = _read_split_manifest(manifest_path)
+    else:
+        path, frozen, manifest_hash = _consume_trace2skill_split_preflight(
+            manifest_path,
+            preflight,
+        )
     schema = frozen.get("schema_version")
     if schema == TRACE2SKILL_SPLIT_SCHEMA_VERSION:
         return _verify_trace2skill_heldout_document(
             dataset_root, path, frozen, manifest_hash
         )
     if schema == TRACE2SKILL_DERIVATIVE_SPLIT_SCHEMA_VERSION:
+        if frozen.get("manifest_id") not in _TRACE2SKILL_LOCAL_DERIVATIVE_MANIFEST_IDS:
+            raise ValueError(
+                f"Unsupported derivative split manifest_id: {frozen.get('manifest_id')!r}"
+            )
+        local_provenance = (
+            _local_provenance
+            or (preflight.local_provenance if preflight is not None else None)
+            or _load_trace2skill_local_provenance(local_provenance_path)
+        )
         return _verify_trace2skill_derivative_document(
-            dataset_root, path, frozen, manifest_hash
+            dataset_root,
+            path,
+            frozen,
+            manifest_hash,
+            local_provenance,
         )
     raise ValueError(f"Unsupported split manifest schema_version: {schema!r}")
 

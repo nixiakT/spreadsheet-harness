@@ -742,8 +742,13 @@ def test_comparison_uses_verified_manifest_order_without_rereading(
     monkeypatch.setattr(cli_module, "load_verified_tasks", lambda _: tasks)
     monkeypatch.setattr(
         cli_module,
+        "preflight_trace2skill_split_manifest",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cli_module,
         "load_and_verify_trace2skill_split_manifest",
-        lambda *_: {
+        lambda *_args, **_kwargs: {
             "valid": True,
             "manifest_id": "test-split",
             "schema_version": "test-split-v1",
