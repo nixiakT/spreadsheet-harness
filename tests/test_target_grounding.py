@@ -13,13 +13,19 @@ from spreadsheet_harness.evidence_contract import (
     EvidenceScope,
 )
 from spreadsheet_harness.target_grounding import (
+    CommittedAdvisoryTargetAssessment,
     CommittedTargetAuthorization,
     GroundingDecision,
+    PreparedAdvisoryTargetAssessment,
     PreparedTargetAuthorization,
     TargetGroundingError,
+    TargetGroundingMode,
     TargetGroundingRejected,
     TargetGroundingStateMachine,
+    advisory_assessment_from_dict,
+    committed_advisory_assessment_from_dict,
     committed_authorization_from_dict,
+    validate_committed_advisory_assessment_chain,
     validate_committed_authorization_chain,
 )
 from spreadsheet_harness.workbook_diff import WorkbookEffectDiff
@@ -29,6 +35,19 @@ R0_OTHER_BYTES = ArtifactRef(0, "f" * 64)
 R1 = ArtifactRef(1, "1" * 64)
 R1_OTHER_BYTES = ArtifactRef(1, "e" * 64)
 R2 = ArtifactRef(2, "2" * 64)
+
+
+def _canonical_digest(document: dict[str, object], digest_field: str) -> str:
+    payload = {key: value for key, value in document.items() if key != digest_field}
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("ascii")
+    ).hexdigest()
 
 
 def _changed(
@@ -78,6 +97,18 @@ def _grounded_gate(
         observation_ids=(observation.observation_id,),
     )
     return gate, declaration.declaration_id
+
+
+def _advisory_lifecycle_kwargs(
+    gate: TargetGroundingStateMachine,
+) -> dict[str, object]:
+    return {
+        "lifecycle_events": [
+            item.to_dict() for item in gate.advisory_lifecycle_events
+        ],
+        "lifecycle_genesis_sha256": gate.advisory_lifecycle_genesis_sha256,
+        "lifecycle_final_counters": gate.advisory_lifecycle_final_counters,
+    }
 
 
 def test_observations_are_monotonic_and_bound_to_exact_artifact() -> None:
@@ -223,7 +254,9 @@ def test_observation_is_stale_after_artifact_transition() -> None:
         artifact=R0,
         scope=EvidenceScope.one("Sales", "A1:B2"),
     )
-    gate.record_artifact_transition(ArtifactTransition(1, "edit", "mutation", R0, R1))
+    gate.record_artifact_transition(
+        ArtifactTransition(1, "edit", "artifact_rewrite", R0, R1)
+    )
 
     with pytest.raises(TargetGroundingError, match="stale artifact"):
         gate.declare_target(
@@ -426,7 +459,9 @@ def test_transition_lineage_must_start_from_exact_current_artifact() -> None:
     gate = TargetGroundingStateMachine(R0)
 
     with pytest.raises(TargetGroundingError, match="current workbook bytes"):
-        gate.record_artifact_transition(ArtifactTransition(2, "edit", "mutation", R1, R2))
+        gate.record_artifact_transition(
+            ArtifactTransition(2, "edit", "artifact_rewrite", R1, R2)
+        )
 
     assert gate.current_artifact == R0
 
@@ -510,6 +545,38 @@ def test_committed_strict_noop_has_canonical_chained_record() -> None:
     ) == (preview,)
 
 
+def test_enforced_commit_accepts_reason_redacted_preview_round_trip() -> None:
+    gate, declaration_id = _grounded_gate()
+    footprint = WorkbookEffectDiff(
+        semantic_changed=True,
+        complete=True,
+        effects=frozenset({EffectKind.VALUE}),
+        scope=EvidenceScope.one("Sales", "B2:C3"),
+        formula_scope=EvidenceScope(),
+        changed_cell_count=1,
+        scanned_cell_count=20,
+        reasons=("diagnostic path is not certificate data",),
+    )
+    prepared = gate.prepare_staged_diff(
+        declaration_id,
+        footprint,
+        staged_artifact=R1,
+    )
+    transition = ArtifactTransition(1, "write_range", "mutation", R0, R1)
+    preview = gate.preview_committed_authorization(prepared, transition)
+    normalized = committed_authorization_from_dict(preview.to_dict())
+
+    assert normalized != preview
+    assert normalized.to_dict() == preview.to_dict()
+    gate.commit_prepared(
+        prepared,
+        transition,
+        committed_authorization=normalized,
+    )
+
+    assert gate.committed_authorizations == (preview,)
+
+
 def test_prepared_authorization_rejects_mismatched_publish_transition() -> None:
     gate, declaration_id = _grounded_gate()
     prepared = gate.prepare_staged_diff(
@@ -527,6 +594,34 @@ def test_prepared_authorization_rejects_mismatched_publish_transition() -> None:
     gate.abort_prepared(prepared)
     assert gate.current_artifact == R0
     assert gate.records == ()
+    with pytest.raises(TargetGroundingError, match="consumed.*replayed"):
+        gate.authorize_staged_diff(
+            declaration_id,
+            _changed(EvidenceScope.one("Sales", "B2")),
+        )
+
+
+@pytest.mark.parametrize(
+    ("diff", "staged_artifact", "error"),
+    [
+        (object(), R1, TypeError),
+        (_no_op(), R2, TargetGroundingError),
+    ],
+)
+def test_enforced_prepare_preserves_legacy_malformed_input_consumption(
+    diff: object,
+    staged_artifact: ArtifactRef,
+    error: type[Exception],
+) -> None:
+    gate, declaration_id = _grounded_gate()
+
+    with pytest.raises(error):
+        gate.prepare_staged_diff(  # type: ignore[arg-type]
+            declaration_id,
+            diff,
+            staged_artifact=staged_artifact,
+        )
+
     with pytest.raises(TargetGroundingError, match="consumed.*replayed"):
         gate.authorize_staged_diff(
             declaration_id,
@@ -600,3 +695,596 @@ def test_authorizer_enforces_strict_workbook_footprint_schema(
         gate.authorize_staged_diff(declaration_id, diff)
 
     assert rejected.value.record.decision is GroundingDecision.INVALID_FOOTPRINT
+
+
+def test_advisory_assessment_records_counterfactual_rejection_without_authorization() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1:D10"),
+    )
+    declaration = gate.declare_target(
+        artifact=R0,
+        target_scope=EvidenceScope.one("Sales", "B2:C3"),
+        observation_ids=(observation.observation_id,),
+    )
+    prepared = gate.prepare_advisory_staged_diff(
+        declaration.declaration_id,
+        _changed(EvidenceScope.one("Sales", "D4")),
+        staged_artifact=R1,
+    )
+
+    assert isinstance(prepared, PreparedAdvisoryTargetAssessment)
+    assert prepared.assessment.would_reject is True
+    assert prepared.assessment.decision is GroundingDecision.OUTSIDE_DECLARED_TARGET
+    assert prepared.assessment.to_dict()["mode"] == "advisory"
+    transition = ArtifactTransition(1, "write_range", "mutation", R0, R1)
+    committed = gate.preview_committed_advisory_assessment(prepared, transition)
+    assessment = gate.commit_advisory_assessment(
+        prepared,
+        transition,
+        committed_assessment=committed,
+    )
+
+    assert isinstance(committed, CommittedAdvisoryTargetAssessment)
+    assert committed.to_dict()["decision"] == "published_after_advisory_assessment"
+    assert assessment == prepared.assessment
+    assert gate.current_artifact == R1
+    assert gate.committed_authorizations == ()
+    assert gate.committed_advisory_assessments == (committed,)
+    assert advisory_assessment_from_dict(assessment.to_dict()) == assessment
+    assert committed_advisory_assessment_from_dict(committed.to_dict()) == committed
+    assert validate_committed_advisory_assessment_chain(
+        [committed.to_dict()],
+        **_advisory_lifecycle_kwargs(gate),
+        transitions=(transition,),
+        initial_artifact=R0,
+        initial_transition_count=0,
+    ) == (committed,)
+
+
+def test_advisory_commit_accepts_reason_redacted_preview_round_trip() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    declaration = gate.declare_target(
+        artifact=R0,
+        target_scope=EvidenceScope.one("Sales", "A1"),
+        observation_ids=(observation.observation_id,),
+    )
+    footprint = WorkbookEffectDiff.unknown("/machine-local/private/workbook.xml")
+    prepared = gate.prepare_advisory_staged_diff(
+        declaration.declaration_id,
+        footprint,
+        staged_artifact=R1,
+    )
+    transition = ArtifactTransition(1, "write_range", "mutation", R0, R1)
+    preview = gate.preview_committed_advisory_assessment(prepared, transition)
+    normalized = committed_advisory_assessment_from_dict(preview.to_dict())
+
+    assert normalized != preview
+    assert normalized.to_dict() == preview.to_dict()
+    gate.commit_advisory_assessment(
+        prepared,
+        transition,
+        committed_assessment=normalized,
+    )
+
+    assert gate.committed_advisory_assessments == (preview,)
+    assert validate_committed_advisory_assessment_chain(
+        [preview.to_dict()],
+        **_advisory_lifecycle_kwargs(gate),
+        transitions=(transition,),
+        initial_artifact=R0,
+        initial_transition_count=0,
+    ) == (normalized,)
+
+
+@pytest.mark.parametrize(
+    ("declaration_id", "decision"),
+    [
+        (None, GroundingDecision.MISSING_DECLARATION),
+        (0, GroundingDecision.INVALID_DECLARATION),
+        (99, GroundingDecision.UNKNOWN_DECLARATION),
+    ],
+)
+def test_advisory_assessment_is_total_for_unavailable_declarations(
+    declaration_id: int | None,
+    decision: GroundingDecision,
+) -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    prepared = gate.prepare_advisory_staged_diff(
+        declaration_id,
+        _changed(EvidenceScope.one("Sales", "D4")),
+        staged_artifact=R1,
+    )
+
+    assert prepared.assessment.decision is decision
+    assert prepared.assessment.would_reject is True
+    diagnostic = prepared.assessment.model_diagnostic()
+    assert diagnostic["decision"] == decision.value
+    assert diagnostic["declaration_status"] in {"missing", "invalid", "unknown"}
+    assert "mode" not in diagnostic
+    transition = ArtifactTransition(1, "write_range", "mutation", R0, R1)
+    gate.commit_advisory_assessment(prepared, transition)
+    assert gate.current_artifact == R1
+    assert gate.committed_authorizations == ()
+
+
+def test_enforced_chain_rejects_rehashed_strict_noop_reordering() -> None:
+    gate = TargetGroundingStateMachine(R0)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    for _ in range(2):
+        declaration = gate.declare_target(
+            artifact=R0,
+            target_scope=EvidenceScope.one("Sales", "A1"),
+            observation_ids=[observation.observation_id],
+        )
+        prepared = gate.prepare_staged_diff(
+            declaration.declaration_id,
+            _no_op(),
+            staged_artifact=R0,
+        )
+        gate.commit_prepared(prepared, None)
+
+    original = [item.to_dict() for item in gate.committed_authorizations]
+    reordered = [json.loads(json.dumps(original[1])), json.loads(json.dumps(original[0]))]
+    reordered[0]["authorization_id"] = 1
+    reordered[0]["previous_authorization_sha256"] = "0" * 64
+    reordered[0]["authorization_sha256"] = _canonical_digest(
+        reordered[0],
+        "authorization_sha256",
+    )
+    reordered[1]["authorization_id"] = 2
+    reordered[1]["previous_authorization_sha256"] = reordered[0][
+        "authorization_sha256"
+    ]
+    reordered[1]["authorization_sha256"] = _canonical_digest(
+        reordered[1],
+        "authorization_sha256",
+    )
+
+    with pytest.raises(TargetGroundingError, match="strictly increasing"):
+        validate_committed_authorization_chain(
+            reordered,
+            transitions=(),
+            initial_artifact=R0,
+            initial_transition_count=0,
+        )
+
+
+def test_enforced_state_machine_refuses_out_of_order_prepared_commits() -> None:
+    gate = TargetGroundingStateMachine(R0)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    declarations = [
+        gate.declare_target(
+            artifact=R0,
+            target_scope=EvidenceScope.one("Sales", "A1"),
+            observation_ids=[observation.observation_id],
+        )
+        for _ in range(2)
+    ]
+    prepared = [
+        gate.prepare_staged_diff(
+            declaration.declaration_id,
+            _no_op(),
+            staged_artifact=R0,
+        )
+        for declaration in declarations
+    ]
+
+    gate.commit_prepared(prepared[1], None)
+    with pytest.raises(TargetGroundingError, match="committed chronology"):
+        gate.commit_prepared(prepared[0], None)
+    gate.abort_prepared(prepared[0])
+
+    committed = gate.committed_authorizations
+    assert validate_committed_authorization_chain(
+        [item.to_dict() for item in committed],
+        transitions=(),
+        initial_artifact=R0,
+        initial_transition_count=0,
+    ) == committed
+
+
+def test_advisory_chain_rejects_rehash_reordering_and_missing_transition() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    for _ in range(2):
+        declaration = gate.declare_target(
+            artifact=R0,
+            target_scope=EvidenceScope.one("Sales", "A1"),
+            observation_ids=[observation.observation_id],
+        )
+        prepared = gate.prepare_advisory_staged_diff(
+            declaration.declaration_id,
+            _no_op(),
+            staged_artifact=R0,
+        )
+        gate.commit_advisory_assessment(prepared, None)
+
+    original = [item.to_dict() for item in gate.committed_advisory_assessments]
+    reordered = [json.loads(json.dumps(original[1])), json.loads(json.dumps(original[0]))]
+    reordered[0]["commitment_id"] = 1
+    reordered[0]["previous_commitment_sha256"] = "0" * 64
+    reordered[0]["commitment_sha256"] = _canonical_digest(
+        reordered[0],
+        "commitment_sha256",
+    )
+    reordered[1]["commitment_id"] = 2
+    reordered[1]["previous_commitment_sha256"] = reordered[0][
+        "commitment_sha256"
+    ]
+    reordered[1]["commitment_sha256"] = _canonical_digest(
+        reordered[1],
+        "commitment_sha256",
+    )
+    with pytest.raises(TargetGroundingError):
+        validate_committed_advisory_assessment_chain(
+            reordered,
+            **_advisory_lifecycle_kwargs(gate),
+            transitions=(),
+            initial_artifact=R0,
+            initial_transition_count=0,
+        )
+
+    transition_gate = TargetGroundingStateMachine(
+        R0,
+        mode=TargetGroundingMode.ADVISORY,
+    )
+    prepared = transition_gate.prepare_advisory_staged_diff(
+        None,
+        _changed(EvidenceScope.one("Sales", "A1")),
+        staged_artifact=R1,
+    )
+    transition = ArtifactTransition(1, "write_range", "mutation", R0, R1)
+    transition_gate.commit_advisory_assessment(prepared, transition)
+    with pytest.raises(TargetGroundingError):
+        validate_committed_advisory_assessment_chain(
+            [],
+            **_advisory_lifecycle_kwargs(transition_gate),
+            transitions=(transition,),
+            initial_artifact=R0,
+            initial_transition_count=0,
+        )
+
+
+def test_advisory_state_machine_refuses_out_of_order_prepared_commits() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    declarations = [
+        gate.declare_target(
+            artifact=R0,
+            target_scope=EvidenceScope.one("Sales", "A1"),
+            observation_ids=[observation.observation_id],
+        )
+        for _ in range(2)
+    ]
+    prepared = [
+        gate.prepare_advisory_staged_diff(
+            declaration.declaration_id,
+            _no_op(),
+            staged_artifact=R0,
+        )
+        for declaration in declarations
+    ]
+
+    gate.commit_advisory_assessment(prepared[1], None)
+    with pytest.raises(TargetGroundingError, match="committed chronology"):
+        gate.commit_advisory_assessment(prepared[0], None)
+    gate.abort_prepared_advisory_assessment(prepared[0])
+
+    committed = gate.committed_advisory_assessments
+    assert validate_committed_advisory_assessment_chain(
+        [item.to_dict() for item in committed],
+        **_advisory_lifecycle_kwargs(gate),
+        transitions=(),
+        initial_artifact=R0,
+        initial_transition_count=0,
+    ) == committed
+
+
+def test_advisory_parser_rejects_rehashed_assurance_tampering() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    prepared = gate.prepare_advisory_staged_diff(
+        None,
+        _no_op(),
+        staged_artifact=R0,
+    )
+    committed = gate.preview_committed_advisory_assessment(prepared, None).to_dict()
+    assessment = committed["assessment"]
+    assessment["assurance"]["authorized_publication"] = True
+    assessment["assessment_sha256"] = _canonical_digest(
+        assessment,
+        "assessment_sha256",
+    )
+    committed["commitment_sha256"] = _canonical_digest(
+        committed,
+        "commitment_sha256",
+    )
+
+    with pytest.raises(TargetGroundingError, match="digest or fields"):
+        committed_advisory_assessment_from_dict(committed)
+
+
+def test_advisory_chain_rejects_rehashed_current_declaration_on_stale_bytes() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    declaration = gate.declare_target(
+        artifact=R0,
+        target_scope=EvidenceScope.one("Sales", "A1"),
+        observation_ids=[observation.observation_id],
+    )
+    prepared = gate.prepare_advisory_staged_diff(
+        declaration.declaration_id,
+        _no_op(),
+        staged_artifact=R0,
+    )
+    committed = gate.preview_committed_advisory_assessment(prepared, None).to_dict()
+    assessment = committed["assessment"]
+    stale_artifact = R1.to_dict()
+    assessment["declaration"]["artifact"] = stale_artifact
+    assessment["observations"][0]["artifact"] = stale_artifact
+    provenance = assessment["provenance"]
+    provenance["declaration"]["artifact"] = stale_artifact
+    provenance["observations"][0]["artifact"] = stale_artifact
+    provenance["provenance_sha256"] = _canonical_digest(
+        provenance,
+        "provenance_sha256",
+    )
+    assessment["assessment_sha256"] = _canonical_digest(
+        assessment,
+        "assessment_sha256",
+    )
+    committed["commitment_sha256"] = _canonical_digest(
+        committed,
+        "commitment_sha256",
+    )
+
+    with pytest.raises(TargetGroundingError):
+        validate_committed_advisory_assessment_chain(
+            [committed],
+            **_advisory_lifecycle_kwargs(gate),
+            transitions=(),
+            initial_artifact=R0,
+            initial_transition_count=0,
+        )
+
+
+def test_advisory_chain_rejects_rehashed_inconsistent_unavailable_footprint() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    prepared = gate.prepare_advisory_staged_diff(
+        None,
+        _no_op(),
+        staged_artifact=R0,
+    )
+    committed = gate.preview_committed_advisory_assessment(prepared, None).to_dict()
+    assessment = committed["assessment"]
+    footprint = assessment["staged_footprint"]
+    footprint.update(
+        {
+            "effects": [EffectKind.VALUE.value],
+            "scope": EvidenceScope.one("Sales", "A1").to_dict(),
+            "changed_cell_count": 1,
+            "scanned_cell_count": 1,
+        }
+    )
+    assessment["assessment_sha256"] = _canonical_digest(
+        assessment,
+        "assessment_sha256",
+    )
+    committed["commitment_sha256"] = _canonical_digest(
+        committed,
+        "commitment_sha256",
+    )
+
+    with pytest.raises(TargetGroundingError):
+        validate_committed_advisory_assessment_chain(
+            [committed],
+            **_advisory_lifecycle_kwargs(gate),
+            transitions=(),
+            initial_artifact=R0,
+            initial_transition_count=0,
+        )
+
+
+@pytest.mark.parametrize("declaration_id", [None, 0, 99])
+@pytest.mark.parametrize(
+    ("diff", "error"),
+    [
+        (
+            WorkbookEffectDiff(
+                semantic_changed=False,
+                complete=True,
+                effects=frozenset({EffectKind.VALUE}),
+                scope=EvidenceScope.one("Sales", "A1"),
+                formula_scope=EvidenceScope(),
+                changed_cell_count=1,
+                scanned_cell_count=1,
+            ),
+            "internally inconsistent",
+        ),
+        (
+            _changed(EvidenceScope.one("Sales", "A1")),
+            "cannot preserve exact artifact bytes",
+        ),
+    ],
+)
+def test_advisory_live_producer_rejects_nonreplayable_unavailable_footprint(
+    declaration_id: int | None,
+    diff: WorkbookEffectDiff,
+    error: str,
+) -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+
+    with pytest.raises(TargetGroundingError, match=error):
+        gate.prepare_advisory_staged_diff(
+            declaration_id,
+            diff,
+            staged_artifact=R0,
+        )
+
+    assert gate.committed_advisory_assessments == ()
+
+
+def test_advisory_valid_invalid_footprint_commit_freshly_replays() -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    declaration = gate.declare_target(
+        artifact=R0,
+        target_scope=EvidenceScope.one("Sales", "A1"),
+        observation_ids=[observation.observation_id],
+    )
+    invalid = WorkbookEffectDiff(
+        semantic_changed=True,
+        complete=True,
+        effects=frozenset({EffectKind.VALUE}),
+        scope=EvidenceScope.one("Sales", "A1"),
+        formula_scope=EvidenceScope(),
+        changed_cell_count=2,
+        scanned_cell_count=1,
+    )
+    prepared = gate.prepare_advisory_staged_diff(
+        declaration.declaration_id,
+        invalid,
+        staged_artifact=R1,
+    )
+    transition = ArtifactTransition(1, "write_range", "mutation", R0, R1)
+    gate.commit_advisory_assessment(prepared, transition)
+
+    assert prepared.assessment.decision is GroundingDecision.INVALID_FOOTPRINT
+    assert validate_committed_advisory_assessment_chain(
+        [item.to_dict() for item in gate.committed_advisory_assessments],
+        **_advisory_lifecycle_kwargs(gate),
+        transitions=(transition,),
+        initial_artifact=R0,
+        initial_transition_count=0,
+    ) == gate.committed_advisory_assessments
+
+
+@pytest.mark.parametrize("stale_artifact", [R0_OTHER_BYTES, R2])
+def test_advisory_chain_rejects_rehashed_stale_declaration_outside_prior_lineage(
+    stale_artifact: ArtifactRef,
+) -> None:
+    gate = TargetGroundingStateMachine(R0, mode=TargetGroundingMode.ADVISORY)
+    observation = gate.record_trusted_observation(
+        artifact=R0,
+        scope=EvidenceScope.one("Sales", "A1"),
+    )
+    declaration = gate.declare_target(
+        artifact=R0,
+        target_scope=EvidenceScope.one("Sales", "A1"),
+        observation_ids=[observation.observation_id],
+    )
+    transition = ArtifactTransition(1, "recalculate", "recalculation", R0, R1)
+    gate.record_artifact_transition(transition)
+    prepared = gate.prepare_advisory_staged_diff(
+        declaration.declaration_id,
+        _no_op(),
+        staged_artifact=R1,
+    )
+    committed = gate.preview_committed_advisory_assessment(prepared, None).to_dict()
+    assessment = committed["assessment"]
+    replacement = stale_artifact.to_dict()
+    assessment["declaration"]["artifact"] = replacement
+    assessment["observations"][0]["artifact"] = replacement
+    provenance = assessment["provenance"]
+    provenance["declaration"]["artifact"] = replacement
+    provenance["observations"][0]["artifact"] = replacement
+    provenance["provenance_sha256"] = _canonical_digest(
+        provenance,
+        "provenance_sha256",
+    )
+    assessment["assessment_sha256"] = _canonical_digest(
+        assessment,
+        "assessment_sha256",
+    )
+    committed["commitment_sha256"] = _canonical_digest(
+        committed,
+        "commitment_sha256",
+    )
+
+    with pytest.raises(TargetGroundingError):
+        validate_committed_advisory_assessment_chain(
+            [committed],
+            **_advisory_lifecycle_kwargs(gate),
+            transitions=(transition,),
+            initial_artifact=R0,
+            initial_transition_count=0,
+        )
+
+
+def test_advisory_and_enforce_replay_diagnostics_are_mode_neutral() -> None:
+    gates = {
+        mode: TargetGroundingStateMachine(R0, mode=mode)
+        for mode in (TargetGroundingMode.ADVISORY, TargetGroundingMode.ENFORCE)
+    }
+    declaration_ids: dict[TargetGroundingMode, int] = {}
+    for mode, gate in gates.items():
+        observation = gate.record_trusted_observation(
+            artifact=R0,
+            scope=EvidenceScope.one("Sales", "A1"),
+        )
+        declaration = gate.declare_target(
+            artifact=R0,
+            target_scope=EvidenceScope.one("Sales", "A1"),
+            observation_ids=[observation.observation_id],
+        )
+        declaration_ids[mode] = declaration.declaration_id
+        if mode is TargetGroundingMode.ADVISORY:
+            prepared = gate.prepare_advisory_staged_diff(
+                declaration.declaration_id,
+                _no_op(),
+                staged_artifact=R0,
+            )
+            gate.commit_advisory_assessment(prepared, None)
+        else:
+            prepared = gate.prepare_staged_diff(
+                declaration.declaration_id,
+                _no_op(),
+                staged_artifact=R0,
+            )
+            gate.commit_prepared(prepared, None)
+
+    advisory_replay = gates[
+        TargetGroundingMode.ADVISORY
+    ].prepare_advisory_staged_diff(
+        declaration_ids[TargetGroundingMode.ADVISORY],
+        _no_op(),
+        staged_artifact=R0,
+    )
+    with pytest.raises(TargetGroundingRejected) as enforced_replay:
+        gates[TargetGroundingMode.ENFORCE].prepare_staged_diff(
+            declaration_ids[TargetGroundingMode.ENFORCE],
+            _no_op(),
+            staged_artifact=R0,
+        )
+
+    assert (
+        advisory_replay.assessment.model_diagnostic()
+        == enforced_replay.value.model_diagnostic
+    )
+    assert (
+        advisory_replay.assessment.model_diagnostic()["decision"]
+        == "rejected.replayed_declaration"
+    )

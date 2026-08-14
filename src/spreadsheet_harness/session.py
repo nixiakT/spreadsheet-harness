@@ -31,11 +31,16 @@ from .completion_attempt import CompletionAttemptLedger, CompletionAttemptRecord
 from .errors import ToolInputError, WorkbookValidationError
 from .evidence_contract import ArtifactRef, ArtifactTransition, EvidenceScope
 from .target_grounding import (
+    AdvisoryLifecycleEvent,
+    CommittedAdvisoryTargetAssessment,
     CommittedTargetAuthorization,
+    PreparedAdvisoryTargetAssessment,
     PreparedTargetAuthorization,
     TargetGroundingError,
+    TargetGroundingMode,
     TargetGroundingRejected,
     TargetGroundingStateMachine,
+    is_target_grounding_protected_transition_kind,
 )
 from .trajectory import TrajectoryRecorder
 from .workbook_diff import WorkbookEffectDiff, diff_workbooks
@@ -240,6 +245,7 @@ class WorkbookSession:
         self._artifact_transitions: list[ArtifactTransition] = []
         self._completion_attempt_ledger: CompletionAttemptLedger | None = None
         self._target_grounding: TargetGroundingStateMachine | None = None
+        self._target_grounding_mode = TargetGroundingMode.OFF
         self._target_grounding_initial_artifact: ArtifactRef | None = None
         self._target_grounding_initial_transition_count: int | None = None
         self.recorder = TrajectoryRecorder(
@@ -364,8 +370,28 @@ class WorkbookSession:
 
     @property
     def target_grounding_enabled(self) -> bool:
+        """Compatibility alias for :attr:`target_grounding_enforced`."""
+
+        return self.target_grounding_enforced
+
+    @property
+    def target_grounding_enforced(self) -> bool:
+        """Whether target assessment can reject a staged publication."""
+
+        with self._write_lock:
+            return self._target_grounding_mode is TargetGroundingMode.ENFORCE
+
+    @property
+    def target_grounding_active(self) -> bool:
+        """Whether either advisory observation or enforcement is active."""
+
         with self._write_lock:
             return self._target_grounding is not None
+
+    @property
+    def target_grounding_mode(self) -> TargetGroundingMode:
+        with self._write_lock:
+            return self._target_grounding_mode
 
     @property
     def target_grounding_initial_artifact(self) -> ArtifactRef | None:
@@ -386,22 +412,70 @@ class WorkbookSession:
                 return ()
             return self._target_grounding.committed_authorizations
 
-    def enable_target_grounding(self) -> None:
+    @property
+    def committed_advisory_target_assessments(
+        self,
+    ) -> tuple[CommittedAdvisoryTargetAssessment, ...]:
+        with self._write_lock:
+            if self._target_grounding is None:
+                return ()
+            return self._target_grounding.committed_advisory_assessments
+
+    @property
+    def advisory_target_lifecycle_events(self) -> tuple[AdvisoryLifecycleEvent, ...]:
+        with self._write_lock:
+            if self._target_grounding is None:
+                return ()
+            return self._target_grounding.advisory_lifecycle_events
+
+    @property
+    def advisory_target_lifecycle_genesis_sha256(self) -> str | None:
+        with self._write_lock:
+            if self._target_grounding is None:
+                return None
+            return self._target_grounding.advisory_lifecycle_genesis_sha256
+
+    @property
+    def advisory_target_lifecycle_final_counters(self) -> dict[str, int] | None:
+        with self._write_lock:
+            if self._target_grounding is None:
+                return None
+            return dict(self._target_grounding.advisory_lifecycle_final_counters)
+
+    def enable_target_grounding(
+        self,
+        mode: TargetGroundingMode = TargetGroundingMode.ENFORCE,
+    ) -> None:
+        if not isinstance(mode, TargetGroundingMode):
+            raise TypeError("mode must be a TargetGroundingMode")
+        if mode is TargetGroundingMode.OFF:
+            raise ValueError("use the default session state to keep target grounding off")
         with self._write_lock:
             self._assert_artifact_sync_locked()
             if self._target_grounding is None:
-                gate = TargetGroundingStateMachine(self._artifact)
                 transition_count = len(self._artifact_transitions)
+                gate = TargetGroundingStateMachine(
+                    self._artifact,
+                    mode=mode,
+                    initial_transition_count=transition_count,
+                )
                 self.recorder.record(
                     "target_grounding.enabled",
                     {
+                        "mode": mode.value,
+                        "decision": "enabled",
                         "artifact": self._artifact.to_dict(),
                         "initial_transition_count": transition_count,
                     },
                 )
                 self._target_grounding = gate
+                self._target_grounding_mode = mode
                 self._target_grounding_initial_artifact = self._artifact
                 self._target_grounding_initial_transition_count = transition_count
+            elif self._target_grounding.mode is not mode:
+                raise WorkbookValidationError(
+                    "Target-grounding mode cannot change after its ledger is initialized"
+                )
             elif self._target_grounding.current_artifact != self._artifact:
                 raise WorkbookValidationError(
                     "Target-grounding ledger is not synchronized with the managed artifact"
@@ -422,7 +496,14 @@ class WorkbookSession:
                 scope=scope,
             )
             document = observation.to_dict()
-            self.recorder.record("target_grounding.observation", document)
+            self.recorder.record(
+                "target_grounding.observation",
+                {
+                    **document,
+                    "mode": self._target_grounding_mode.value,
+                    "decision": "recorded",
+                },
+            )
             return document
 
     def declare_edit_target(
@@ -441,7 +522,14 @@ class WorkbookSession:
                 observation_ids=observation_ids,
             )
             document = declaration.to_dict()
-            self.recorder.record("target_grounding.declaration", document)
+            self.recorder.record(
+                "target_grounding.declaration",
+                {
+                    **document,
+                    "mode": self._target_grounding_mode.value,
+                    "decision": "recorded",
+                },
+            )
             return document
 
     def _planned_transition_locked(
@@ -474,7 +562,9 @@ class WorkbookSession:
         kind: str,
         before_sha256: str,
         after_sha256: str,
-        target_prepared: PreparedTargetAuthorization | None = None,
+        target_prepared: (
+            PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment | None
+        ) = None,
     ) -> ArtifactTransition | None:
         transition = self._planned_transition_locked(
             operation=operation,
@@ -491,15 +581,22 @@ class WorkbookSession:
                 )
         gate = self._target_grounding
         committed_authorization: CommittedTargetAuthorization | None = None
+        committed_advisory: CommittedAdvisoryTargetAssessment | None = None
         if gate is not None:
-            if target_prepared is not None:
+            protected_transition = is_target_grounding_protected_transition_kind(kind)
+            if protected_transition is not (target_prepared is not None):
+                raise WorkbookValidationError(
+                    "Protected artifact publications require exactly one target assessment"
+                )
+            if isinstance(target_prepared, PreparedTargetAuthorization):
                 committed_authorization = gate.preview_committed_authorization(
                     target_prepared,
                     transition,
                 )
-            elif kind in {"mutation", "undo", "external_mutation"}:
-                raise WorkbookValidationError(
-                    "Target grounding requires a prepared authorization before publication"
+            elif isinstance(target_prepared, PreparedAdvisoryTargetAssessment):
+                committed_advisory = gate.preview_committed_advisory_assessment(
+                    target_prepared,
+                    transition,
                 )
         if transition is not None:
             # Persist the ledger entry before advancing in-memory lineage. If the
@@ -510,20 +607,65 @@ class WorkbookSession:
                 transition_document["target_grounding_commit_json"] = (
                     committed_authorization.canonical_json()
                 )
+                transition_document.update(
+                    {
+                        "target_grounding_mode": TargetGroundingMode.ENFORCE.value,
+                        "target_grounding_decision": (
+                            committed_authorization.provenance.decision.value
+                        ),
+                    }
+                )
+            elif committed_advisory is not None:
+                transition_document.update(
+                    {
+                        "target_grounding_advisory_commit_json": (
+                            committed_advisory.canonical_json()
+                        ),
+                        "target_grounding_mode": TargetGroundingMode.ADVISORY.value,
+                        "target_grounding_decision": (
+                            "published_after_advisory_assessment"
+                        ),
+                        "target_grounding_would_reject": (
+                            committed_advisory.assessment.would_reject
+                        ),
+                    }
+                )
             self.recorder.record("artifact.transition", transition_document)
             self._artifact = transition.after
             self._artifact_transitions.append(transition)
         elif committed_authorization is not None:
             self.recorder.record(
                 "target_grounding.authorization.committed",
-                {"target_grounding_commit_json": committed_authorization.canonical_json()},
+                {
+                    "mode": TargetGroundingMode.ENFORCE.value,
+                    "decision": committed_authorization.provenance.decision.value,
+                    "target_grounding_commit_json": committed_authorization.canonical_json(),
+                },
+            )
+        elif committed_advisory is not None:
+            self.recorder.record(
+                "target_grounding.advisory_assessment.committed",
+                {
+                    "mode": TargetGroundingMode.ADVISORY.value,
+                    "decision": "published_after_advisory_assessment",
+                    "would_reject": committed_advisory.assessment.would_reject,
+                    "target_grounding_advisory_commit_json": (
+                        committed_advisory.canonical_json()
+                    ),
+                },
             )
         if gate is not None:
-            if target_prepared is not None:
+            if isinstance(target_prepared, PreparedTargetAuthorization):
                 gate.commit_prepared(
                     target_prepared,
                     transition,
                     committed_authorization=committed_authorization,
+                )
+            elif isinstance(target_prepared, PreparedAdvisoryTargetAssessment):
+                gate.commit_advisory_assessment(
+                    target_prepared,
+                    transition,
+                    committed_assessment=committed_advisory,
                 )
             elif transition is not None:
                 gate.record_artifact_transition(transition)
@@ -537,6 +679,7 @@ class WorkbookSession:
         *,
         operation: str,
         kind: str = "external_mutation",
+        declaration_id: int | None = None,
     ) -> ArtifactTransition | None:
         """Register bytes written by a sandboxed tool that bypasses session helpers."""
 
@@ -545,14 +688,49 @@ class WorkbookSession:
                 raise WorkbookValidationError(
                     "External mutation source does not match the managed artifact revision"
                 )
+            target_prepared: (
+                PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment | None
+            ) = None
             try:
                 self._validate(self.workbook_path)
                 after_sha256 = _sha256(self.workbook_path)
+                if self._target_grounding is not None and (
+                    is_target_grounding_protected_transition_kind(kind)
+                ):
+                    if hashlib.sha256(self._artifact_bytes).hexdigest() != before.sha256:
+                        raise WorkbookValidationError(
+                            "Cached source bytes do not match the external mutation source"
+                        )
+                    with tempfile.TemporaryDirectory(
+                        prefix="sheet-grounding-reconcile-"
+                    ) as raw_root:
+                        cached_before = Path(raw_root) / f"before{self.workbook_path.suffix}"
+                        cached_before.write_bytes(self._artifact_bytes)
+                        workbook_diff = diff_workbooks(
+                            cached_before,
+                            self.workbook_path,
+                        )
+                    target_prepared = self._prepare_target_authorization_locked(
+                        declaration_id=declaration_id,
+                        diff=workbook_diff,
+                        after_sha256=after_sha256,
+                    )
+                    planned_transition = self._planned_transition_locked(
+                        operation=operation,
+                        kind=kind,
+                        before_sha256=before.sha256,
+                        after_sha256=after_sha256,
+                    )
+                    self._validate_prepared_target_transition_locked(
+                        target_prepared,
+                        planned_transition,
+                    )
                 return self._publish_artifact_locked(
                     operation=operation,
                     kind=kind,
                     before_sha256=before.sha256,
                     after_sha256=after_sha256,
+                    target_prepared=target_prepared,
                 )
             except Exception:
                 if self._artifact == before:
@@ -562,6 +740,11 @@ class WorkbookSession:
                         observed_sha256 = None
                     if observed_sha256 != before.sha256:
                         self._restore_cached_artifact_locked()
+                    if target_prepared is not None:
+                        try:
+                            self._abort_prepared_target_locked(target_prepared)
+                        except TargetGroundingError:
+                            pass
                 raise
 
     def run_staged_external_mutation(
@@ -584,7 +767,9 @@ class WorkbookSession:
                 / f"{self._snapshot_counter:04d}_{operation}{self.workbook_path.suffix}"
             )
             shutil.copy2(self.workbook_path, snapshot)
-            target_prepared: PreparedTargetAuthorization | None = None
+            target_prepared: (
+                PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment | None
+            ) = None
             keep_snapshot = False
             self.recorder.record(
                 "workbook.mutation.started",
@@ -686,7 +871,12 @@ class WorkbookSession:
                         )
                         self.recorder.record(
                             "target_grounding.rejected",
-                            {"operation": operation, "result": rejection},
+                            {
+                                "mode": TargetGroundingMode.ENFORCE.value,
+                                "decision": rejected.decision.value,
+                                "operation": operation,
+                                "result": rejection,
+                            },
                         )
                         return rejection
 
@@ -706,7 +896,7 @@ class WorkbookSession:
                             before_sha256=artifact_before.sha256,
                             after_sha256=after_sha256,
                         )
-                        self._target_grounding.validate_prepared_transition(
+                        self._validate_prepared_target_transition_locked(
                             target_prepared,
                             planned_transition,
                         )
@@ -734,8 +924,10 @@ class WorkbookSession:
                             transition.transition_id if transition is not None else None
                         ),
                         "workbook_effects": workbook_diff.to_dict(),
-                        "target_grounding": target_prepared.record.to_dict(),
                     }
+                    target_diagnostic = self._target_model_diagnostic(target_prepared)
+                    if target_diagnostic is not None:
+                        published["target_grounding"] = target_diagnostic
                     self.recorder.record(
                         "workbook.mutation.committed",
                         {
@@ -751,7 +943,7 @@ class WorkbookSession:
                         self._restore_managed_artifact_locked(snapshot)
                     if target_prepared is not None:
                         try:
-                            self._target_grounding.abort_prepared(target_prepared)
+                            self._abort_prepared_target_locked(target_prepared)
                         except TargetGroundingError:
                             pass
                 try:
@@ -855,23 +1047,58 @@ class WorkbookSession:
         declaration_id: int | None,
         diff: WorkbookEffectDiff,
         after_sha256: str,
-    ) -> PreparedTargetAuthorization | None:
+    ) -> PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment | None:
         gate = self._target_grounding
         if gate is None:
             return None
-        if type(declaration_id) is not int or declaration_id < 1:
-            raise TargetGroundingError(
-                "a positive declaration_id is required for every grounded mutation"
-            )
         staged_artifact = ArtifactRef(
             self._artifact.revision + int(after_sha256 != self._artifact.sha256),
             after_sha256,
         )
+        if gate.mode is TargetGroundingMode.ADVISORY:
+            return gate.prepare_advisory_staged_diff(
+                declaration_id,
+                diff,
+                staged_artifact=staged_artifact,
+            )
         return gate.prepare_staged_diff(
             declaration_id,
             diff,
             staged_artifact=staged_artifact,
         )
+
+    def _validate_prepared_target_transition_locked(
+        self,
+        prepared: PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment,
+        transition: ArtifactTransition | None,
+    ) -> None:
+        gate = self._target_grounding
+        if gate is None:
+            raise TargetGroundingError("target grounding is not enabled")
+        if isinstance(prepared, PreparedTargetAuthorization):
+            gate.validate_prepared_transition(prepared, transition)
+        else:
+            gate.validate_prepared_advisory_transition(prepared, transition)
+
+    def _abort_prepared_target_locked(
+        self,
+        prepared: PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment,
+    ) -> None:
+        gate = self._target_grounding
+        if gate is None:
+            raise TargetGroundingError("target grounding is not enabled")
+        if isinstance(prepared, PreparedTargetAuthorization):
+            gate.abort_prepared(prepared)
+        else:
+            gate.abort_prepared_advisory_assessment(prepared)
+
+    @staticmethod
+    def _target_model_diagnostic(
+        prepared: PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment,
+    ) -> dict[str, Any] | None:
+        if isinstance(prepared, PreparedTargetAuthorization):
+            return prepared.record.model_diagnostic()
+        return prepared.assessment.model_diagnostic()
 
     def _target_rejection_result_locked(
         self,
@@ -884,7 +1111,11 @@ class WorkbookSession:
         return {
             "ok": False,
             "error": str(rejected),
-            "type": type(rejected).__name__,
+            "type": (
+                type(rejected).__name__
+                if rejected.model_diagnostic.get("declaration_status") == "valid"
+                else TargetGroundingError.__name__
+            ),
             "workbook_sha256_before": artifact_before.sha256,
             "workbook_sha256_rejected": rejected_sha256,
             "workbook_sha256_after": artifact_before.sha256,
@@ -895,7 +1126,7 @@ class WorkbookSession:
             "artifact_revision_after": artifact_before.revision,
             "artifact_transition_id": None,
             "workbook_effects": diff.to_dict(),
-            "target_grounding": rejected.record.to_dict(),
+            "target_grounding": rejected.model_diagnostic,
             "message": (
                 "The staged edit was rejected before publication; inspect the exact target, "
                 "declare a newly grounded finite scope, and retry."
@@ -928,7 +1159,9 @@ class WorkbookSession:
                 {"operation": operation, "arguments": arguments, "snapshot": snapshot},
             )
             workbook = None
-            target_prepared: PreparedTargetAuthorization | None = None
+            target_prepared: (
+                PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment | None
+            ) = None
             keep_snapshot = False
             try:
                 workbook = self._load(data_only=False)
@@ -976,6 +1209,8 @@ class WorkbookSession:
                     self.recorder.record(
                         "target_grounding.rejected",
                         {
+                            "mode": TargetGroundingMode.ENFORCE.value,
+                            "decision": rejected.decision.value,
                             "operation": operation,
                             "result": rejection,
                         },
@@ -988,7 +1223,7 @@ class WorkbookSession:
                     after_sha256=after_sha256,
                 )
                 if self._target_grounding is not None and target_prepared is not None:
-                    self._target_grounding.validate_prepared_transition(
+                    self._validate_prepared_target_transition_locked(
                         target_prepared,
                         planned_transition,
                     )
@@ -1021,7 +1256,9 @@ class WorkbookSession:
                         ),
                     }
                     if target_prepared is not None:
-                        result["target_grounding"] = target_prepared.record.to_dict()
+                        target_diagnostic = self._target_model_diagnostic(target_prepared)
+                        if target_diagnostic is not None:
+                            result["target_grounding"] = target_diagnostic
                 self.recorder.record(
                     "workbook.mutation.committed",
                     {"operation": operation, "snapshot": snapshot, "result": result},
@@ -1034,7 +1271,7 @@ class WorkbookSession:
                         self._restore_managed_artifact_locked(snapshot)
                     if target_prepared is not None and self._target_grounding is not None:
                         try:
-                            self._target_grounding.abort_prepared(target_prepared)
+                            self._abort_prepared_target_locked(target_prepared)
                         except TargetGroundingError:
                             pass
                 try:
@@ -1591,7 +1828,9 @@ class WorkbookSession:
             )
             shutil.copy2(snapshot, temporary)
             shutil.copy2(self.workbook_path, recovery)
-            target_prepared: PreparedTargetAuthorization | None = None
+            target_prepared: (
+                PreparedTargetAuthorization | PreparedAdvisoryTargetAssessment | None
+            ) = None
             try:
                 self._validate(temporary)
                 after_sha256 = _sha256(temporary)
@@ -1611,7 +1850,12 @@ class WorkbookSession:
                     )
                     self.recorder.record(
                         "target_grounding.rejected",
-                        {"operation": "undo_last", "result": rejection},
+                        {
+                            "mode": TargetGroundingMode.ENFORCE.value,
+                            "decision": rejected.decision.value,
+                            "operation": "undo_last",
+                            "result": rejection,
+                        },
                     )
                     return rejection
                 planned_transition = self._planned_transition_locked(
@@ -1621,7 +1865,7 @@ class WorkbookSession:
                     after_sha256=after_sha256,
                 )
                 if self._target_grounding is not None and target_prepared is not None:
-                    self._target_grounding.validate_prepared_transition(
+                    self._validate_prepared_target_transition_locked(
                         target_prepared,
                         planned_transition,
                     )
@@ -1649,7 +1893,9 @@ class WorkbookSession:
                     "workbook_effects": workbook_diff.to_dict(),
                 }
                 if target_prepared is not None:
-                    result["target_grounding"] = target_prepared.record.to_dict()
+                    target_diagnostic = self._target_model_diagnostic(target_prepared)
+                    if target_diagnostic is not None:
+                        result["target_grounding"] = target_diagnostic
                 return result
             except Exception:
                 if self._artifact == artifact_before:
@@ -1657,7 +1903,7 @@ class WorkbookSession:
                         self._restore_managed_artifact_locked(recovery)
                     if target_prepared is not None and self._target_grounding is not None:
                         try:
-                            self._target_grounding.abort_prepared(target_prepared)
+                            self._abort_prepared_target_locked(target_prepared)
                         except TargetGroundingError:
                             pass
                 raise

@@ -2477,17 +2477,21 @@ class SpreadsheetAgent:
                 "satisfy an obligation. Use the named next_required_event and exact required "
                 "scope; prose or code stdout claiming verification is not evidence."
             )
-        if getattr(self.tools, "target_grounding_enabled", False):
+        if getattr(
+            self.tools,
+            "target_grounding_active",
+            getattr(self.tools, "target_grounding_enabled", False),
+        ):
             instructions += (
-                "\nPre-edit target grounding is enforced. Before every mutation, first call "
+                "\nPre-edit target grounding is active. Before every mutation, first call "
                 "inspect_range on the exact finite cells you may change, then call "
                 "declare_edit_target citing the returned observation_id values, and pass its "
                 "single-use declaration_id to exactly one mutation call. Observations and "
                 "declarations are bound to exact workbook bytes and become stale after any "
                 "artifact transition, including recalculation. The harness computes the actual "
-                "staged footprint; changes outside the declared scope, wildcard effects, "
-                "incomplete diffs, and unknown effects are rejected before publication. After "
-                "a rejection, inspect any needed expansion and issue a new declaration."
+                "staged footprint and reports whether it satisfies the finite declared target. "
+                "When diagnostics report an out-of-scope, wildcard, incomplete, or unknown "
+                "effect, inspect any needed expansion and issue a new declaration."
             )
         return instructions, manifest
 

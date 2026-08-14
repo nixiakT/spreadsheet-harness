@@ -36,13 +36,20 @@ from .evidence_contract import (
     EvidenceScope,
 )
 from .target_grounding import (
+    AdvisoryLifecycleEvent,
+    CommittedAdvisoryTargetAssessment,
     CommittedTargetAuthorization,
     TargetGroundingError,
+    TargetGroundingMode,
+    validate_committed_advisory_assessment_chain,
     validate_committed_authorization_chain,
 )
 
 DELIVERABLE_CERTIFICATE_SCHEMA_VERSION = "spreadsheet-deliverable-certificate-v2"
 TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION = "target-grounding-commit-chain-v1"
+ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION = (
+    "target-grounding-observer-ledger-v2"
+)
 COMPARISON_RESULT_SCHEMA_VERSION = "spreadsheet-comparison-result-v28"
 SCORING_COPY_RELATIVE_PATH = "scoring/output.xlsx"
 FINAL_RENDER_RELATIVE_DIR = "postprocess/final-render"
@@ -99,6 +106,15 @@ class _DeliverableSession(Protocol):
     def target_grounding_enabled(self) -> bool: ...
 
     @property
+    def target_grounding_active(self) -> bool: ...
+
+    @property
+    def target_grounding_enforced(self) -> bool: ...
+
+    @property
+    def target_grounding_mode(self) -> TargetGroundingMode: ...
+
+    @property
     def target_grounding_initial_artifact(self) -> ArtifactRef | None: ...
 
     @property
@@ -108,6 +124,22 @@ class _DeliverableSession(Protocol):
     def committed_target_authorizations(
         self,
     ) -> tuple[CommittedTargetAuthorization, ...]: ...
+
+    @property
+    def committed_advisory_target_assessments(
+        self,
+    ) -> tuple[CommittedAdvisoryTargetAssessment, ...]: ...
+
+    @property
+    def advisory_target_lifecycle_events(
+        self,
+    ) -> tuple[AdvisoryLifecycleEvent, ...]: ...
+
+    @property
+    def advisory_target_lifecycle_genesis_sha256(self) -> str | None: ...
+
+    @property
+    def advisory_target_lifecycle_final_counters(self) -> dict[str, int] | None: ...
 
     def recalculate(self, *, timeout_seconds: float = 120.0) -> dict[str, Any]: ...
 
@@ -1342,8 +1374,107 @@ def _transition_lineage(
 def _target_grounding_commit_chain(
     session: _DeliverableSession,
 ) -> dict[str, Any]:
-    enabled = session.target_grounding_enabled
-    records = session.committed_target_authorizations
+    raw_mode = getattr(session, "target_grounding_mode", None)
+    if isinstance(raw_mode, TargetGroundingMode):
+        mode = raw_mode
+    elif isinstance(raw_mode, str):
+        try:
+            mode = TargetGroundingMode(raw_mode)
+        except ValueError as exc:
+            raise DeliverableValidationError(
+                "Target-grounding session mode is invalid"
+            ) from exc
+    else:
+        mode = (
+            TargetGroundingMode.ENFORCE
+            if bool(getattr(session, "target_grounding_enabled", False))
+            else TargetGroundingMode.OFF
+        )
+    active = bool(
+        getattr(
+            session,
+            "target_grounding_active",
+            mode is not TargetGroundingMode.OFF,
+        )
+    )
+    enforced = bool(
+        getattr(
+            session,
+            "target_grounding_enforced",
+            getattr(session, "target_grounding_enabled", False),
+        )
+    )
+    if active is not (mode is not TargetGroundingMode.OFF) or enforced is not (
+        mode is TargetGroundingMode.ENFORCE
+    ):
+        raise DeliverableValidationError(
+            "Target-grounding session predicates disagree with its mode"
+        )
+
+    authorizations = session.committed_target_authorizations
+    advisory_assessments = tuple(
+        getattr(session, "committed_advisory_target_assessments", ())
+    )
+    if mode is TargetGroundingMode.ADVISORY:
+        if authorizations:
+            raise DeliverableValidationError(
+                "Advisory target grounding cannot expose enforced authorizations"
+            )
+        initial_artifact = session.target_grounding_initial_artifact
+        initial_transition_count = session.target_grounding_initial_transition_count
+        if initial_artifact is None or initial_transition_count is None:
+            raise DeliverableValidationError(
+                "Advisory target grounding is missing its initial lineage binding"
+            )
+        documents = [record.to_dict() for record in advisory_assessments]
+        lifecycle_events = tuple(session.advisory_target_lifecycle_events)
+        lifecycle_documents = [event.to_dict() for event in lifecycle_events]
+        lifecycle_genesis_sha256 = (
+            session.advisory_target_lifecycle_genesis_sha256
+        )
+        lifecycle_final_counters = (
+            session.advisory_target_lifecycle_final_counters
+        )
+        if (
+            not _valid_sha256(lifecycle_genesis_sha256)
+            or not isinstance(lifecycle_final_counters, dict)
+            or lifecycle_final_counters.get("pending_preparation_count") != 0
+        ):
+            raise DeliverableValidationError(
+                "Advisory target-grounding lifecycle is not finalized"
+            )
+        chain_head = (
+            advisory_assessments[-1].canonical_sha256
+            if advisory_assessments
+            else _AUTHORIZATION_CHAIN_GENESIS_SHA256
+        )
+        return {
+            "schema_version": ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION,
+            "mode": TargetGroundingMode.ADVISORY.value,
+            "active": True,
+            "enforced": False,
+            "initial_artifact": initial_artifact.to_dict(),
+            "initial_transition_count": initial_transition_count,
+            "assessment_count": len(advisory_assessments),
+            "assessment_chain_head_sha256": chain_head,
+            "assessments": documents,
+            "lifecycle_replay_complete": True,
+            "lifecycle_genesis_sha256": lifecycle_genesis_sha256,
+            "lifecycle_event_count": len(lifecycle_events),
+            "lifecycle_chain_head_sha256": (
+                lifecycle_events[-1].canonical_sha256
+                if lifecycle_events
+                else lifecycle_genesis_sha256
+            ),
+            "lifecycle_final_counters": lifecycle_final_counters,
+            "lifecycle_events": lifecycle_documents,
+        }
+
+    if advisory_assessments:
+        raise DeliverableValidationError(
+            "Off/enforced target grounding cannot expose advisory assessments"
+        )
+    enabled = mode is TargetGroundingMode.ENFORCE
     if enabled:
         initial_artifact = session.target_grounding_initial_artifact
         initial_transition_count = session.target_grounding_initial_transition_count
@@ -1354,18 +1485,22 @@ def _target_grounding_commit_chain(
     else:
         initial_artifact = None
         initial_transition_count = None
-        if records:
+        if authorizations:
             raise DeliverableValidationError(
                 "Disabled target grounding cannot expose committed authorizations"
             )
-    documents = [record.to_dict() for record in records]
-    chain_head = records[-1].canonical_sha256 if records else _AUTHORIZATION_CHAIN_GENESIS_SHA256
+    documents = [record.to_dict() for record in authorizations]
+    chain_head = (
+        authorizations[-1].canonical_sha256
+        if authorizations
+        else _AUTHORIZATION_CHAIN_GENESIS_SHA256
+    )
     return {
         "schema_version": TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION,
         "enabled": enabled,
         "initial_artifact": (initial_artifact.to_dict() if initial_artifact is not None else None),
         "initial_transition_count": initial_transition_count,
-        "authorization_count": len(records),
+        "authorization_count": len(authorizations),
         "authorization_chain_head_sha256": chain_head,
         "authorizations": documents,
     }
@@ -1376,6 +1511,99 @@ def _audit_target_grounding_commit_chain(
     *,
     transitions: tuple[ArtifactTransition, ...],
 ) -> None:
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version")
+        == ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION
+    ):
+        expected_advisory_fields = {
+            "schema_version",
+            "mode",
+            "active",
+            "enforced",
+            "initial_artifact",
+            "initial_transition_count",
+            "assessment_count",
+            "assessment_chain_head_sha256",
+            "assessments",
+            "lifecycle_replay_complete",
+            "lifecycle_genesis_sha256",
+            "lifecycle_event_count",
+            "lifecycle_chain_head_sha256",
+            "lifecycle_final_counters",
+            "lifecycle_events",
+        }
+        assessments = value.get("assessments")
+        assessment_count = value.get("assessment_count")
+        chain_head = value.get("assessment_chain_head_sha256")
+        lifecycle_events = value.get("lifecycle_events")
+        lifecycle_event_count = value.get("lifecycle_event_count")
+        lifecycle_genesis_sha256 = value.get("lifecycle_genesis_sha256")
+        lifecycle_chain_head_sha256 = value.get("lifecycle_chain_head_sha256")
+        lifecycle_final_counters = value.get("lifecycle_final_counters")
+        if (
+            set(value) != expected_advisory_fields
+            or value.get("mode") != TargetGroundingMode.ADVISORY.value
+            or value.get("active") is not True
+            or value.get("enforced") is not False
+            or not isinstance(assessments, list)
+            or type(assessment_count) is not int
+            or assessment_count != len(assessments)
+            or not _valid_sha256(chain_head)
+            or value.get("lifecycle_replay_complete") is not True
+            or not isinstance(lifecycle_events, list)
+            or type(lifecycle_event_count) is not int
+            or lifecycle_event_count != len(lifecycle_events)
+            or not _valid_sha256(lifecycle_genesis_sha256)
+            or not _valid_sha256(lifecycle_chain_head_sha256)
+            or not isinstance(lifecycle_final_counters, Mapping)
+        ):
+            raise DeliverableValidationError(
+                "Advisory target-grounding certificate is invalid"
+            )
+        initial_artifact = _artifact_ref(
+            value.get("initial_artifact"),
+            label="advisory target-grounding initial artifact",
+        )
+        initial_transition_count = value.get("initial_transition_count")
+        if type(initial_transition_count) is not int:
+            raise DeliverableValidationError(
+                "Advisory target-grounding initial transition count is invalid"
+            )
+        try:
+            records = validate_committed_advisory_assessment_chain(
+                assessments,
+                lifecycle_events=lifecycle_events,
+                lifecycle_genesis_sha256=lifecycle_genesis_sha256,
+                lifecycle_final_counters=lifecycle_final_counters,
+                transitions=transitions,
+                initial_artifact=initial_artifact,
+                initial_transition_count=initial_transition_count,
+            )
+        except (TargetGroundingError, TypeError, ValueError) as exc:
+            raise DeliverableValidationError(
+                "Advisory target-grounding assessments do not replay"
+            ) from exc
+        expected_head = (
+            records[-1].canonical_sha256
+            if records
+            else _AUTHORIZATION_CHAIN_GENESIS_SHA256
+        )
+        if chain_head != expected_head:
+            raise DeliverableValidationError(
+                "Advisory target-grounding chain head does not match"
+            )
+        expected_lifecycle_head = (
+            lifecycle_events[-1].get("event_sha256")
+            if lifecycle_events
+            else lifecycle_genesis_sha256
+        )
+        if lifecycle_chain_head_sha256 != expected_lifecycle_head:
+            raise DeliverableValidationError(
+                "Advisory target-grounding lifecycle head does not match"
+            )
+        return
+
     expected_fields = {
         "schema_version",
         "enabled",
@@ -2080,6 +2308,7 @@ def audit_deliverable_certificate(
 
 
 __all__ = [
+    "ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION",
     "COMPARISON_RESULT_SCHEMA_VERSION",
     "DELIVERABLE_CERTIFICATE_SCHEMA_VERSION",
     "DeliverableAudit",

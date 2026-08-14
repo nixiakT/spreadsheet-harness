@@ -45,6 +45,7 @@ from spreadsheet_harness.evidence_contract import (
     EvidenceScope,
 )
 from spreadsheet_harness.session import WorkbookSession
+from spreadsheet_harness.target_grounding import TargetGroundingMode
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
 
 
@@ -380,6 +381,36 @@ def test_agent_executes_and_replays_tool_call(
     trajectory = session.paths.trajectory.read_text(encoding="utf-8")
     assert "agent.completed" in trajectory
     assert "not-a-real-key" not in trajectory
+
+
+def test_advisory_and_enforce_use_identical_mode_neutral_model_instructions(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+    advisory_session = WorkbookSession.create(sample_workbook, tmp_path / "advisory")
+    enforce_session = WorkbookSession.create(sample_workbook, tmp_path / "enforce")
+    advisory = SpreadsheetAgent(
+        config,
+        SpreadsheetToolRegistry(
+            advisory_session,
+            enable_code=False,
+            target_grounding_mode=TargetGroundingMode.ADVISORY,
+        ),
+    )
+    enforce = SpreadsheetAgent(
+        config,
+        SpreadsheetToolRegistry(
+            enforce_session,
+            enable_code=False,
+            target_grounding_mode=TargetGroundingMode.ENFORCE,
+        ),
+    )
+
+    advisory_instructions, _ = advisory._instructions()
+    enforce_instructions, _ = enforce._instructions()
+    assert advisory_instructions == enforce_instructions
+    assert "target grounding is enforced" not in advisory_instructions.lower()
+    assert "advisory" not in advisory_instructions.lower()
 
 
 def test_agent_rejects_unchanged_workbook_submit(

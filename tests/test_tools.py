@@ -14,12 +14,14 @@ from spreadsheet_harness.evidence_contract import (
     ContractMode,
     ContractSpec,
     ContractStateError,
+    EffectKind,
     EventKind,
     EvidenceEvent,
     EvidenceScope,
     audit_evidence_certificate,
 )
 from spreadsheet_harness.session import WorkbookSession
+from spreadsheet_harness.target_grounding import TargetGroundingMode
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -214,6 +216,301 @@ def test_target_grounding_feature_is_off_by_default_and_preserves_tool_contract(
 
     assert result["ok"] is True
     assert "target_grounding" not in result
+
+
+def test_advisory_and_enforce_expose_identical_model_tool_schemas(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    advisory_session = WorkbookSession.create(sample_workbook, tmp_path / "advisory")
+    enforce_session = WorkbookSession.create(sample_workbook, tmp_path / "enforce")
+    advisory = SpreadsheetToolRegistry(
+        advisory_session,
+        enable_code=False,
+        target_grounding_mode=TargetGroundingMode.ADVISORY,
+    )
+    enforce = SpreadsheetToolRegistry(
+        enforce_session,
+        enable_code=False,
+        target_grounding_mode=TargetGroundingMode.ENFORCE,
+    )
+
+    assert advisory.schemas == enforce.schemas
+    assert advisory.target_grounding_enabled is False
+    assert enforce.target_grounding_enabled is True
+    assert advisory_session.target_grounding_mode is TargetGroundingMode.ADVISORY
+    assert advisory_session.target_grounding_enabled is False
+    assert enforce_session.target_grounding_enabled is True
+
+
+def test_registry_rejects_target_grounding_mode_mismatch_with_reused_session(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    advisory_session = WorkbookSession.create(sample_workbook, tmp_path / "advisory")
+    advisory_session.enable_target_grounding(TargetGroundingMode.ADVISORY)
+
+    with pytest.raises(ValueError, match="conflicts with the active session"):
+        SpreadsheetToolRegistry(advisory_session, enable_code=False)
+    with pytest.raises(ValueError, match="conflicts with the active session"):
+        SpreadsheetToolRegistry(
+            advisory_session,
+            enable_code=False,
+            target_grounding_mode=TargetGroundingMode.ENFORCE,
+        )
+
+    reused = SpreadsheetToolRegistry(
+        advisory_session,
+        enable_code=False,
+        target_grounding_mode=TargetGroundingMode.ADVISORY,
+    )
+    assert reused.target_grounding_active is True
+    assert reused.target_grounding_enforced is False
+
+
+def test_advisory_out_of_scope_edit_publishes_with_mode_neutral_model_diagnostic(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    advisory_session = WorkbookSession.create(sample_workbook, tmp_path / "advisory")
+    enforce_session = WorkbookSession.create(sample_workbook, tmp_path / "enforce")
+    advisory = SpreadsheetToolRegistry(
+        advisory_session,
+        enable_code=False,
+        target_grounding_mode="advisory",
+    )
+    enforce = SpreadsheetToolRegistry(
+        enforce_session,
+        enable_code=False,
+        enable_target_grounding=True,
+    )
+    _, advisory_declaration = _grounded_declaration(
+        advisory,
+        observed_range="B4:C4",
+        target_range="B4",
+    )
+    _, enforce_declaration = _grounded_declaration(
+        enforce,
+        observed_range="B4:C4",
+        target_range="B4",
+    )
+    arguments = {
+        "sheet": "Sales",
+        "start_cell": "B4",
+        "values": [[7, 8]],
+    }
+
+    advisory_result = advisory.invoke(
+        "write_range",
+        {**arguments, "declaration_id": advisory_declaration},
+    ).data
+    enforce_result = enforce.invoke(
+        "write_range",
+        {**arguments, "declaration_id": enforce_declaration},
+    ).data
+
+    assert advisory_result["ok"] is True
+    assert advisory_result["workbook_changed"] is True
+    assert enforce_result["ok"] is False
+    assert enforce_result["mutation_published"] is False
+    assert advisory_result["target_grounding"] == enforce_result["target_grounding"]
+    assert "mode" not in advisory_result["target_grounding"]
+    assert advisory_result["target_grounding"]["decision"] == (
+        "rejected.outside_declared_target"
+    )
+    assert advisory_session.committed_target_authorizations == ()
+    committed = advisory_session.committed_advisory_target_assessments
+    assert len(committed) == 1
+    assert committed[0].assessment.would_reject is True
+    assert committed[0].transition == advisory_session.artifact_transitions[-1]
+    rows = [json.loads(line) for line in advisory_session.paths.trajectory.read_text().splitlines()]
+    transition_payload = next(
+        row["payload"] for row in rows if row["event"] == "artifact.transition"
+    )
+    assert transition_payload["target_grounding_mode"] == "advisory"
+    assert transition_payload["target_grounding_would_reject"] is True
+    assert "target_grounding_commit_json" not in transition_payload
+
+
+def test_advisory_missing_and_stale_declarations_never_block_staged_publication(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        target_grounding_mode=TargetGroundingMode.ADVISORY,
+    )
+    _, stale_declaration = _grounded_declaration(
+        tools,
+        observed_range="B4:C4",
+        target_range="B4",
+    )
+
+    missing = tools.invoke(
+        "write_range",
+        {"sheet": "Sales", "start_cell": "B4", "values": [[7]]},
+    ).data
+    stale = tools.invoke(
+        "write_range",
+        {
+            "sheet": "Sales",
+            "start_cell": "C4",
+            "values": [[8]],
+            "declaration_id": stale_declaration,
+        },
+    ).data
+
+    assert missing["ok"] is True
+    assert stale["ok"] is True
+    assert [item.assessment.decision.value for item in session.committed_advisory_target_assessments] == [
+        "rejected.missing_declaration",
+        "rejected.stale_declaration",
+    ]
+    assert all(
+        item.assessment.would_reject
+        for item in session.committed_advisory_target_assessments
+    )
+    assert len(session.artifact_transitions) == 2
+    assert session.committed_target_authorizations == ()
+
+
+@pytest.mark.parametrize(
+    ("declaration_arguments", "decision"),
+    [
+        ({}, "rejected.missing_declaration"),
+        ({"declaration_id": 0}, "rejected.invalid_declaration"),
+        ({"declaration_id": 999}, "rejected.unknown_declaration"),
+    ],
+)
+def test_advisory_and_enforce_share_unavailable_declaration_diagnostic(
+    sample_workbook: Path,
+    tmp_path: Path,
+    declaration_arguments: dict[str, int],
+    decision: str,
+) -> None:
+    advisory = SpreadsheetToolRegistry(
+        WorkbookSession.create(sample_workbook, tmp_path / "advisory"),
+        enable_code=False,
+        target_grounding_mode=TargetGroundingMode.ADVISORY,
+    )
+    enforce = SpreadsheetToolRegistry(
+        WorkbookSession.create(sample_workbook, tmp_path / "enforce"),
+        enable_code=False,
+        target_grounding_mode=TargetGroundingMode.ENFORCE,
+    )
+    arguments = {
+        "sheet": "Sales",
+        "start_cell": "B4",
+        "values": [[71]],
+        **declaration_arguments,
+    }
+
+    advisory_result = advisory.invoke("write_range", arguments).data
+    enforce_result = enforce.invoke("write_range", arguments).data
+
+    assert advisory_result["ok"] is True
+    assert enforce_result["ok"] is False
+    assert advisory_result["target_grounding"] == enforce_result["target_grounding"]
+    assert advisory_result["target_grounding"]["decision"] == decision
+    assert "mode" not in advisory_result["target_grounding"]
+
+
+def test_advisory_and_enforce_share_stale_declaration_diagnostic(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    registries = [
+        SpreadsheetToolRegistry(
+            WorkbookSession.create(sample_workbook, tmp_path / mode.value),
+            enable_code=False,
+            target_grounding_mode=mode,
+        )
+        for mode in (TargetGroundingMode.ADVISORY, TargetGroundingMode.ENFORCE)
+    ]
+    stale_results = []
+    for tools in registries:
+        observation = tools.invoke(
+            "inspect_range",
+            {"sheet": "Sales", "range_ref": "B4:C4"},
+        ).data
+        declarations = [
+            tools.invoke(
+                "declare_edit_target",
+                {
+                    "targets": [{"sheet": "Sales", "range_ref": "B4"}],
+                    "observation_ids": [observation["observation_id"]],
+                },
+            ).data["declaration_id"]
+            for _ in range(2)
+        ]
+        published = tools.invoke(
+            "write_range",
+            {
+                "sheet": "Sales",
+                "start_cell": "B4",
+                "values": [[72]],
+                "declaration_id": declarations[1],
+            },
+        ).data
+        assert published["ok"] is True
+        stale_results.append(
+            tools.invoke(
+                "write_range",
+                {
+                    "sheet": "Sales",
+                    "start_cell": "B4",
+                    "values": [[73]],
+                    "declaration_id": declarations[0],
+                },
+            ).data
+        )
+
+    advisory_result, enforce_result = stale_results
+    assert advisory_result["ok"] is True
+    assert enforce_result["ok"] is False
+    assert advisory_result["target_grounding"] == enforce_result["target_grounding"]
+    assert (
+        advisory_result["target_grounding"]["decision"]
+        == "rejected.stale_declaration"
+    )
+
+
+def test_advisory_unknown_harness_footprint_is_recorded_but_not_enforced(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spreadsheet_harness.workbook_diff import WorkbookEffectDiff
+
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        target_grounding_mode=TargetGroundingMode.ADVISORY,
+    )
+    _, declaration_id = _grounded_declaration(
+        tools,
+        observed_range="B4",
+        target_range="B4",
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.session.diff_workbooks",
+        lambda *_args, **_kwargs: WorkbookEffectDiff.unknown("forced opaque diff"),
+    )
+
+    result = tools.invoke(
+        "write_range",
+        {
+            "sheet": "Sales",
+            "start_cell": "B4",
+            "values": [[7]],
+            "declaration_id": declaration_id,
+        },
+    ).data
+
+    assert result["ok"] is True
+    assert result["workbook_changed"] is True
+    assert result["target_grounding"]["decision"] == "rejected.unknown_effect"
+    committed = session.committed_advisory_target_assessments[-1]
+    assert committed.assessment.would_reject is True
+    assert committed.assessment.footprint.effects == frozenset({EffectKind.UNKNOWN})
 
 
 def test_grounded_target_schema_and_handler_require_bounded_ranges(

@@ -26,6 +26,7 @@ from .evidence_contract import (
     EvidenceScope,
 )
 from .session import WorkbookSession
+from .target_grounding import TargetGroundingMode
 
 _LATEX_MAX_CELLS = 500
 _LATEX_MAX_CHARS = 65_536
@@ -239,17 +240,63 @@ class SpreadsheetToolRegistry:
         evidence_contract: ContractSpec | None = None,
         contract_mode: ContractMode = ContractMode.SHADOW,
         enable_target_grounding: bool = False,
+        target_grounding_mode: TargetGroundingMode | str | None = None,
     ) -> None:
         self.session = session
-        self.target_grounding_enabled = bool(enable_target_grounding)
-        if self.target_grounding_enabled:
-            self.session.enable_target_grounding()
+        if target_grounding_mode is None:
+            resolved_grounding_mode = (
+                TargetGroundingMode.ENFORCE
+                if bool(enable_target_grounding)
+                else TargetGroundingMode.OFF
+            )
+        else:
+            try:
+                resolved_grounding_mode = TargetGroundingMode(target_grounding_mode)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "target_grounding_mode must be off, advisory, or enforce"
+                ) from exc
+            if bool(enable_target_grounding) and (
+                resolved_grounding_mode is not TargetGroundingMode.ENFORCE
+            ):
+                raise ValueError(
+                    "enable_target_grounding=True is compatible only with enforce mode"
+                )
+        raw_session_mode = getattr(
+            session,
+            "target_grounding_mode",
+            TargetGroundingMode.OFF,
+        )
+        try:
+            session_mode = TargetGroundingMode(raw_session_mode)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("session target-grounding mode is invalid") from exc
+        if session_mode is not TargetGroundingMode.OFF and (
+            session_mode is not resolved_grounding_mode
+        ):
+            raise ValueError(
+                "tool registry target-grounding mode conflicts with the active session"
+            )
+        self.target_grounding_mode = resolved_grounding_mode
+        # Both active treatments expose identical prompts and tool schemas; the
+        # resolved policy determines whether a failed assessment blocks publication.
+        self.target_grounding_active = (
+            resolved_grounding_mode is not TargetGroundingMode.OFF
+        )
+        self.target_grounding_enforced = (
+            resolved_grounding_mode is TargetGroundingMode.ENFORCE
+        )
+        # Keep the legacy boolean aligned with its historical blocking policy;
+        # callers that need tool availability use the explicit active predicate.
+        self.target_grounding_enabled = self.target_grounding_enforced
+        if self.target_grounding_active:
+            self.session.enable_target_grounding(resolved_grounding_mode)
         self._allowed_tools = (
             frozenset(
                 set(allowed_tools)
                 | (
                     TARGET_GROUNDING_CONTROL_TOOLS
-                    if self.target_grounding_enabled
+                    if self.target_grounding_active
                     else set()
                 )
             )
@@ -298,7 +345,7 @@ class SpreadsheetToolRegistry:
         }
         if self.interpreter:
             self._handlers["code_interpreter"] = self._code_interpreter
-        if self.target_grounding_enabled:
+        if self.target_grounding_active:
             self._handlers["declare_edit_target"] = self._declare_edit_target
 
     @property
@@ -502,7 +549,7 @@ class SpreadsheetToolRegistry:
                     ),
                 )
             )
-        if self.target_grounding_enabled:
+        if self.target_grounding_active:
             schemas.append(
                 self._schema(
                     "declare_edit_target",
@@ -1282,7 +1329,7 @@ class SpreadsheetToolRegistry:
             args["range_ref"],
             include_styles=args.get("include_styles", _INSPECT_DEFAULT_INCLUDE_STYLES),
         )
-        if self.target_grounding_enabled:
+        if self.target_grounding_active:
             observation = self.session.record_target_observation(
                 artifact=ArtifactRef(
                     int(result["artifact_revision"]),
@@ -1313,7 +1360,7 @@ class SpreadsheetToolRegistry:
                 "declaration": declaration,
                 "message": (
                     "The declaration is bound to the current workbook bytes and will be "
-                    "consumed by exactly one staged authorization attempt."
+                    "consumed by exactly one staged target assessment."
                 ),
             }
         )
@@ -1679,7 +1726,7 @@ class SpreadsheetToolRegistry:
     def _code_interpreter(self, args: dict[str, Any]) -> ToolOutcome:
         if not self.interpreter:
             raise ToolInputError("code_interpreter is disabled")
-        if self.target_grounding_enabled:
+        if self.target_grounding_active:
             result = self.session.run_staged_external_mutation(
                 operation="code_interpreter",
                 declaration_id=args.get("declaration_id"),

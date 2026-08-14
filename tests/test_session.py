@@ -11,7 +11,10 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from spreadsheet_harness.errors import ToolInputError, WorkbookValidationError
 from spreadsheet_harness.evidence_contract import EvidenceScope
 from spreadsheet_harness.session import WorkbookSession
-from spreadsheet_harness.target_grounding import TargetGroundingError
+from spreadsheet_harness.target_grounding import (
+    TargetGroundingMode,
+    TargetGroundingRejected,
+)
 
 
 def test_inspect_write_fill_format_and_undo(sample_workbook: Path, tmp_path: Path) -> None:
@@ -165,13 +168,15 @@ def test_transition_recorder_fault_restores_bytes_and_keeps_lineage_unchanged(
     assert session.artifact_ref() == artifact_before
     assert session.artifact_transitions == transitions_before
     assert session.committed_target_authorizations == ()
-    with pytest.raises(TargetGroundingError, match="consumed.*replayed"):
-        session.write_range(
-            "Sales",
-            "B4",
-            [[6]],
-            declaration_id=declaration["declaration_id"],
-        )
+    replay = session.write_range(
+        "Sales",
+        "B4",
+        [[6]],
+        declaration_id=declaration["declaration_id"],
+    )
+    assert replay["ok"] is False
+    assert replay["type"] == "TargetGroundingError"
+    assert replay["target_grounding"]["decision"] == "rejected.replayed_declaration"
 
 
 def test_commit_recorder_fault_keeps_published_bytes_and_lineage_consistent(
@@ -261,6 +266,201 @@ def test_strict_noop_commit_record_fault_keeps_all_ledgers_unchanged(
     assert session.artifact_ref() == artifact_before
     assert session.artifact_transitions == ()
     assert session.committed_target_authorizations == ()
+
+
+def test_advisory_strict_noop_recorder_fault_keeps_all_ledgers_unchanged(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    session.enable_target_grounding(TargetGroundingMode.ADVISORY)
+    artifact_before = session.artifact_ref()
+    bytes_before = session.workbook_path.read_bytes()
+    transitions_before = session.artifact_transitions
+    assessments_before = session.committed_advisory_target_assessments
+    original_record = session.recorder.record
+
+    def fail_noop_commit_record(event: str, payload: dict | None = None) -> None:
+        if event == "target_grounding.advisory_assessment.committed":
+            raise RuntimeError("advisory no-op recorder fault")
+        original_record(event, payload)
+
+    monkeypatch.setattr(session.recorder, "record", fail_noop_commit_record)
+
+    with pytest.raises(RuntimeError, match="advisory no-op recorder fault"):
+        session.run_staged_external_mutation(
+            operation="code_interpreter",
+            declaration_id=None,
+            runner=lambda _path: {"ok": True},
+        )
+
+    assert session.workbook_path.read_bytes() == bytes_before
+    assert session.artifact_ref() == artifact_before
+    assert session.artifact_transitions == transitions_before
+    assert session.committed_advisory_target_assessments == assessments_before
+    assert session.committed_target_authorizations == ()
+
+
+def test_advisory_opaque_staging_publishes_missing_declaration_with_real_footprint(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    session.enable_target_grounding(TargetGroundingMode.ADVISORY)
+
+    def mutate(staged: Path) -> dict[str, object]:
+        workbook = load_workbook(staged)
+        workbook["Sales"]["B4"] = 17
+        workbook.save(staged)
+        workbook.close()
+        return {"ok": True, "stdout": "edited staged copy"}
+
+    result = session.run_staged_external_mutation(
+        operation="code_interpreter",
+        declaration_id=None,
+        runner=mutate,
+    )
+
+    assert result["ok"] is True
+    assert result["mutation_published"] is True
+    assert session.inspect_range("Sales", "B4")["matrix"] == [[17]]
+    assert session.committed_target_authorizations == ()
+    committed = session.committed_advisory_target_assessments[-1]
+    assert committed.assessment.decision.value == "rejected.missing_declaration"
+    assert committed.assessment.footprint.scope == EvidenceScope.one("Sales", "B4")
+
+
+def test_advisory_undo_publishes_without_declaration_and_preserves_lineage(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    initial = session.artifact_ref()
+    session.enable_target_grounding(TargetGroundingMode.ADVISORY)
+    changed = session.write_range("Sales", "B4", [[17]])
+
+    undone = session.undo_last()
+
+    assert changed["ok"] is True
+    assert undone["ok"] is True
+    assert session.artifact_ref().revision == 2
+    assert session.artifact_ref().sha256 == initial.sha256
+    assert len(session.artifact_transitions) == 2
+    assert [
+        item.assessment.decision.value
+        for item in session.committed_advisory_target_assessments
+    ] == ["rejected.missing_declaration", "rejected.missing_declaration"]
+    assert session.committed_target_authorizations == ()
+
+
+def test_external_reconcile_is_noninterfering_in_advisory_and_enforced_stays_closed(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    off = WorkbookSession.create(sample_workbook, tmp_path / "off")
+    advisory = WorkbookSession.create(sample_workbook, tmp_path / "advisory")
+    enforced = WorkbookSession.create(sample_workbook, tmp_path / "enforced")
+    advisory.enable_target_grounding(TargetGroundingMode.ADVISORY)
+    enforced.enable_target_grounding(TargetGroundingMode.ENFORCE)
+    off_initial = off.artifact_ref()
+    advisory_initial = advisory.artifact_ref()
+    enforced_initial = enforced.artifact_ref()
+
+    for session in (off, advisory, enforced):
+        workbook = load_workbook(session.workbook_path)
+        workbook["Sales"]["B4"] = 73
+        workbook.save(session.workbook_path)
+        workbook.close()
+
+    off_transition = off.reconcile_external_artifact(off_initial, operation="external")
+    advisory_transition = advisory.reconcile_external_artifact(
+        advisory_initial,
+        operation="external",
+    )
+    with pytest.raises(TargetGroundingRejected):
+        enforced.reconcile_external_artifact(
+            enforced_initial,
+            operation="external",
+        )
+
+    assert off_transition is not None
+    assert advisory_transition is not None
+    assert off.inspect_range("Sales", "B4")["matrix"] == [[73]]
+    assert advisory.inspect_range("Sales", "B4")["matrix"] == [[73]]
+    assert enforced.inspect_range("Sales", "B4")["matrix"] != [[73]]
+    assessment = advisory.committed_advisory_target_assessments[-1]
+    assert assessment.assessment.decision.value == "rejected.missing_declaration"
+    assert assessment.transition == advisory_transition
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        TargetGroundingMode.OFF,
+        TargetGroundingMode.ADVISORY,
+        TargetGroundingMode.ENFORCE,
+    ],
+)
+def test_nonprotected_recalculation_reconcile_never_requires_target_assessment(
+    sample_workbook: Path,
+    tmp_path: Path,
+    mode: TargetGroundingMode,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / mode.value)
+    if mode is not TargetGroundingMode.OFF:
+        session.enable_target_grounding(mode)
+    before = session.artifact_ref()
+    workbook = load_workbook(session.workbook_path)
+    workbook["Sales"]["B4"] = 74
+    workbook.save(session.workbook_path)
+    workbook.close()
+
+    transition = session.reconcile_external_artifact(
+        before,
+        operation="recalculate",
+        kind="derived_recalculation",
+    )
+
+    assert transition is not None
+    assert transition.kind == "derived_recalculation"
+    assert session.inspect_range("Sales", "B4")["matrix"] == [[74]]
+    assert session.committed_target_authorizations == ()
+    assert session.committed_advisory_target_assessments == ()
+    if mode is TargetGroundingMode.ADVISORY:
+        assert [
+            event.event_type for event in session.advisory_target_lifecycle_events
+        ] == ["transition"]
+
+
+def test_advisory_reconcile_transition_recorder_fault_restores_all_ledgers(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    session.enable_target_grounding(TargetGroundingMode.ADVISORY)
+    before = session.target_grounding_initial_artifact
+    assert before is not None
+    original_bytes = session.workbook_path.read_bytes()
+    workbook = load_workbook(session.workbook_path)
+    workbook["Sales"]["B4"] = 73
+    workbook.save(session.workbook_path)
+    workbook.close()
+    original_record = session.recorder.record
+
+    def fail_transition(event: str, payload: dict | None = None) -> None:
+        if event == "artifact.transition":
+            raise RuntimeError("advisory transition recorder fault")
+        original_record(event, payload)
+
+    monkeypatch.setattr(session.recorder, "record", fail_transition)
+
+    with pytest.raises(RuntimeError, match="advisory transition recorder fault"):
+        session.reconcile_external_artifact(before, operation="external")
+
+    assert session.workbook_path.read_bytes() == original_bytes
+    assert session.artifact_ref() == before
+    assert session.artifact_transitions == ()
+    assert session.committed_advisory_target_assessments == ()
 
 
 def test_undo_transition_recorder_fault_restores_pre_undo_artifact(

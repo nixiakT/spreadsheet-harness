@@ -11,7 +11,9 @@ from openpyxl import Workbook, load_workbook
 
 import spreadsheet_harness.deliverable as deliverable_module
 from spreadsheet_harness.deliverable import (
+    ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION,
     COMPARISON_RESULT_SCHEMA_VERSION,
+    TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION,
     DeliverableValidationError,
     audit_deliverable_certificate,
     finalize_deliverable,
@@ -28,6 +30,7 @@ from spreadsheet_harness.evidence_contract import (
     EvidenceScope,
 )
 from spreadsheet_harness.session import WorkbookSession
+from spreadsheet_harness.target_grounding import TargetGroundingMode
 
 
 def _sha256(path: Path) -> str:
@@ -45,14 +48,19 @@ def _book(path: Path) -> None:
 def _candidate(
     tmp_path: Path,
     *,
-    target_grounding: bool = False,
+    target_grounding: bool | TargetGroundingMode = False,
 ) -> tuple[WorkbookSession, dict[str, Any]]:
     source = tmp_path / "source.xlsx"
     _book(source)
     session = WorkbookSession.create(source, tmp_path / "run", run_id="deliverable-test")
     initial = session.artifact_ref()
     if target_grounding:
-        session.enable_target_grounding()
+        mode = (
+            target_grounding
+            if isinstance(target_grounding, TargetGroundingMode)
+            else TargetGroundingMode.ENFORCE
+        )
+        session.enable_target_grounding(mode)
         observation = session.record_target_observation(
             artifact=initial,
             scope=EvidenceScope.one("Sheet1", "A1"),
@@ -824,6 +832,152 @@ def test_final_certificate_exposes_and_replays_committed_target_authorization(
     assert durable == [authorization]
     assert audit_deliverable_certificate(
         bundle.certificate,
+        agent_evidence=agent,
+        run_root=session.workspace,
+        output_workbook=session.workbook_path,
+    ).valid
+
+
+def test_advisory_certificate_exposes_and_freshly_replays_observer_ledger(
+    tmp_path: Path,
+) -> None:
+    session, agent = _candidate(
+        tmp_path,
+        target_grounding=TargetGroundingMode.ADVISORY,
+    )
+
+    bundle = finalize_deliverable(
+        session,
+        agent,
+        recalculation_callback=lambda: _unchanged_recalculation(session),
+    )
+
+    grounding = bundle.certificate["target_grounding"]
+    assert grounding["schema_version"] == (
+        ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION
+    )
+    assert grounding["mode"] == TargetGroundingMode.ADVISORY.value
+    assert grounding["active"] is True
+    assert grounding["enforced"] is False
+    assert grounding["initial_artifact"]["revision"] == 0
+    assert grounding["initial_transition_count"] == 0
+    assert grounding["assessment_count"] == 1
+    assessment = grounding["assessments"][0]
+    assert assessment["assessment"]["declaration_status"] == "valid"
+    assert assessment["assessment"]["counterfactual_enforcement_decision"] == "authorized"
+    assert assessment["publication"]["transition"] == (
+        bundle.certificate["lineage"]["transitions"][0]
+    )
+    assert grounding["assessment_chain_head_sha256"] == assessment["commitment_sha256"]
+    assert grounding["lifecycle_replay_complete"] is True
+    assert grounding["lifecycle_event_count"] == len(grounding["lifecycle_events"])
+    assert grounding["lifecycle_event_count"] >= 4
+    assert grounding["lifecycle_events"][0]["event_type"] == "observation"
+    assert grounding["lifecycle_events"][-1]["event_type"] == "commitment"
+    assert grounding["lifecycle_chain_head_sha256"] == (
+        grounding["lifecycle_events"][-1]["event_sha256"]
+    )
+    assert grounding["lifecycle_final_counters"]["pending_preparation_count"] == 0
+    assert grounding["lifecycle_final_counters"]["commitment_count"] == 1
+    assert session.committed_target_authorizations == ()
+    assert audit_deliverable_certificate(
+        bundle.certificate,
+        agent_evidence=agent,
+        run_root=session.workspace,
+        output_workbook=session.workbook_path,
+    ).valid
+
+
+@pytest.mark.parametrize(
+    ("target_grounding", "enabled"),
+    [
+        (False, False),
+        (TargetGroundingMode.ENFORCE, True),
+    ],
+)
+def test_off_and_enforce_certificates_preserve_v1_compatibility(
+    tmp_path: Path,
+    target_grounding: bool | TargetGroundingMode,
+    enabled: bool,
+) -> None:
+    session, agent = _candidate(tmp_path, target_grounding=target_grounding)
+
+    bundle = finalize_deliverable(
+        session,
+        agent,
+        recalculation_callback=lambda: _unchanged_recalculation(session),
+    )
+
+    grounding = bundle.certificate["target_grounding"]
+    assert grounding["schema_version"] == TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION
+    assert grounding["enabled"] is enabled
+    assert "mode" not in grounding
+    assert "assessments" not in grounding
+    assert audit_deliverable_certificate(
+        bundle.certificate,
+        agent_evidence=agent,
+        run_root=session.workspace,
+        output_workbook=session.workbook_path,
+    ).valid
+
+
+def test_fresh_audit_rejects_rehashed_missing_advisory_assessment(
+    tmp_path: Path,
+) -> None:
+    session, agent = _candidate(
+        tmp_path,
+        target_grounding=TargetGroundingMode.ADVISORY,
+    )
+    bundle = finalize_deliverable(
+        session,
+        agent,
+        recalculation_callback=lambda: _unchanged_recalculation(session),
+    )
+    tampered = json.loads(json.dumps(bundle.certificate))
+    grounding = tampered["target_grounding"]
+    grounding["assessments"] = []
+    grounding["assessment_count"] = 0
+    grounding["assessment_chain_head_sha256"] = "0" * 64
+    tampered["certificate_sha256"] = _certificate_digest(tampered)
+
+    assert not audit_deliverable_certificate(
+        tampered,
+        agent_evidence=agent,
+        run_root=session.workspace,
+        output_workbook=session.workbook_path,
+    ).valid
+
+
+def test_fresh_audit_rejects_rehashed_advisory_assurance_tampering(
+    tmp_path: Path,
+) -> None:
+    session, agent = _candidate(
+        tmp_path,
+        target_grounding=TargetGroundingMode.ADVISORY,
+    )
+    bundle = finalize_deliverable(
+        session,
+        agent,
+        recalculation_callback=lambda: _unchanged_recalculation(session),
+    )
+    tampered = json.loads(json.dumps(bundle.certificate))
+    grounding = tampered["target_grounding"]
+    commitment = grounding["assessments"][0]
+    assessment = commitment["assessment"]
+    assessment["assurance"]["authorized_publication"] = True
+    assessment["assessment_sha256"] = _nested_digest(
+        assessment,
+        "assessment_sha256",
+    )
+    commitment["commitment_sha256"] = _nested_digest(
+        commitment,
+        "commitment_sha256",
+    )
+    grounding["assessment_chain_head_sha256"] = commitment["commitment_sha256"]
+    tampered["certificate_sha256"] = _certificate_digest(tampered)
+
+    assert not audit_deliverable_certificate(
+        tampered,
         agent_evidence=agent,
         run_root=session.workspace,
         output_workbook=session.workbook_path,
