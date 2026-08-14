@@ -10,7 +10,12 @@ AGENT_EXECUTION_FAILURE_REASONS = LEGACY_AGENT_EXECUTION_FAILURE_REASONS | {
     "budget_exhausted",
     "terminal_submission_invalid",
     "terminal_submission_truncated",
+    "verification_contract_unsatisfied",
+    "protocol_noncompliance",
 }
+OPTIONAL_AGENT_EXECUTION_FAILURE_REASONS = frozenset(
+    {"completion_attempt_capture_failed"}
+)
 MODEL_EXECUTION_BUDGET_TERMINATIONS = frozenset(
     {"max_model_calls", "max_total_tokens"}
 )
@@ -200,7 +205,9 @@ class AgentExecutionFailure(HarnessError):
         agent_result: Any | None = None,
     ) -> None:
         super().__init__(message)
-        if reason not in AGENT_EXECUTION_FAILURE_REASONS:
+        if reason not in (
+            AGENT_EXECUTION_FAILURE_REASONS | OPTIONAL_AGENT_EXECUTION_FAILURE_REASONS
+        ):
             raise ValueError(f"Unknown agent execution failure reason: {reason!r}")
         self.reason = reason
         self.agent_result = agent_result

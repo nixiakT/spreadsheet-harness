@@ -1,0 +1,77 @@
+\section{Introduction}
+
+Large language model (LLM) agents increasingly edit spreadsheets through code
+interpreters and spreadsheet-native tools. The hard part is not merely writing
+a cell: realistic workbooks contain cross-sheet references, formatting that
+carries semantics, cached formula values, charts, and vendor-specific behavior.
+Accordingly, recent systems add localized multi-format inspection
+\citep{ren2026spreadsheetagent}, spreadsheet-native inspect--modify--verify
+tools \citep{chi2026spreadsheetrl}, or trajectory-distilled procedures
+\citep{ni2026trace2skill}. These interventions improve an agent's opportunity
+to check its work, but the agent still decides whether its own check is
+sufficient.
+
+That trust is fragile. In SpreadsheetBench~2's analysis of unresolved Claude
+Opus~4.6 trajectories, insufficient inspection (42.3\%) and wrong-target
+selection (32.9\%) dominate the assigned failure causes
+\citep{zhu2026spreadsheetbench2}. In one visualization trace, three attempted
+checks returned negative or empty observations, after which the agent claimed
+that the chart XML confirmed success. More generally, a verification can be
+locally reasonable yet irrelevant to the deliverable: it may precede the last
+write, cover a neighboring range, inspect a different rendered page, or refer
+to candidate bytes later changed by recalculation. Final-answer accuracy alone
+does not expose these process failures, while asking the same model to
+``verify'' provides no independent enforcement.
+
+Generic runtime policy systems make procedural constraints executable.
+AgentSpec gates individual actions \citep{wang2026agentspec}; VIGIL enforces
+finite-trace artifact and value-flow policies \citep{li2026vigil}; and AgentLTL
+scores and blocks procedural violations with typed temporal constraints
+\citep{elkoussy2026agentltl}. These systems establish that runtime enforcement
+is valuable, so our contribution is deliberately narrower than a new temporal
+logic. Their formalisms can consume artifact and semantic predicates when such
+events are available. Our question is how to construct those events for
+spreadsheets: what workbook semantics changed when one opaque Python call
+rewrites the file, whether formula values changed during recalculation, and
+whether later evidence covers those effects on the exact artifact that leaves
+the harness.
+
+We propose \method, illustrated in Figure~\ref{fig:overview}. Before an edit,
+the model declares a finite candidate target and cites trusted observations of
+that scope on the current artifact. The edit runs on a staging copy; the
+harness, not the model, compares workbook states and requires the actual effect
+footprint to remain inside the declaration. This prospective check does not
+prove that the declaration matches user intent, but exposes uninspected or
+unannounced expansion. Retrospectively, effects create evidence obligations,
+such as recalculating formula edits and reading back an expanded affected
+range, or rendering and viewing the matching page for visual edits. On
+finalization, the harness checks the observed candidate-to-final transitions,
+records a fresh final scan, and applies explicit compatibility rules for any
+transferred visual evidence. It does not replay every model-produced witness
+on the final bytes. Only an accepted candidate receives a content-addressed
+accepted-deliverable certificate and byte-identical read-only scoring replica;
+other terminations receive an observer-only finalization integrity record.
+
+\input{figures/system_overview}
+
+Our contributions are:
+
+\begin{itemize}
+  \item a spreadsheet observation layer that turns pre/post OOXML state,
+  including mutations made through an opaque Python interpreter, into trusted
+  semantic effect events and derived evidence obligations;
+  \item prospective target grounding that compares an inspected, declared
+  target with the semantic footprint of an isolated staged edit;
+  \item explicit revision semantics for recalculation source/output and for
+  render manifest, sheet/page, and pixel identity; and
+  \item an accepted-deliverable lineage from the exact accepted attempt through
+  postprocessing to the exact byte-identical scoring replica, while reserving
+  observer-only integrity records for noncompletion.
+\end{itemize}
+
+We evaluate these mechanisms without attributing novelty to generic temporal
+languages, artifact identifiers, or online gates. The controlled study
+separates prompts, tools, multi-format views, target elicitation, containment
+enforcement, offline replay, event enrichment, and postprocessing, using an
+independent ZIP/XML oracle and an instance-artifact-unseen 100-task debugging
+set.

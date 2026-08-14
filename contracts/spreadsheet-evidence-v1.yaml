@@ -1,0 +1,28 @@
+schema_version: 1
+rules:
+  - id: post_write_readback
+    trigger: mutation.committed
+    require:
+      event: range.inspected
+      artifact: current
+      scope: changed_cells_plus_boundary
+
+  - id: formula_recalc_no_error
+    trigger: effects.formula_changed
+    require_sequence:
+      - event: workbook.recalculated
+        artifact: current
+      - event: range.inspected
+        artifact: recalculated_revision
+        scope: changed_formula_cells_plus_boundary
+        predicates:
+          - no_calc_error
+
+  - id: visual_render_view
+    trigger: effects.visual_changed
+    require_sequence:
+      - event: workbook.rendered
+        artifact: current
+      - event: rendered_page.viewed
+        artifact: same_render
+        scope: changed_visual_scope

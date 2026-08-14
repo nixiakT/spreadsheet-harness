@@ -1,0 +1,117 @@
+\begin{figure*}[t]
+\centering
+\definecolor{slblue}{RGB}{0,114,178}
+\definecolor{slgreen}{RGB}{0,122,92}
+\definecolor{slorange}{RGB}{213,94,0}
+\definecolor{slgray}{RGB}{82,82,82}
+\begin{tikzpicture}[
+  x=0.93cm,
+  y=1cm,
+  font=\sffamily\fontsize{6.9}{7.9}\selectfont,
+  action/.style={rounded corners=2pt, draw=slblue, fill=slblue!7,
+                 line width=0.75pt, minimum height=8.5mm, align=center,
+                 inner xsep=2.5pt, inner ysep=2pt},
+  evidence/.style={draw=slgreen, fill=slgreen!7, line width=0.9pt,
+                   minimum height=8.5mm, align=center, inner xsep=2.5pt,
+                   inner ysep=2pt},
+  check/.style={draw=slorange, fill=slorange!8, line width=0.95pt,
+                minimum height=8.5mm, align=center, inner xsep=2.5pt,
+                inner ysep=2pt},
+  gate/.style={circle, draw=slorange, fill=white, line width=1.1pt,
+               minimum size=10mm, align=center, inner sep=1pt,
+               font=\sffamily\bfseries\fontsize{6.8}{7.5}\selectfont},
+  record/.style={draw=slgray, double=white, double distance=0.7pt,
+                 fill=black!3, line width=0.75pt, minimum height=8.5mm,
+                 align=center, inner xsep=2.5pt, inner ysep=2pt},
+  outside/.style={rounded corners=1.5pt, draw=slgray, dashed,
+                  fill=black!3, line width=0.7pt, minimum height=6.5mm,
+                  align=center, inner xsep=2.5pt, inner ysep=1.5pt},
+  flow/.style={-{Latex[length=1.9mm,width=1.25mm]}, draw=black!78,
+               line width=0.78pt},
+  modelmsg/.style={-{Latex[length=1.7mm,width=1.15mm]}, draw=slgray,
+                   densely dashed, line width=0.72pt},
+  datarel/.style={-{Latex[length=1.65mm,width=1.1mm]}, draw=slorange,
+                  densely dotted, line width=0.85pt},
+  phase/.style={font=\sffamily\bfseries\fontsize{7.0}{7.8}\selectfont,
+                text=slgreen}
+]
+  \path[draw=slgreen, fill=slgreen!2, line width=1.0pt, rounded corners=4pt]
+      (0.05,1.05) rectangle (13.78,6.10);
+  \node[phase, anchor=center, fill=white, inner xsep=4pt, inner ysep=1pt]
+      at (6.9,6.10) {TRUSTED HARNESS};
+
+  \node[outside, text width=2.0cm] (model) at (2.25,6.78)
+      {LLM actions and submit calls};
+  \node[outside, text width=1.75cm] (scorer) at (1.15,0.35)
+      {isolated official scorer};
+  \node[anchor=south west, font=\sffamily\bfseries\fontsize{6.8}{7.5}\selectfont,
+        text=slgray] at (0.2,7.18) {UNTRUSTED MODEL / EVALUATOR};
+
+  \node[action, text width=1.25cm] (inspect) at (1.0,5.0)
+      {\textbf{1}\enspace inspect\\source revision};
+  \node[action, text width=1.30cm] (target) at (2.85,5.0)
+      {\textbf{2}\enspace finite\\target declaration};
+  \node[check, text width=1.55cm] (stage) at (4.90,5.0)
+      {\textbf{3}\enspace stage edit;\\compute XLSX diff};
+  \node[evidence, text width=1.85cm] (contract) at (7.18,5.0)
+      {\textbf{4}\enspace fixed contract:\\revision, scope, predicate};
+  \node[record, text width=1.85cm] (attempt) at (9.65,5.0)
+      {\textbf{5}\enspace immutable attempt\\ID $+$ revision $+$ hash};
+  \node[gate] (gateone) at (12.05,5.0) {submit\\gate};
+
+  \draw[modelmsg] (model.south west) -- (inspect.north);
+  \draw[modelmsg] (model.south) -- (target.north);
+  \draw[modelmsg] (model.south east) -- (attempt.north);
+  \draw[flow] (inspect) -- (target);
+  \draw[flow] (target) -- (stage);
+  \draw[flow] (stage) -- (contract);
+  \draw[flow] (contract) -- (attempt);
+  \draw[flow] (attempt) -- (gateone);
+
+  \node[record, text width=1.75cm] (terminal) at (12.05,3.55)
+      {accepted terminal binding\\attempt / response / call};
+  \node[record, text width=1.38cm] (candidate) at (9.85,3.55)
+      {accepted candidate\\exact bytes};
+  \node[action, text width=1.48cm] (post) at (7.85,3.55)
+      {postprocess\\$+$ recalculation};
+  \node[check, text width=1.55cm] (final) at (5.70,3.55)
+      {final artifact\\transition checks};
+  \node[record, text width=1.60cm] (certificate) at (3.48,3.55)
+      {lineage consistency\\certificate};
+  \node[record, text width=1.35cm] (replica) at (1.28,3.55)
+      {byte-identical\\scoring replica};
+  \draw[flow] (gateone) -- (terminal);
+  \draw[flow] (terminal) -- (candidate);
+  \draw[flow] (candidate) -- (post);
+  \draw[flow] (post) -- (final);
+  \draw[flow] (final) -- (certificate);
+  \draw[flow] (certificate) -- (replica);
+  \draw[flow] (replica.south) -- (scorer.north);
+
+  \node[record, text width=1.80cm] (noncomplete) at (11.70,1.78)
+      {audited noncompletion\\reason $+$ attempt ledger};
+  \node[check, text width=1.88cm] (posthoc) at (8.88,1.78)
+      {post-termination scoring\\of frozen attempts};
+  \node[evidence, text width=1.75cm] (auditrow) at (6.20,1.78)
+      {observer-only artifact/copy\\lineage integrity record};
+  \draw[flow] (gateone.east) -- (13.35,5.0) -- (13.35,1.78) -- (noncomplete.east);
+  \draw[flow] (noncomplete) -- (posthoc);
+  \draw[flow] (posthoc) -- (auditrow);
+  \draw[datarel] (attempt.south) -- (8.88,4.30) -- (posthoc.north);
+  \draw[datarel] (attempt.south east) -- (11.15,4.35) -- (terminal.north west);
+\end{tikzpicture}
+\caption{\method's two terminal paths. Every arm uses the same observer
+instrumentation to snapshot each submit before the gate, including rejected,
+invalid, and unchanged attempts. Acceptance binds the
+exact attempt/response/call, then records candidate $\rightarrow$
+postprocess/recalculation $\rightarrow$ final $\rightarrow$ consistency
+certificate $\rightarrow$ byte-identical scoring replica. Finalization checks
+harness-observed transitions but neither reruns the model nor replays every
+model-produced witness. Without an accepted candidate, an audited-noncompletion
+row receives only an observer-generated finalization integrity record; its
+reason and attempt ledger are auditable, but no accepted deliverable is claimed.
+Frozen attempts are scored only after termination and never fed back. Double
+outlines denote immutable or content-bound records. The certificate is not a
+digital signature or hostile-host security mechanism.}
+\label{fig:overview}
+\end{figure*}

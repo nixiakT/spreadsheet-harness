@@ -1,0 +1,89 @@
+\PassOptionsToPackage{dvipsnames}{xcolor}
+\documentclass{article}
+\usepackage{iclr2027_conference,times}
+
+\usepackage{amsmath,amssymb,booktabs,graphicx,microtype,multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,fit,positioning,shapes.misc}
+\hypersetup{colorlinks=true, allcolors=MidnightBlue}
+
+\title{Do Not Trust ``Done'': Semantic Event Lifting for\\
+Auditable Spreadsheet Agents}
+
+% Authors stay hidden for the double-blind submission.
+\author{Anonymous authors}
+
+\newcommand{\method}{\textsc{SheetLedger}}
+\newcommand{\pending}[1]{\textcolor{BrickRed}{[pending: #1]}}
+\newcommand{\artifact}{\mathcal{A}}
+\newcommand{\effects}{\mathcal{F}}
+\newcommand{\obligations}{\mathcal{O}}
+\newcommand{\scope}{\mathcal{S}}
+
+% Keep this commented for review submission.
+% \iclrfinalcopy
+
+\begin{document}
+\maketitle
+
+\input{sections/abstract}
+\input{sections/introduction}
+\input{sections/related_work}
+\input{sections/method}
+\input{sections/experiments}
+\input{sections/limitations}
+\label{maintext:end}
+
+\subsection*{AI use statement}
+Generative AI tools were used for synthetic-oracle data generation; conceptual
+frameworks, mathematical statements, invariant arguments, and proof drafting;
+hypothesis, methodology, and experiment design; method implementation;
+translation between Chinese planning notes and English prose; dataset
+validation, cleaning, and reformatting; qualitative failure-taxonomy analysis;
+and interpretation of experimental artifacts and results. They were also used
+to suggest parameters; write and review code; create artifacts and figures;
+search, summarize, and format literature and references; identify gaps;
+brainstorm; propose the title and paper structure; and draft and edit prose.
+Models evaluated in the paper generated the spreadsheet-agent trajectories
+that constitute experimental data. The authors independently checked cited
+sources, reviewed generated code, data, analyses, figures, and prose, ran
+deterministic tests and fresh audits, and retain responsibility for the study
+design, claims, artifacts, and manuscript. No model-generated claim or citation
+was accepted without verification against its source.
+
+\subsection*{Ethics statement}
+Spreadsheet automation can affect financial, operational, and scientific
+records. The proposed monitor reduces one class of unsupported completion but
+does not establish semantic correctness, and its accepted-deliverable
+certificates must not be
+presented as guarantees that a workbook is safe for consequential use. We
+therefore report abstention and residual false-completion rates, document the
+trusted computing base, and recommend human review for high-impact deployment.
+The experiments use research datasets under their stated terms. Credentials,
+private workbook contents, and identifying trajectory data are excluded from
+the anonymous artifact.
+
+\subsection*{Reproducibility statement}
+The anonymous supplement includes the harness source, restricted contract
+grammar, default contracts, synthetic evidence-oracle generators, immutable
+split and run manifests, environment metadata, fresh-audit logic, de-identified
+task-by-arm-by-seed result rows, and scripts that regenerate every table and
+figure. Appendix
+Sections~\ref{app:contract}--\ref{app:statistics} specify the monitor semantics,
+trusted assumptions, model/tool budgets, task exclusions, and statistical
+estimands. Every reported row is hash-bound to an observer-generated
+finalization integrity record. An accepted-candidate row additionally binds its
+accepted-deliverable certificate and byte-identical scoring replica; an audited
+noncompletion makes neither claim. Service-alias evidence is labeled separately
+from experiments using pinned model checkpoints.
+
+\bibliography{references}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+\input{sections/appendix}
+
+\end{document}

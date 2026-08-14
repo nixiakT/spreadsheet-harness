@@ -28,6 +28,7 @@ from openpyxl.formula import Tokenizer
 from openpyxl.utils import FORMULAE, column_index_from_string, coordinate_to_tuple
 
 from .errors import CodeIsolationError, ToolInputError, redact_sensitive_text
+from .workbook_diff import WorkbookEffectDiff, diff_workbooks
 
 STRICT_ISOLATION_POLICY = "bubblewrap-strict-workspace-v1"
 _PROBE_SENTINEL = "SHEET_STRICT_ISOLATION_OK"
@@ -1155,6 +1156,18 @@ class LocalCodeInterpreter:
         self._runtime_helper = self.workspace / _RUNTIME_HELPER_NAME
         self._runtime_helper.write_text(_RUNTIME_HELPER_SOURCE, encoding="utf-8")
 
+    def isolated_copy(self, workspace: Path, workbook: Path) -> LocalCodeInterpreter:
+        """Create an equivalent runner rooted at a staging-only workspace."""
+
+        return LocalCodeInterpreter(
+            workspace,
+            workbook,
+            default_timeout=self.default_timeout,
+            max_output_chars=self.max_output_chars,
+            require_isolation=self.require_isolation,
+            secrets=self._secrets,
+        )
+
     def _bounded_output(self, value: str | bytes | None) -> tuple[str, bool]:
         if isinstance(value, bytes):
             value = value.decode("utf-8", errors="replace")
@@ -1338,6 +1351,7 @@ runpy.run_path(
             managed_mutation_attempted = mutation_marker.is_file()
             after_sha256 = _file_sha256(self.workbook)
             workbook_changed = before_sha256 != after_sha256
+            workbook_effects: dict[str, Any] | None = None
             if completed.returncode != 0 and workbook_changed:
                 rejected_sha256 = after_sha256
                 _restore_workbook(rollback_snapshot, self.workbook)
@@ -1437,6 +1451,13 @@ runpy.run_path(
                             "formula issue in one complete edit, save, recalculate, and verify."
                         ),
                     }
+                workbook_effects = (
+                    diff_workbooks(rollback_snapshot, self.workbook).to_dict()
+                    if rollback_snapshot is not None
+                    else WorkbookEffectDiff.unknown(
+                        "workbook was created without a prior semantic snapshot"
+                    ).to_dict()
+                )
             return {
                 "ok": completed.returncode == 0,
                 "exit_code": completed.returncode,
@@ -1449,6 +1470,7 @@ runpy.run_path(
                 "workbook_sha256_before": before_sha256,
                 "workbook_sha256_after": after_sha256,
                 "workbook_changed": workbook_changed,
+                "workbook_effects": workbook_effects,
                 "managed_mutation_attempted": managed_mutation_attempted,
                 "helper_module": _RUNTIME_HELPER_NAME,
                 "message": (

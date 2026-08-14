@@ -1,0 +1,166 @@
+\section{Revision-aware spreadsheet evidence}
+\label{sec:method}
+
+\subsection{Artifacts, effects, and scopes}
+
+Workbook artifact $\artifact_v=(v,h_v)$ pairs a monotonic publication index
+with the SHA-256 of its exact bytes. Every byte-changing publication increments
+$v$, including recalculation, recovery, and semantic no-ops; only a committed
+task mutation sets the separate user-edit flag. Reads, renders, and image views
+publish no artifact. A mutation first writes an isolated staging copy, from
+which the harness computes
+
+\begin{equation}
+  \effects_r = \operatorname{Diff}(W_r,W_{r+1})
+  = (\effects^{\mathrm{value}},\effects^{\mathrm{formula}},
+     \effects^{\mathrm{style}},\effects^{\mathrm{structure}},
+     \effects^{\mathrm{visual}},\effects^{\mathrm{unknown}}).
+\end{equation}
+
+Components contain workbook, sheet, or finite rectangular scopes; visual events
+also bind a render manifest and page. The XLSX diff covers values, formulas,
+styles, sheet/row/column structure, merges, tables, layout, names, and supported
+charts. Unexplained changed ZIP parts or ambiguous objects fail closed as
+\texttt{unknown}. A byte-only semantic no-op still advances $v$ without setting
+the user-edit flag. Native-tool reports are not the effect oracle: comparing
+pre/post staging bytes gives direct openpyxl or other opaque Python edits the
+same observation path.
+
+\subsection{Prospective target grounding}
+
+Post-edit checks can faithfully verify the wrong target. Before a protected
+mutation, the model therefore declares finite $\widehat{\scope}$ and cites
+earlier harness observations $I$ on the exact source artifact, requiring
+
+\begin{equation}
+  \bigcup_{i\in I}\operatorname{scope}(i)\supseteq\widehat{\scope}
+  \quad\land\quad
+  \forall i\in I:\operatorname{artifact}(i)=\artifact_v.
+\end{equation}
+
+After staging, publication additionally requires
+$\operatorname{scope}(\effects_v)\subseteq\widehat{\scope}$ for the complete
+native or opaque-code footprint. Unknown effects, stale citations, uninspected
+expansion, or declaration reuse reject it. This proves observation and
+containment, not that $\widehat{\scope}$ matches user intent; gold masks remain
+evaluation-only.
+
+\subsection{Contracts and evidence obligations}
+
+A contract is a versioned trigger/sequence list in a closed YAML grammar over
+harness-defined effects, events, scope transforms, artifact selectors, and
+predicates---never Python or a model-evaluated condition. A match creates
+
+\begin{equation}
+  o=(m,\scope_o,(g_1,\ldots,g_K),j,Q_j),
+\end{equation}
+
+where $m$ and $\scope_o$ are the trigger and derived scope;
+$g_j=(e_j,a_j,\rho_j,\pi_j)$ specifies event, dynamic artifact, scope relation,
+and predicate; and $Q_j$ is same-stage evidence. Advancement requires
+
+\begin{equation}
+\label{eq:witness}
+  \forall q\in Q_j:\;
+  \operatorname{type}(q)=e_j \land
+  \operatorname{artifact}(q)=a_j \land
+  \pi_j(q) \land \operatorname{after}(q,m),
+  \qquad
+  \bigcup_{q\in Q_j}\operatorname{scope}(q)\;\rho_j\;\scope_o.
+\end{equation}
+
+Disjoint reads accumulate only within one stage and artifact; a byte publication
+clears that coverage. Dynamic selectors make transitions explicit: a formula mutation
+$\artifact_v\!\rightarrow\!\artifact_{v+1}$ requires
+$\operatorname{recalc}(\text{source}=\artifact_{v+1},
+\text{output}=\artifact_{v+2})$, after which readback binds dynamically to
+$\artifact_{v+2}$. Visual rules bind the current artifact, render manifest, and
+viewed page.
+
+A transactional failure that leaves the source unchanged creates no blocker;
+partial or uncertain recovery creates one cleared only by a later computed
+footprint covering its scope. This does not prove shared intent.
+
+Online \emph{shadow} and \emph{enforce} compute identical diagnostics; only
+enforce blocks submission. Because visible diagnostics can alter trajectories,
+offline replay of immutable no-monitor traces estimates detection, not recovery.
+Budgets remain fixed. Common observer instrumentation snapshots every submit
+before any gate, and post-termination attempt scores never return to the model.
+
+\subsection{Postprocessing and finalization records}
+
+Submission is only a finalization intent: evaluator recalculation may mutate
+cached values after the last model check. \method therefore records
+
+\begin{equation}
+  \artifact_{\mathrm{candidate}} \xrightarrow{\text{postprocess}}
+  \artifact_{\mathrm{final}},\qquad
+  \operatorname{ScorerCopy}(\artifact_{\mathrm{final}},p_{\mathrm{score}}).
+\end{equation}
+
+An \texttt{accepted\_candidate} binds its exact terminal response and call to a
+pre-gate attempt and replayable candidate evidence. Every other termination is
+\texttt{audited\_noncompletion}: its observer-only integrity record binds the
+terminal reason, attempts, trajectory, candidate, and later lineage, but has
+null accepted evidence and claims no accepted submission, deliverable, or
+correctness.
+
+Postprocessing emits a ledger footprint. Accepted candidates require a complete,
+non-semantic transition; semantic or unknown effects fail closed. Noncompletion
+may record a complete or fail-closed unknown transition because it transfers no
+candidate evidence. Both branches record reopened formula/cached-value views
+and a workbook-scope final scan. Accepted visual evidence transfers only when a
+fresh render matches sheet/page and page bytes. The scan is not a model
+inspection. The accepted branch binds a read-only scoring replica; noncompletion
+binds only a diagnostic copy, never a deliverable.
+
+The canonical observer record contains outcome, optional accepted evidence,
+initial/candidate/final artifacts, transition/event-chain digests,
+recalculation metadata, final scan, and copy digest. Only its accepted branch
+is an accepted-deliverable certificate and calls the copy a scoring replica;
+local paths are excluded.
+
+The scorer-facing copy is created atomically inside the isolated task
+directory. For an accepted candidate, the harness checks
+
+\begin{equation}
+  h(W_{\mathrm{final}})=h(W_{\mathrm{score}})
+  =h_{\mathrm{row}}^{\mathrm{output}}
+  =c.\mathrm{final\_artifact.sha256}
+\end{equation}
+
+before and after scoring. The same equality and immutability checks apply to a
+noncompletion's diagnostic copy without authorizing a deliverable. Fresh replay
+rejects missing revisions, invalid witnesses, digest or score-time mutation,
+and contract/output disagreement.
+
+The finalization record provides content consistency only under a trusted host,
+controller, and storage; the accepted-deliverable certificate is not a digital
+signature. The trusted computing base includes diff and event instrumentation,
+monitor/controller memory, result storage, recalculation backend, scorer, and
+auditor. Model text, tool self-reports, and candidate bytes are untrusted. The
+scheme does not prevent a compromised or coordinating host from consistently
+rewriting the artifacts, ledger, record, and timestamps. Preventing that attack
+requires an external append-only anchor or transparency log, authenticated
+signatures, and a trusted clock. SHA-256 collision, full user intent, and
+Excel--LibreOffice equivalence are also outside the guarantee.
+
+\paragraph{Conditional evidence invariant.}
+Under that trusted base, every accepted candidate has a post-trigger,
+harness-emitted witness sequence on the selected artifact whose same-stage scope
+union and predicates satisfy each obligation. Each protected mutation also has
+a same-source declaration containing its staged footprint. Induction follows
+because only Equation~\ref{eq:witness} advances a stage and publication
+invalidates mismatched progress. An accepted deliverable additionally has a
+complete non-semantic transition, final scan, required pixel equivalence, and a
+byte-identical scoring replica. A noncompletion has only an observer integrity
+record binding artifact-to-diagnostic-copy lineage. Appendix~\ref{app:invariant}
+gives cases; neither invariant proves correctness or cryptographic security.
+
+\section{Contract provenance and procedure baselines}
+\label{sec:contract-provenance}
+
+The core uses one preregistered human-authored contract, fixed across shadow and
+enforce. Trace2Skill-inspired prose is a procedure-only whole-system baseline.
+Joint procedure/contract evolution remains outside the claims unless a separate
+same-pool factorial and cross-model transfer study is completed.

@@ -28,11 +28,15 @@ from spreadsheet_harness.comparison import (
     V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V26_COMPARISON_PROTOCOL_VERSION,
     V26_RUN_SPEC_SOURCE_CONTRACT,
+    V28_COMPARISON_CONFIGURATION_POLICIES,
+    V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V28_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     RunSpecAnchor,
     _allowed_observed_terminals_policy,
     _arm_order,
     _balanced_arm_orders,
+    _evaluate_completion_attempts_posthoc,
     _stage_allowed_tools_policy,
     comparison_execution_contract,
     comparison_summary,
@@ -42,14 +46,17 @@ from spreadsheet_harness.comparison import (
     verify_repository_source_state,
 )
 from spreadsheet_harness.config import ProviderConfig
+from spreadsheet_harness.deliverable import COMPARISON_RESULT_SCHEMA_VERSION
 from spreadsheet_harness.errors import (
     AgentBudgetError,
     AgentExecutionFailure,
     AgentRoutingError,
+    AgentTimeoutError,
     CodeIsolationError,
     HarnessError,
     ProviderError,
 )
+from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.skills import SkillRegistry
 from spreadsheet_harness.trajectory import read_trajectory
 
@@ -321,6 +328,125 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "answer_sheet",
         "golden_path",
     ]
+
+
+def test_v28_deliverable_lineage_is_explicit_and_does_not_change_v27_default(
+    tmp_path: Path,
+) -> None:
+    tasks = _tasks(tmp_path)
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "test-model",
+    )
+    legacy_runner = ComparisonBenchmarkRunner(
+        config,
+        tmp_path / "legacy",
+        skill_registry=SkillRegistry([]),
+    )
+    v28_runner = ComparisonBenchmarkRunner(
+        config,
+        tmp_path / "v28",
+        skill_registry=SkillRegistry([]),
+        deliverable_lineage=True,
+    )
+    legacy = legacy_runner._manifest(tasks)
+    v28 = v28_runner._manifest(tasks)
+
+    assert legacy["schema_version"] == COMPARISON_MANIFEST_SCHEMA_VERSION
+    assert legacy["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
+    assert "result_schema_version" not in legacy
+    assert "deliverable_lineage_policy" not in legacy["configuration"]
+    assert v28["schema_version"] == V28_COMPARISON_MANIFEST_SCHEMA_VERSION == 17
+    assert v28["comparison_protocol_version"] == V28_COMPARISON_PROTOCOL_VERSION
+    assert v28["result_schema_version"] == COMPARISON_RESULT_SCHEMA_VERSION
+    assert "evidence_runtime" not in legacy
+    assert v28["evidence_runtime"] == v28_runner.evidence_runtime
+    assert v28["evidence_runtime"]["contract_mode"] == "enforce"
+    assert v28["evidence_runtime"]["target_grounding"] == "enforce"
+    assert (
+        v28["evidence_runtime"]["completion_attempt_capture"]
+        == "pre_gate_every_submit"
+    )
+    assert len(v28["evidence_runtime"]["contract_canonical_sha256"]) == 64
+    assert v28_runner.evidence_contract is not None
+    reconstructed = manifest_execution_contract(v28)
+    assert reconstructed["resources"]["deliverable_lineage"] is True
+    assert reconstructed["resources"]["evidence_runtime"] == v28["evidence_runtime"]
+    assert all(
+        v28["configuration"].get(key) == value
+        for key, value in V28_COMPARISON_CONFIGURATION_POLICIES.items()
+    )
+
+
+def test_v28_deliverable_lineage_requires_postprocess_recalculation(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="requires harness recalculation"):
+        ComparisonBenchmarkRunner(
+            ProviderConfig(
+                "https://example.test/v1",
+                "not-a-real-key",
+                "test-model",
+            ),
+            tmp_path / "invalid-v28",
+            skill_registry=SkillRegistry([]),
+            recalculate=False,
+            deliverable_lineage=True,
+        )
+
+
+def test_v28_completion_attempts_are_scored_only_posthoc_on_isolated_copies(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source = tmp_path / "source.xlsx"
+    golden = tmp_path / "golden.xlsx"
+    _book(source, 5)
+    _book(golden, 5)
+    session = WorkbookSession.create(source, tmp_path / "run")
+    session.enable_completion_attempt_capture()
+    attempt = session.capture_completion_attempt(
+        stage="solve",
+        turn=3,
+        response_id="response-1",
+        call_id="call-1",
+    )
+    task = SpreadsheetTask(
+        "task-1",
+        "set A1",
+        source,
+        golden,
+        "Cell-Level Manipulation",
+        "A1",
+        None,
+    )
+    recalculated_paths: list[Path] = []
+
+    def fake_recalculate(source_path: Path, destination: Path, **_: Any) -> dict[str, Any]:
+        assert source_path == destination
+        recalculated_paths.append(source_path)
+        return {}
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.render.recalculate_workbook",
+        fake_recalculate,
+    )
+    agent_evidence = {"completion_attempts": [attempt.to_dict()]}
+
+    evaluations = _evaluate_completion_attempts_posthoc(
+        session,
+        task,
+        agent_evidence,
+        remaining_seconds=lambda _stage: 60.0,
+    )
+
+    assert len(evaluations) == 1
+    assert evaluations[0]["comparison"]["passed"] is True
+    assert evaluations[0]["assurance"]["fed_back_to_model"] is False
+    assert recalculated_paths[0] != session.workbook_path
+    assert not recalculated_paths[0].exists()
+    assert agent_evidence == {"completion_attempts": [attempt.to_dict()]}
 
 
 @pytest.mark.parametrize(
@@ -955,7 +1081,7 @@ def test_v26_source_contract_remains_pinned_to_historical_source() -> None:
     )
 
 
-def test_v27_reserve79_run_spec_anchor_is_current_fresh_only() -> None:
+def test_v27_reserve79_run_spec_anchor_preserves_historical_fresh_only_source() -> None:
     path = Path(
         "benchmarks/protocols/"
         "qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json"
@@ -974,14 +1100,20 @@ def test_v27_reserve79_run_spec_anchor_is_current_fresh_only() -> None:
         comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
         launchable=True,
     )
-    assert document["execution"]["source_contract"] == (
+    assert document["execution"]["source_contract"] == {
+        "schema_version": 1,
+        "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
+        "sha256": "ab359f5c45ab797ec1b88ae1cfa54e50c9aba7fd44d6fddeb28e0a5df1448328",
+        "file_count": 21,
+    }
+    assert document["execution"]["source_contract"] != (
         benchmark_module._run_spec_source_fingerprint()
     )
     with pytest.raises(HarnessError, match="fresh-only"):
         require_launchable_run_spec(provenance, resume=True)
 
 
-def test_v27_reserve79_run_spec_matches_resolved_execution_contract() -> None:
+def test_v27_reserve79_run_spec_static_contract_survives_later_source_changes() -> None:
     document, _, _ = load_pilot_run_spec(
         Path(
             "benchmarks/protocols/"
@@ -1022,7 +1154,12 @@ def test_v27_reserve79_run_spec_matches_resolved_execution_contract() -> None:
         skills=SkillRegistry([Path("skills")]).freeze(),
     )
 
-    assert actual == execution
+    historical_source = execution["source_contract"]
+    current_source = actual["source_contract"]
+    assert historical_source != current_source
+    assert {key: value for key, value in actual.items() if key != "source_contract"} == {
+        key: value for key, value in execution.items() if key != "source_contract"
+    }
 
 
 def test_v25_preflight_rejects_historical_run_before_isolation(
@@ -2434,6 +2571,92 @@ def test_comparison_scores_known_model_execution_failure_as_completed_false(
     assert row["agent"] == evidence.to_dict()
 
 
+def test_v28_runner_records_model_failure_as_audited_noncompletion(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source_task = _tasks(tmp_path)[0]
+    task = SpreadsheetTask(
+        source_task.task_id,
+        source_task.instruction,
+        source_task.input_path,
+        source_task.golden_path,
+        source_task.instruction_type,
+        "A1",
+        None,
+    )
+    evidence = AgentResult(
+        "submission blocked by the evidence contract",
+        1,
+        0,
+        {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+        "response-1",
+        terminal_tool="submit_result",
+        observed_terminal_tool="submit_result",
+        terminal_submissions=1,
+        completion_attempts=[],
+    )
+
+    def fail_execution(**_: Any) -> AgentResult:
+        raise AgentExecutionFailure(
+            "revision-bound evidence remained unsatisfied",
+            reason="verification_contract_unsatisfied",
+            agent_result=evidence,
+        )
+
+    monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", fail_execution)
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "v28-audited-noncompletion",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=5,
+        max_turns_per_arm=5,
+        deliverable_lineage=True,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "completed", row
+    assert row["outcome_kind"] == "model_execution_failure"
+    assert row["passed"] is False
+    assert row["artifact_score_passed"] is True
+    assert row["completion_attempt_count"] == 0
+    assert row["completion_attempt_evaluations"] == []
+    certificate = row["deliverable_certificate"]
+    assert certificate["candidate"]["outcome"] == "audited_noncompletion"
+    assert certificate["candidate"]["evidence_certificate"] is None
+    assert certificate["evidence_policy"]["accepted_candidate_evidence"] is False
+    assert (runner.output_dir / row["scoring_workbook"]).is_file()
+    trajectory = read_trajectory(
+        runner.output_dir / row["run_dir"] / "trajectory.jsonl"
+    )
+    finalization = next(
+        event
+        for event in trajectory
+        if event["event"] == "observer.finalization_recorded"
+    )
+    assert finalization["payload"]["candidate_outcome"] == "audited_noncompletion"
+    assert finalization["payload"]["accepted_deliverable"] is False
+    ordered = [
+        event["event"]
+        for event in trajectory
+        if event["event"]
+        in {
+            "benchmark.agent_terminated",
+            "benchmark.completion_attempts_evaluated",
+            "observer.finalization_recorded",
+            "benchmark.evaluated",
+        }
+    ]
+    assert ordered == [
+        "benchmark.agent_terminated",
+        "benchmark.completion_attempts_evaluated",
+        "observer.finalization_recorded",
+        "benchmark.evaluated",
+    ]
+
+
 def test_comparison_requires_evidence_for_known_model_execution_failure(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -2805,6 +3028,68 @@ def test_deadline_after_token_termination_records_timeout_row(
     assert row["error_category"] == "task_timeout"
     assert row["error_type"] == "AgentTimeoutError"
     assert row["budget"]["termination"]["reason"] == "max_total_tokens"
+
+
+@pytest.mark.parametrize(
+    ("model_failure", "expected_outcome", "expected_reason"),
+    [
+        (False, "scored", None),
+        (True, "model_execution_failure", "protocol_noncompliance"),
+    ],
+)
+def test_v28_observer_timeout_preserves_frozen_agent_outcome(
+    tmp_path: Path,
+    monkeypatch: Any,
+    model_failure: bool,
+    expected_outcome: str,
+    expected_reason: str | None,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    evidence = AgentResult(
+        "agent outcome is frozen",
+        1,
+        0,
+        {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+        "agent-response",
+        completion_attempts=[],
+    )
+
+    def run_frozen_agent(**_: Any) -> AgentResult:
+        if model_failure:
+            raise AgentExecutionFailure(
+                "model violated the declared protocol",
+                reason="protocol_noncompliance",
+                agent_result=evidence,
+            )
+        return evidence
+
+    def observer_timeout(*_: Any, **__: Any) -> list[dict[str, Any]]:
+        raise AgentTimeoutError("injected observer-only timeout")
+
+    monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", run_frozen_agent)
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison._evaluate_completion_attempts_posthoc",
+        observer_timeout,
+    )
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / f"observer-timeout-{model_failure}",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=5,
+        max_turns_per_arm=5,
+        deliverable_lineage=True,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "error"
+    assert row["error_category"] == "observer_postprocess"
+    assert row["agent_outcome_kind"] == expected_outcome
+    assert row["agent_failure_reason"] == expected_reason
+    assert row["postprocess_error"]["agent_outcome_frozen"] is True
+    assert row["postprocess_timing"]["status"] == "incomplete"
+    assert row["agent"] == evidence.to_dict()
 
 
 def test_comparison_fails_before_writes_when_strict_isolation_is_unavailable(

@@ -32,6 +32,7 @@ from .errors import (
     ProviderOutputLimitError,
     redact_sensitive_text,
 )
+from .evidence_contract import ContractMode, ContractStateError, EventKind
 from .pacing import RelayPacer
 from .skills import SkillRegistry
 from .tools import SpreadsheetToolRegistry
@@ -142,7 +143,14 @@ TERMINAL_TOOL_NAME = "submit_result"
 ASSISTANT_TEXT_TERMINAL = "assistant_text"
 BUDGET_EXHAUSTED_TERMINAL = "budget_exhausted"
 OUTPUT_LIMIT_TERMINAL = "submit_result_length"
+PROTOCOL_NONCOMPLIANCE_TERMINAL = "protocol_noncompliance"
 _TERMINAL_SUCCESS_TEXT = "Spreadsheet task completed."
+_EVIDENCE_EVENT_TOOL_NAMES = {
+    EventKind.RANGE_INSPECTED: "inspect_range",
+    EventKind.WORKBOOK_RECALCULATED: "recalculate_and_read",
+    EventKind.WORKBOOK_RENDERED: "render_workbook",
+    EventKind.RENDERED_PAGE_VIEWED: "view_image",
+}
 _TERMINAL_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
     "name": TERMINAL_TOOL_NAME,
@@ -726,6 +734,34 @@ def _validated_function_calls(
     return validated
 
 
+def _function_call_audit_evidence(
+    function_calls: list[tuple[dict[str, Any], str]],
+) -> list[dict[str, str]]:
+    """Persist call identity without retaining possibly sensitive raw arguments."""
+
+    evidence: list[dict[str, str]] = []
+    for function_call, call_id in function_calls:
+        raw_arguments = function_call.get("arguments", "{}")
+        if isinstance(raw_arguments, str):
+            argument_bytes = raw_arguments.encode("utf-8")
+        else:
+            argument_bytes = json.dumps(
+                raw_arguments,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("ascii")
+        evidence.append(
+            {
+                "call_id": call_id,
+                "name": str(function_call.get("name", "")),
+                "arguments_sha256": hashlib.sha256(argument_bytes).hexdigest(),
+            }
+        )
+    return evidence
+
+
 def _no_argument_tools(tool_schemas: list[dict[str, Any]]) -> set[str]:
     result: set[str] = set()
     for schema in tool_schemas:
@@ -865,6 +901,8 @@ class AgentResult:
     observed_terminal_tool: str | None = None
     terminal_submissions: int = 0
     terminal_response: dict[str, Any] | None = None
+    evidence_contract: dict[str, Any] | None = None
+    completion_attempts: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -898,6 +936,10 @@ class AgentResult:
             result["observed_terminal_tool"] = self.observed_terminal_tool
         if self.terminal_response is not None:
             result["terminal_response"] = self.terminal_response
+        if self.evidence_contract is not None:
+            result["evidence_contract"] = self.evidence_contract
+        if self.completion_attempts is not None:
+            result["completion_attempts"] = self.completion_attempts
         return result
 
 
@@ -2310,6 +2352,12 @@ def _failed_tool_requires_edit_recovery(
     outcome_data: dict[str, Any],
 ) -> bool:
     del arguments
+    if outcome_data.get("type") in {
+        "TargetGroundingError",
+        "TargetGroundingRejected",
+        "StagingBoundaryViolation",
+    }:
+        return False
     if outcome_data.get("workbook_rolled_back") is True:
         return True
     if (
@@ -2344,6 +2392,7 @@ class SpreadsheetAgent:
         terminal_result_required: bool = False,
         require_workbook_change: bool = False,
         force_code_on_stalled_edit: bool = False,
+        capture_completion_attempts: bool = False,
         pacer: RelayPacer | None = None,
     ) -> None:
         self.config = config
@@ -2369,6 +2418,9 @@ class SpreadsheetAgent:
         self.terminal_result_required = terminal_result_required
         self.require_workbook_change = require_workbook_change
         self.force_code_on_stalled_edit = force_code_on_stalled_edit
+        if type(capture_completion_attempts) is not bool:
+            raise TypeError("capture_completion_attempts must be a boolean")
+        self.capture_completion_attempts = capture_completion_attempts
         self.pacer = pacer
         if len(self.forced_tool_prefix) >= self.max_turns:
             raise ValueError(
@@ -2412,6 +2464,30 @@ class SpreadsheetAgent:
                 "\nThis is an editing stage: the managed workbook file must actually change "
                 f"before {TERMINAL_TOOL_NAME} is accepted. Do not submit a plan, explanation, "
                 "or offer to apply the edit later."
+            )
+        evidence_monitor = getattr(self.tools, "evidence_monitor", None)
+        if evidence_monitor is not None:
+            mode = evidence_monitor.mode.value
+            instructions += (
+                "\nThe harness records typed workbook effects and revision-bound verification "
+                f"evidence under a {mode} evidence contract. Tool outputs include a compact "
+                "_evidence_contract status generated by the harness. When enforcement is active, "
+                "submit_result is accepted only after submission_ready=true. Evidence from an "
+                "older workbook revision, the wrong cell scope, or a different render cannot "
+                "satisfy an obligation. Use the named next_required_event and exact required "
+                "scope; prose or code stdout claiming verification is not evidence."
+            )
+        if getattr(self.tools, "target_grounding_enabled", False):
+            instructions += (
+                "\nPre-edit target grounding is enforced. Before every mutation, first call "
+                "inspect_range on the exact finite cells you may change, then call "
+                "declare_edit_target citing the returned observation_id values, and pass its "
+                "single-use declaration_id to exactly one mutation call. Observations and "
+                "declarations are bound to exact workbook bytes and become stale after any "
+                "artifact transition, including recalculation. The harness computes the actual "
+                "staged footprint; changes outside the declared scope, wildcard effects, "
+                "incomplete diffs, and unknown effects are rejected before publication. After "
+                "a rejection, inspect any needed expansion and issue a new declaration."
             )
         return instructions, manifest
 
@@ -2509,6 +2585,7 @@ class SpreadsheetAgent:
         recent_raw_tool_output_chars = 0
         recent_image_bytes = 0
         recent_image_count = 0
+        recent_visual_confirmations: list[dict[str, Any]] = []
         total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         calls = 0
         last_id: str | None = None
@@ -2517,8 +2594,37 @@ class SpreadsheetAgent:
         observed_first_tool: str | None = None
         observed_forced_tool_prefix: list[str] = []
         forced_prefix_index = 0
+        terminal_submission_attempts = 0
         stalled_edit_recovery_active = False
         latest_edit_recovery_diagnostics: str | None = None
+        completion_attempt_ledger = (
+            session.enable_completion_attempt_capture()
+            if self.capture_completion_attempts
+            else None
+        )
+        completion_attempt_start = (
+            len(completion_attempt_ledger.records)
+            if completion_attempt_ledger is not None
+            else 0
+        )
+
+        def completion_attempt_records() -> list[dict[str, Any]] | None:
+            if completion_attempt_ledger is None:
+                return None
+            return [
+                record.to_dict()
+                for record in completion_attempt_ledger.records[completion_attempt_start:]
+            ]
+
+        def evidence_contract_report() -> dict[str, Any] | None:
+            monitor = getattr(self.tools, "evidence_monitor", None)
+            if monitor is None:
+                return None
+            decision = monitor.submission_decision()
+            return {
+                "status": monitor.status(),
+                "decision": decision.to_dict(),
+            }
 
         def partial_result(
             *,
@@ -2527,6 +2633,7 @@ class SpreadsheetAgent:
             observed_terminal_tool: str | None,
             terminal_submissions: int = 0,
             terminal_response: dict[str, Any] | None = None,
+            include_evidence_contract_report: bool = True,
         ) -> AgentResult:
             return AgentResult(
                 final_text=final_text,
@@ -2552,6 +2659,12 @@ class SpreadsheetAgent:
                 terminal_response=(
                     dict(terminal_response) if terminal_response is not None else None
                 ),
+                evidence_contract=(
+                    evidence_contract_report()
+                    if include_evidence_contract_report
+                    else None
+                ),
+                completion_attempts=completion_attempt_records(),
             )
 
         def execution_failure(
@@ -2562,6 +2675,7 @@ class SpreadsheetAgent:
             observed_terminal_tool: str | None,
             terminal_submissions: int = 0,
             terminal_response: dict[str, Any] | None = None,
+            include_evidence_contract_report: bool = True,
         ) -> AgentExecutionFailure:
             result = partial_result(
                 final_text=message,
@@ -2569,6 +2683,7 @@ class SpreadsheetAgent:
                 observed_terminal_tool=observed_terminal_tool,
                 terminal_submissions=terminal_submissions,
                 terminal_response=terminal_response,
+                include_evidence_contract_report=include_evidence_contract_report,
             )
             session.recorder.record(
                 "agent.execution_failed",
@@ -2592,6 +2707,19 @@ class SpreadsheetAgent:
                 turns=turns,
                 observed_terminal_tool=BUDGET_EXHAUSTED_TERMINAL,
                 terminal_response=terminal_response,
+            )
+
+        def protocol_noncompliance(
+            message: str,
+            *,
+            turns: int,
+        ) -> AgentExecutionFailure:
+            return execution_failure(
+                message,
+                reason="protocol_noncompliance",
+                turns=turns,
+                observed_terminal_tool=PROTOCOL_NONCOMPLIANCE_TERMINAL,
+                terminal_submissions=terminal_submission_attempts,
             )
 
         def safe_edit_recovery_diagnostics(
@@ -2648,6 +2776,7 @@ class SpreadsheetAgent:
                         }
                     )
                 input_items.extend(recent_items)
+                request_visual_confirmations = list(recent_visual_confirmations)
                 payload: dict[str, Any] = self.config.apply_generation({
                     "model": self.config.model,
                     "instructions": system,
@@ -2657,10 +2786,17 @@ class SpreadsheetAgent:
                 })
                 recovery_turn_code_forced = False
                 terminal_route_forced = False
+                evidence_route_tool: str | None = None
                 remaining_model_calls = (
                     self.budget.remaining_model_calls()
                     if self.budget is not None
                     else None
+                )
+                remaining_agent_calls = self.max_turns - turn_number + 1
+                remaining_calls = (
+                    min(remaining_agent_calls, remaining_model_calls)
+                    if remaining_model_calls is not None
+                    else remaining_agent_calls
                 )
                 budget_terminal_turn = bool(
                     self.required_tool_termination
@@ -2698,6 +2834,70 @@ class SpreadsheetAgent:
                         )
                     if forced_tool is None and recovery_turn_code_forced:
                         forced_tool = "code_interpreter"
+                    evidence_monitor = getattr(self.tools, "evidence_monitor", None)
+                    if (
+                        forced_tool is None
+                        and self.required_tool_termination
+                        and evidence_monitor is not None
+                        and evidence_monitor.mode is ContractMode.ENFORCE
+                        and evidence_monitor.pending
+                    ):
+                        minimum_evidence_calls = evidence_monitor.minimum_evidence_calls()
+                        if 1 < remaining_calls <= minimum_evidence_calls + 1:
+                            next_event = evidence_monitor.next_required_event()
+                            evidence_route_tool = _EVIDENCE_EVENT_TOOL_NAMES.get(next_event)
+                            if evidence_route_tool is None:
+                                session.recorder.record(
+                                    "agent.routing_failed",
+                                    {
+                                        "stage": self.stage,
+                                        "turn": turn_number,
+                                        "reason": "unsupported_evidence_event_route",
+                                        "next_required_event": (
+                                            next_event.value
+                                            if next_event is not None
+                                            else None
+                                        ),
+                                        "remaining_calls": remaining_calls,
+                                        "minimum_evidence_calls": minimum_evidence_calls,
+                                    },
+                                )
+                                raise AgentRoutingError(
+                                    "No workbook tool route is defined for the pending "
+                                    f"evidence event {next_event!r}"
+                                )
+                            if evidence_route_tool not in tool_names:
+                                session.recorder.record(
+                                    "agent.routing_failed",
+                                    {
+                                        "stage": self.stage,
+                                        "turn": turn_number,
+                                        "reason": "evidence_tool_unavailable",
+                                        "next_required_event": next_event.value,
+                                        "required_tool": evidence_route_tool,
+                                        "remaining_calls": remaining_calls,
+                                        "minimum_evidence_calls": minimum_evidence_calls,
+                                    },
+                                )
+                                raise AgentRoutingError(
+                                    "Pending evidence event "
+                                    f"{next_event.value!r} requires unavailable tool "
+                                    f"{evidence_route_tool!r}"
+                                )
+                            forced_tool = evidence_route_tool
+                            session.recorder.record(
+                                "evidence_contract.budget_route_forced",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "next_required_event": next_event.value,
+                                    "required_tool": evidence_route_tool,
+                                    "remaining_calls": remaining_calls,
+                                    "minimum_evidence_calls": minimum_evidence_calls,
+                                    "reserved_terminal_calls": 1,
+                                    "status": evidence_monitor.compact_status(),
+                                },
+                            )
                     if self.required_tool_termination and (
                         final_agent_turn or budget_terminal_turn
                     ):
@@ -2722,9 +2922,10 @@ class SpreadsheetAgent:
                                 "reason": "forced_prefix_incomplete_before_terminal",
                             }
                             session.recorder.record("agent.routing_failed", failure_detail)
-                            raise AgentRoutingError(
+                            raise protocol_noncompliance(
                                 "Forced tool prefix remained incomplete before the reserved "
-                                f"{TERMINAL_TOOL_NAME!r} route"
+                                f"{TERMINAL_TOOL_NAME!r} route",
+                                turns=len(request_timings),
                             )
                         terminal_route_forced = True
                         request_tool_schemas = [
@@ -2983,6 +3184,60 @@ class SpreadsheetAgent:
                         )
                     except AgentBudgetError as exc:
                         budget_error = exc
+                if request_visual_confirmations:
+                    confirmation_handler = getattr(
+                        self.tools,
+                        "confirm_view_image_delivery",
+                        None,
+                    )
+                    for confirmation in request_visual_confirmations:
+                        trace_item = confirmation["trace_item"]
+                        if not callable(confirmation_handler):
+                            trace_item["image_delivery_confirmed"] = False
+                            session.recorder.record(
+                                "agent.visual_delivery_confirmation_failed",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "confirmation_id": confirmation["confirmation_id"],
+                                    "reason": "confirmation_handler_unavailable",
+                                },
+                            )
+                            continue
+                        try:
+                            confirmation_handler(
+                                confirmation["confirmation_id"],
+                                attached_file_sha256=confirmation[
+                                    "attached_file_sha256"
+                                ],
+                                provider_response_id=turn.response_id or "",
+                            )
+                        except ContractStateError as exc:
+                            trace_item["image_delivery_confirmed"] = False
+                            session.recorder.record(
+                                "agent.visual_delivery_confirmation_failed",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "confirmation_id": confirmation["confirmation_id"],
+                                    "reason": type(exc).__name__,
+                                },
+                            )
+                        else:
+                            trace_item["image_delivery_confirmed"] = True
+                            session.recorder.record(
+                                "agent.visual_delivery_confirmed",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "confirmation_id": confirmation["confirmation_id"],
+                                    "attached_file_sha256": confirmation[
+                                        "attached_file_sha256"
+                                    ],
+                                    "provider_response_id": turn.response_id,
+                                },
+                            )
+                    recent_visual_confirmations = []
                 last_id = turn.response_id
                 request_timings.append(
                     {
@@ -2997,18 +3252,6 @@ class SpreadsheetAgent:
                 )
                 for key in total_usage:
                     total_usage[key] += int(turn.usage.get(key, 0) or 0)
-                session.recorder.record(
-                    "model.responded",
-                    {
-                        "turn": turn_number,
-                        "stage": self.stage,
-                        "response_id": turn.response_id,
-                        "text": turn.text,
-                        "usage": turn.usage,
-                        "output_types": [item.get("type") for item in turn.output],
-                        "timing": turn.timing_dict(),
-                    },
-                )
                 try:
                     function_calls = _validated_function_calls(turn.output)
                 except ProviderError as exc:
@@ -3020,6 +3263,56 @@ class SpreadsheetAgent:
                         },
                     )
                     raise
+                session.recorder.record(
+                    "model.responded",
+                    {
+                        "turn": turn_number,
+                        "stage": self.stage,
+                        "response_id": turn.response_id,
+                        "text": turn.text,
+                        "usage": turn.usage,
+                        "output_types": [item.get("type") for item in turn.output],
+                        "function_calls": _function_call_audit_evidence(function_calls),
+                        "timing": turn.timing_dict(),
+                    },
+                )
+                terminal_calls = [
+                    (function_call, call_id)
+                    for function_call, call_id in function_calls
+                    if function_call.get("name") == TERMINAL_TOOL_NAME
+                ]
+                captured_terminal_attempts = []
+                if completion_attempt_ledger is not None:
+                    for attempt_offset, (_, call_id) in enumerate(terminal_calls):
+                        try:
+                            completion_attempt = session.capture_completion_attempt(
+                                stage=self.stage or "unspecified",
+                                turn=turn_number,
+                                response_id=last_id,
+                                call_id=call_id,
+                            )
+                        except Exception as exc:
+                            raise execution_failure(
+                                "Completion-attempt snapshot capture failed; terminal "
+                                "submission was denied",
+                                reason="completion_attempt_capture_failed",
+                                turns=turn_number,
+                                observed_terminal_tool=TERMINAL_TOOL_NAME,
+                                terminal_submissions=(
+                                    terminal_submission_attempts + attempt_offset + 1
+                                ),
+                                include_evidence_contract_report=False,
+                            ) from exc
+                        captured_terminal_attempts.append(completion_attempt)
+                        session.recorder.record(
+                            "agent.completion_attempt_captured",
+                            {
+                                "stage": self.stage,
+                                "turn": turn_number,
+                                "record": completion_attempt.to_dict(),
+                            },
+                        )
+                terminal_submission_attempts += len(terminal_calls)
                 if terminal_route_forced:
                     expected_forced_tool = TERMINAL_TOOL_NAME
                 else:
@@ -3030,6 +3323,8 @@ class SpreadsheetAgent:
                     )
                     if expected_forced_tool is None and recovery_turn_code_forced:
                         expected_forced_tool = "code_interpreter"
+                    if expected_forced_tool is None and evidence_route_tool is not None:
+                        expected_forced_tool = evidence_route_tool
                 observed_forced_prefix_tool: str | None = None
                 if expected_forced_tool is not None:
                     observed_forced_tools = [
@@ -3097,9 +3392,10 @@ class SpreadsheetAgent:
                                 "observed_forced_tools": observed_forced_tools,
                             },
                         )
-                        raise AgentRoutingError(
+                        raise protocol_noncompliance(
                             f"Forced turn {turn_number} required exactly one "
-                            f"{expected_forced_tool!r} call; observed {observed_forced_tools!r}"
+                            f"{expected_forced_tool!r} call; observed {observed_forced_tools!r}",
+                            turns=turn_number,
                         )
                     assert observed_forced_tool is not None
                     if (
@@ -3123,9 +3419,10 @@ class SpreadsheetAgent:
                             "observed_tools": observed_names,
                         },
                     )
-                    raise AgentRoutingError(
+                    raise protocol_noncompliance(
                         "Required-tool stage expected exactly one function call; "
-                        f"observed {observed_names!r}"
+                        f"observed {observed_names!r}",
+                        turns=turn_number,
                     )
                 if budget_error is not None:
                     if observed_forced_prefix_tool is not None:
@@ -3152,11 +3449,6 @@ class SpreadsheetAgent:
                 if observed_forced_prefix_tool is not None:
                     observed_forced_tool_prefix.append(observed_forced_prefix_tool)
                     forced_prefix_index += 1
-                terminal_calls = [
-                    (function_call, call_id)
-                    for function_call, call_id in function_calls
-                    if function_call.get("name") == TERMINAL_TOOL_NAME
-                ]
                 if terminal_calls:
                     if not self.required_tool_termination or len(function_calls) != 1:
                         observed_names = [
@@ -3172,10 +3464,26 @@ class SpreadsheetAgent:
                                 "observed_tools": observed_names,
                             },
                         )
-                        raise AgentRoutingError(
+                        raise protocol_noncompliance(
                             f"Terminal tool {TERMINAL_TOOL_NAME!r} must be the only function call; "
-                            f"observed {observed_names!r}"
+                            f"observed {observed_names!r}",
+                            turns=turn_number,
                         )
+                    completion_attempt_id = (
+                        captured_terminal_attempts[0].attempt_id
+                        if captured_terminal_attempts
+                        else None
+                    )
+                    completion_attempt_context = (
+                        {
+                            "completion_attempt_id": completion_attempt_id,
+                            "completion_attempt_call_id": (
+                                captured_terminal_attempts[0].call_id
+                            ),
+                        }
+                        if completion_attempt_id is not None
+                        else {}
+                    )
                     terminal_call, _ = terminal_calls[0]
                     raw_arguments = terminal_call.get("arguments", "{}")
                     try:
@@ -3193,7 +3501,7 @@ class SpreadsheetAgent:
                             reason="terminal_submission_invalid",
                             turns=turn_number,
                             observed_terminal_tool=TERMINAL_TOOL_NAME,
-                            terminal_submissions=1,
+                            terminal_submissions=terminal_submission_attempts,
                         ) from exc
                     if self.terminal_result_required:
                         valid_evidence_arguments = bool(
@@ -3209,7 +3517,7 @@ class SpreadsheetAgent:
                                 reason="terminal_submission_invalid",
                                 turns=turn_number,
                                 observed_terminal_tool=TERMINAL_TOOL_NAME,
-                                terminal_submissions=1,
+                                terminal_submissions=terminal_submission_attempts,
                             )
                         final_text = arguments["result"]
                         acknowledgement = {
@@ -3227,7 +3535,7 @@ class SpreadsheetAgent:
                                 reason="terminal_submission_invalid",
                                 turns=turn_number,
                                 observed_terminal_tool=TERMINAL_TOOL_NAME,
-                                terminal_submissions=1,
+                                terminal_submissions=terminal_submission_attempts,
                             )
                         final_text = _TERMINAL_SUCCESS_TEXT
                         acknowledgement = {}
@@ -3263,6 +3571,7 @@ class SpreadsheetAgent:
                                     "stage": self.stage,
                                     "turn": turn_number,
                                     "terminal_tool": TERMINAL_TOOL_NAME,
+                                    **completion_attempt_context,
                                 },
                             )
                             continue
@@ -3271,7 +3580,7 @@ class SpreadsheetAgent:
                             reason="edit_recovery_exhausted",
                             turns=turn_number,
                             observed_terminal_tool=TERMINAL_TOOL_NAME,
-                            terminal_submissions=1,
+                            terminal_submissions=terminal_submission_attempts,
                         )
                     if self.require_workbook_change and not refresh_workbook_changed():
                         if turn_number < self.max_turns:
@@ -3320,6 +3629,7 @@ class SpreadsheetAgent:
                                     "turn": turn_number,
                                     "terminal_tool": TERMINAL_TOOL_NAME,
                                     "initial_workbook_sha256": initial_workbook_sha256,
+                                    **completion_attempt_context,
                                 },
                             )
                             continue
@@ -3331,6 +3641,7 @@ class SpreadsheetAgent:
                                 "terminal_tool": TERMINAL_TOOL_NAME,
                                 "reason": "workbook_unchanged",
                                 "initial_workbook_sha256": initial_workbook_sha256,
+                                **completion_attempt_context,
                             },
                         )
                         raise execution_failure(
@@ -3338,12 +3649,91 @@ class SpreadsheetAgent:
                             reason="workbook_unchanged",
                             turns=turn_number,
                             observed_terminal_tool=TERMINAL_TOOL_NAME,
-                            terminal_submissions=1,
+                            terminal_submissions=terminal_submission_attempts,
                         )
+                    evidence_monitor = getattr(self.tools, "evidence_monitor", None)
+                    if evidence_monitor is not None:
+                        contract_decision = evidence_monitor.submission_decision()
+                        session.recorder.record(
+                            "evidence_contract.submission_checked",
+                            {
+                                "stage": self.stage,
+                                "turn": turn_number,
+                                "decision": contract_decision.to_dict(),
+                                **completion_attempt_context,
+                            },
+                        )
+                        if not contract_decision.allowed:
+                            remaining_after_submission = (
+                                self.budget.remaining_model_calls()
+                                if self.budget is not None
+                                else None
+                            )
+                            can_retry_contract = bool(
+                                turn_number < self.max_turns
+                                and (
+                                    remaining_after_submission is None
+                                    or remaining_after_submission > 0
+                                )
+                            )
+                            if can_retry_contract:
+                                compact_contract = evidence_monitor.compact_status()
+                                recent_items = list(turn.output)
+                                recent_items.append(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "input_text",
+                                                "text": (
+                                                    "The harness rejected this submission because "
+                                                    "the enforced evidence contract is not ready. "
+                                                    "Use the required spreadsheet evidence tools "
+                                                    "for the exact current revision and scope, then "
+                                                    "submit again. Model prose and code stdout do "
+                                                    "not satisfy the contract. Harness status: "
+                                                    + json.dumps(
+                                                        compact_contract,
+                                                        ensure_ascii=True,
+                                                        sort_keys=True,
+                                                        separators=(",", ":"),
+                                                    )
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                )
+                                recent_summaries = []
+                                recent_raw_tool_output_chars = 0
+                                recent_image_bytes = 0
+                                recent_image_count = 0
+                                session.recorder.record(
+                                    "evidence_contract.terminal_reprompted",
+                                    {
+                                        "stage": self.stage,
+                                        "turn": turn_number,
+                                        "status": compact_contract,
+                                        **completion_attempt_context,
+                                    },
+                                )
+                                continue
+                            raise execution_failure(
+                                "Editing stage exhausted its budget with unsatisfied "
+                                "revision-bound evidence obligations",
+                                reason="verification_contract_unsatisfied",
+                                turns=turn_number,
+                                observed_terminal_tool=TERMINAL_TOOL_NAME,
+                                terminal_submissions=terminal_submission_attempts,
+                            )
                     terminal_response = {
                         "status": "accepted",
                         "response_id": last_id,
                         "acknowledgement": acknowledgement,
+                        **(
+                            {"completion_attempt_id": completion_attempt_id}
+                            if completion_attempt_id is not None
+                            else {}
+                        ),
                     }
                     result = AgentResult(
                         final_text=final_text,
@@ -3363,8 +3753,10 @@ class SpreadsheetAgent:
                         post_prefix_tool_choice="auto",
                         terminal_tool=TERMINAL_TOOL_NAME,
                         observed_terminal_tool=TERMINAL_TOOL_NAME,
-                        terminal_submissions=1,
+                        terminal_submissions=terminal_submission_attempts,
                         terminal_response=terminal_response,
+                        evidence_contract=evidence_contract_report(),
+                        completion_attempts=completion_attempt_records(),
                     )
                     session.recorder.record(
                         "agent.terminal_submitted",
@@ -3373,6 +3765,7 @@ class SpreadsheetAgent:
                             "turn": turn_number,
                             "terminal_tool": TERMINAL_TOOL_NAME,
                             "terminal_response": terminal_response,
+                            **completion_attempt_context,
                         },
                     )
                     session.recorder.record("agent.completed", result.to_dict())
@@ -3432,9 +3825,10 @@ class SpreadsheetAgent:
                                     "observed_tools": [],
                                 },
                             )
-                            raise AgentRoutingError(
+                            raise protocol_noncompliance(
                                 "Required-tool stage returned no function call; "
-                                f"finish with {TERMINAL_TOOL_NAME!r}"
+                                f"finish with {TERMINAL_TOOL_NAME!r}",
+                                turns=turn_number,
                             )
                         if self.require_workbook_change and not refresh_workbook_changed():
                             if turn_number < self.max_turns:
@@ -3571,9 +3965,10 @@ class SpreadsheetAgent:
                                 "observed_terminal_tool": ASSISTANT_TEXT_TERMINAL,
                             },
                         )
-                        raise AgentRoutingError(
+                        raise protocol_noncompliance(
                             "Required-tool stage returned text without calling "
-                            f"{TERMINAL_TOOL_NAME!r}"
+                            f"{TERMINAL_TOOL_NAME!r}",
+                            turns=turn_number,
                         )
                     result = AgentResult(
                         final_text=turn.text,
@@ -3593,6 +3988,8 @@ class SpreadsheetAgent:
                         post_prefix_tool_choice=("auto" if tool_schemas else None),
                         terminal_tool=ASSISTANT_TEXT_TERMINAL,
                         observed_terminal_tool=ASSISTANT_TEXT_TERMINAL,
+                        evidence_contract=evidence_contract_report(),
+                        completion_attempts=completion_attempt_records(),
                     )
                     session.recorder.record("agent.completed", result.to_dict())
                     return result
@@ -3604,6 +4001,7 @@ class SpreadsheetAgent:
                 next_recent_summaries: list[dict[str, Any]] = []
                 pending_tool_results: list[tuple[str, str, Any, dict[str, Any]]] = []
                 pending_image_items: list[dict[str, Any]] = []
+                next_visual_confirmations: list[dict[str, Any]] = []
                 next_image_bytes = 0
                 turn_workbook_sha256_before = (
                     _safe_file_sha256(session.workbook_path)
@@ -3662,6 +4060,7 @@ class SpreadsheetAgent:
                         secrets=(self.config.api_key,),
                     )
                     image_attached: bool | None = None
+                    visual_confirmation: dict[str, str] | None = None
                     if outcome and outcome.image_path:
                         image_path = outcome.image_path
                         remaining_image_bytes = _IMAGE_TURN_MAX_BYTES - next_image_bytes
@@ -3731,6 +4130,16 @@ class SpreadsheetAgent:
                                         )
                                         next_image_bytes += image_size
                                         image_attached = True
+                                        confirmation_id = outcome_data.get(
+                                            "visual_confirmation_id"
+                                        )
+                                        if isinstance(confirmation_id, str) and confirmation_id:
+                                            visual_confirmation = {
+                                                "confirmation_id": confirmation_id,
+                                                "attached_file_sha256": hashlib.sha256(
+                                                    image_data
+                                                ).hexdigest(),
+                                            }
                         if attachment_notice is not None:
                             model_visible_outcome["_harness_image_attachment"] = attachment_notice
                             image_attached = False
@@ -3741,6 +4150,10 @@ class SpreadsheetAgent:
                     if image_attached is not None:
                         trace_item["image_attached"] = image_attached
                     tool_trace.append(trace_item)
+                    if visual_confirmation is not None:
+                        next_visual_confirmations.append(
+                            {**visual_confirmation, "trace_item": trace_item}
+                        )
                     pending_tool_results.append(
                         (call_id, name, summary_arguments, model_visible_outcome)
                     )
@@ -3934,5 +4347,6 @@ class SpreadsheetAgent:
                 recent_raw_tool_output_chars = next_tool_output_chars
                 recent_image_bytes = next_image_bytes
                 recent_image_count = len(pending_image_items)
+                recent_visual_confirmations = next_visual_confirmations
 
         raise AgentTurnLimitError(f"Agent exceeded the maximum of {self.max_turns} turns")

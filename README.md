@@ -26,6 +26,35 @@ Dataset adapter -> isolated WorkbookSession -> tool/vision agent -> output workb
                                            validation-gated promotion
 ```
 
+## SheetLedger research protocol
+
+The optional v28 path adds revision-aware spreadsheet evidence and delivery
+records around the existing agent arms. It stages each protected mutation,
+computes the workbook effect independently of the tool's self-report, requires
+the effect to stay inside a previously inspected and declared target, and binds
+post-edit witnesses to the affected scope and exact workbook revision. Every
+`submit_result` attempt is snapshotted before gating. After the agent terminates,
+the observer evaluates those snapshots without feeding outcomes back, records
+postprocessing, and gives the scorer a read-only byte-identical replica.
+
+Enable this engineering protocol explicitly:
+
+```bash
+sheet-harness benchmark compare \
+  --dataset benchmarks/data/spreadsheetbench_verified_400 \
+  --output benchmarks/results/v28-development \
+  --arm bare --arm profile --arm native --arm paper --arm ours \
+  --deliverable-lineage
+```
+
+The fixed contract is `contracts/spreadsheet-evidence-v1.yaml`. A fresh audit
+replays the contract, target-authorization chain, completion-attempt lifecycle,
+candidate-to-final transition, and scoring-copy binding. The v28 switch is a
+component-integration protocol, not by itself the B5/B6/FULL causal matrix in
+the paper design and not evidence of benchmark improvement. Freeze a separate
+run spec before any reportable experiment, and do not compare its results with
+the historical v23--v27 studies as if only one mechanism changed.
+
 LibreOffice is a practical Linux backend, not a bit-for-bit substitute for desktop Excel. Results always record the calculation engine and protocol. In particular, scores from Excel COM and LibreOffice, or `solution_once_apply_n` and `agent_per_workbook`, must not be presented as the same leaderboard setting.
 
 ## Install
@@ -81,7 +110,8 @@ pytest
 ruff check .
 ```
 
-For VS Code Remote-SSH, open `/home/tongzeyuan/spreadsheet-harness`. The workspace settings select `.venv/bin/python`, enable pytest, and recommend the Python and Ruff extensions.
+For VS Code Remote-SSH, open the repository checkout. The workspace settings select
+`.venv/bin/python`, enable pytest, and recommend the Python and Ruff extensions.
 
 ## SpreadsheetBench Verified
 

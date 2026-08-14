@@ -22,6 +22,10 @@ from spreadsheet_harness.agent import (
     _selected_response_headers,
 )
 from spreadsheet_harness.budget import RunBudget
+from spreadsheet_harness.completion_attempt import (
+    CompletionAttemptError,
+    audit_completion_attempt,
+)
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import (
     AgentExecutionFailure,
@@ -30,8 +34,37 @@ from spreadsheet_harness.errors import (
     ProviderError,
     ProviderOutputLimitError,
 )
+from spreadsheet_harness.evidence_contract import (
+    PIXEL_SHA256_ALGORITHM,
+    ContractMode,
+    ContractSpec,
+    EffectKind,
+    EventKind,
+    EvidenceContractMonitor,
+    EvidenceEvent,
+    EvidenceScope,
+)
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
+
+
+def _readback_contract() -> ContractSpec:
+    return ContractSpec.from_mapping(
+        {
+            "schema_version": 1,
+            "rules": [
+                {
+                    "id": "post_write_readback",
+                    "trigger": "mutation.committed",
+                    "require": {
+                        "event": "range.inspected",
+                        "artifact": "current",
+                        "scope": "changed_cells_plus_boundary",
+                    },
+                }
+            ],
+        }
+    )
 
 
 class _LateStallingStream(httpx.SyncByteStream):
@@ -549,8 +582,9 @@ def test_agent_required_first_tool_fails_closed_on_missing_or_wrong_route(
             )
 
     monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", WrongRouteClient)
-    with pytest.raises(AgentRoutingError, match="required exactly one"):
+    with pytest.raises(AgentExecutionFailure, match="required exactly one") as caught:
         SpreadsheetAgent(config, tools, first_tool_choice="list_sheets").run("inspect")
+    assert caught.value.reason == "protocol_noncompliance"
     assert "agent.routing_failed" in session.paths.trajectory.read_text(encoding="utf-8")
 
 
@@ -752,12 +786,13 @@ def test_agent_forced_tool_prefix_fails_closed_on_later_turn(
     tools = SpreadsheetToolRegistry(session, enable_code=False)
     config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
 
-    with pytest.raises(AgentRoutingError, match="Forced turn 2"):
+    with pytest.raises(AgentExecutionFailure, match="Forced turn 2") as caught:
         SpreadsheetAgent(
             config,
             tools,
             forced_tool_prefix=("list_sheets", "list_sheets"),
         ).run("inspect")
+    assert caught.value.reason == "protocol_noncompliance"
 
 
 def test_agent_forced_turn_rejects_extra_calls_before_tool_execution(
@@ -808,12 +843,13 @@ def test_agent_forced_turn_rejects_extra_calls_before_tool_execution(
     monkeypatch.setattr(tools, "invoke", counted_invoke)
     config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
 
-    with pytest.raises(AgentRoutingError, match="required exactly one"):
+    with pytest.raises(AgentExecutionFailure, match="required exactly one") as caught:
         SpreadsheetAgent(
             config,
             tools,
             forced_tool_prefix=("list_sheets",),
         ).run("inspect")
+    assert caught.value.reason == "protocol_noncompliance"
     assert invocations == 0
 
 
@@ -915,6 +951,9 @@ def test_agent_required_tool_termination_uses_required_and_submit_result(
         "response_id": "response-submit",
         "acknowledgement": {},
     }
+    assert result.completion_attempts is None
+    assert "completion_attempts" not in result.to_dict()
+    assert not (session.workspace / "completion-attempts").exists()
     events = [
         json.loads(line)
         for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
@@ -2706,7 +2745,10 @@ def test_required_tool_termination_rejects_unadvanced_prefix_on_final_turn(
     )
     session = WorkbookSession.create(sample_workbook, tmp_path / "prefix-final-submit")
 
-    with pytest.raises(AgentRoutingError, match="Forced tool prefix remained incomplete"):
+    with pytest.raises(
+        AgentExecutionFailure,
+        match="Forced tool prefix remained incomplete",
+    ) as caught:
         SpreadsheetAgent(
             ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
             SpreadsheetToolRegistry(session, enable_code=False),
@@ -2714,6 +2756,7 @@ def test_required_tool_termination_rejects_unadvanced_prefix_on_final_turn(
             forced_tool_prefix=("list_sheets",),
             required_tool_termination=True,
         ).run("inspect")
+    assert caught.value.reason == "protocol_noncompliance"
 
     assert [
         request["tool_choice"] for request in EmptyPrefixThenSubmitClient.requests
@@ -2830,7 +2873,10 @@ def test_required_tool_termination_rejects_prefix_on_last_shared_budget_call(
     reservation = budget.begin_model_call(stage="prior")
     budget.record_response(reservation, {"total_tokens": 2}, stage="prior")
 
-    with pytest.raises(AgentRoutingError, match="Forced tool prefix remained incomplete"):
+    with pytest.raises(
+        AgentExecutionFailure,
+        match="Forced tool prefix remained incomplete",
+    ) as caught:
         SpreadsheetAgent(
             ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
             SpreadsheetToolRegistry(session, enable_code=False),
@@ -2839,6 +2885,7 @@ def test_required_tool_termination_rejects_prefix_on_last_shared_budget_call(
             forced_tool_prefix=("list_sheets",),
             required_tool_termination=True,
         ).run("inspect")
+    assert caught.value.reason == "protocol_noncompliance"
 
     assert BudgetPrefixPreemptionClient.requests == []
     assert budget.to_dict()["used"]["model_calls"] == 1
@@ -3112,7 +3159,7 @@ def test_reserved_terminal_route_rejects_wrong_tool(
     prior = budget.begin_model_call(stage="prior")
     budget.record_response(prior, {"total_tokens": 2}, stage="prior")
 
-    with pytest.raises(AgentRoutingError, match="submit_result"):
+    with pytest.raises(AgentExecutionFailure, match="submit_result") as caught:
         SpreadsheetAgent(
             ProviderConfig(
                 "https://example.test/v1", "not-a-real-key", "test-model"
@@ -3122,6 +3169,7 @@ def test_reserved_terminal_route_rejects_wrong_tool(
             budget=budget,
             required_tool_termination=True,
         ).run("inspect")
+    assert caught.value.reason == "protocol_noncompliance"
 
     assert invocations == 0
 
@@ -3394,12 +3442,16 @@ def test_agent_required_tool_termination_rejects_multiple_calls_before_execution
     monkeypatch.setattr(tools, "invoke", counted_invoke)
     config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
 
-    with pytest.raises(AgentRoutingError, match="exactly one function call"):
+    with pytest.raises(
+        AgentExecutionFailure,
+        match="exactly one function call",
+    ) as caught:
         SpreadsheetAgent(
             config,
             tools,
             required_tool_termination=True,
         ).run("inspect")
+    assert caught.value.reason == "protocol_noncompliance"
     assert invocations == 0
 
 
@@ -5024,3 +5076,1152 @@ def test_agent_keeps_only_one_raw_tool_turn_in_context(
     assert "input_image" in second
     assert "input_image" not in third
     assert result.context_policy["recent_raw_turns"] == 1
+
+
+def test_agent_confirms_exact_image_only_after_successful_provider_response(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class VisualClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> VisualClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **_: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "visual-tool-response",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "view-call",
+                            "name": "view_image",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "provider-confirmation-response",
+                [{"type": "message", "content": []}],
+                "done",
+                {},
+            )
+
+    class VisualTools:
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+            self.schemas = [
+                {
+                    "type": "function",
+                    "name": "view_image",
+                    "description": "attach a rendered page",
+                    "parameters": {"type": "object"},
+                }
+            ]
+            self.image = session.workspace / "page.png"
+            self.image.write_bytes(b"model-visible-image")
+            self.confirmations: list[dict[str, str]] = []
+
+        def invoke(self, _: str, __: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(
+                {"ok": True, "visual_confirmation_id": "confirmation-1"},
+                image_path=self.image,
+            )
+
+        def confirm_view_image_delivery(
+            self,
+            confirmation_id: str,
+            *,
+            attached_file_sha256: str,
+            provider_response_id: str,
+        ) -> dict[str, Any]:
+            self.confirmations.append(
+                {
+                    "confirmation_id": confirmation_id,
+                    "attached_file_sha256": attached_file_sha256,
+                    "provider_response_id": provider_response_id,
+                }
+            )
+            return {"confirmed": True}
+
+    VisualClient.requests = []
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", VisualClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "visual-confirmation")
+    tools = VisualTools(session)
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,  # type: ignore[arg-type]
+        max_turns=2,
+    ).run("Inspect the rendered page")
+
+    assert tools.confirmations == [
+        {
+            "confirmation_id": "confirmation-1",
+            "attached_file_sha256": hashlib.sha256(
+                b"model-visible-image"
+            ).hexdigest(),
+            "provider_response_id": "provider-confirmation-response",
+        }
+    ]
+    assert result.tool_trace == [
+        {
+            "name": "view_image",
+            "ok": True,
+            "image_attached": True,
+            "image_delivery_confirmed": True,
+        }
+    ]
+    assert "input_image" in json.dumps(VisualClient.requests[1]["input"])
+
+
+def test_agent_does_not_confirm_image_when_provider_request_fails(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class FailingVisualClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> FailingVisualClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, _: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "visual-tool-response",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "view-call",
+                            "name": "view_image",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            raise RuntimeError("injected provider failure")
+
+    class VisualTools:
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+            self.schemas = [
+                {
+                    "type": "function",
+                    "name": "view_image",
+                    "description": "attach a rendered page",
+                    "parameters": {"type": "object"},
+                }
+            ]
+            self.image = session.workspace / "page.png"
+            self.image.write_bytes(b"model-visible-image")
+            self.confirmed = False
+
+        def invoke(self, _: str, __: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(
+                {"ok": True, "visual_confirmation_id": "confirmation-1"},
+                image_path=self.image,
+            )
+
+        def confirm_view_image_delivery(self, *_: Any, **__: Any) -> dict[str, Any]:
+            self.confirmed = True
+            return {"confirmed": True}
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient",
+        FailingVisualClient,
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "visual-provider-failure")
+    tools = VisualTools(session)
+
+    with pytest.raises(RuntimeError, match="injected provider failure"):
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1",
+                "not-a-real-key",
+                "test-model",
+            ),
+            tools,  # type: ignore[arg-type]
+            max_turns=2,
+        ).run("Inspect the rendered page")
+
+    assert tools.confirmed is False
+
+
+def test_enforced_contract_reprompts_submit_then_accepts_current_scope_evidence(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ContractClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> ContractClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                name = "write_range"
+                arguments = {
+                    "sheet": "Sales",
+                    "start_cell": "A2",
+                    "values": [["Banana"]],
+                }
+            elif self.turn == 2:
+                assert payload["tool_choice"] == "auto"
+                name = "submit_result"
+                arguments = {}
+            elif self.turn == 3:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "inspect_range",
+                }
+                assert [tool["name"] for tool in payload["tools"]] == [
+                    "inspect_range"
+                ]
+                name = "inspect_range"
+                arguments = {"sheet": "Sales", "range_ref": "A1:B3"}
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+                name = "submit_result"
+                arguments = {}
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ContractClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "contract-reprompt")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        evidence_contract=_readback_contract(),
+        contract_mode=ContractMode.ENFORCE,
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,
+        max_turns=4,
+        budget=RunBudget(max_model_calls=4, max_total_tokens=100),
+        required_tool_termination=True,
+        require_workbook_change=True,
+    ).run("Replace the item in Sales!A2 with Banana")
+
+    assert result.turns == 4
+    assert result.final_text == "Spreadsheet task completed."
+    assert result.terminal_submissions == 2
+    assert result.to_dict()["function_calls_total"] == 4
+    assert result.evidence_contract is not None
+    assert result.evidence_contract["status"]["submission_ready"] is True
+    decision = result.evidence_contract["decision"]
+    assert decision["allowed"] is True
+    assert decision["contract_satisfied"] is True
+    certificate = decision["certificate"]
+    assert certificate["accepted_revision_sha256"] == session.artifact_ref().sha256
+    assert len(certificate["certificate_sha256"]) == 64
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    checks = [
+        event
+        for event in events
+        if event["event"] == "evidence_contract.submission_checked"
+    ]
+    assert [event["payload"]["decision"]["allowed"] for event in checks] == [
+        False,
+        True,
+    ]
+    routes = [
+        event
+        for event in events
+        if event["event"] == "evidence_contract.budget_route_forced"
+    ]
+    assert routes[0]["payload"]["required_tool"] == "inspect_range"
+    assert routes[0]["payload"]["reserved_terminal_calls"] == 1
+
+
+def test_opt_in_completion_snapshots_retain_rejected_then_accepted_submit(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    class ContractClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> ContractClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                name = "write_range"
+                arguments = {
+                    "sheet": "Sales",
+                    "start_cell": "A2",
+                    "values": [["Banana"]],
+                }
+            elif self.turn == 2:
+                name = "submit_result"
+                arguments = {}
+            elif self.turn == 3:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "inspect_range",
+                }
+                name = "inspect_range"
+                arguments = {"sheet": "Sales", "range_ref": "A1:B3"}
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+                name = "submit_result"
+                arguments = {}
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ContractClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "attempt-reprompt")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        evidence_contract=_readback_contract(),
+        contract_mode=ContractMode.ENFORCE,
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,
+        max_turns=4,
+        budget=RunBudget(max_model_calls=4, max_total_tokens=100),
+        stage="solve",
+        required_tool_termination=True,
+        require_workbook_change=True,
+        capture_completion_attempts=True,
+    ).run("Replace the item in Sales!A2 with Banana")
+
+    attempts = result.completion_attempts
+    assert attempts is not None
+    assert result.to_dict()["completion_attempts"] == attempts
+    assert [item["attempt_id"] for item in attempts] == [1, 2]
+    assert [item["turn"] for item in attempts] == [2, 4]
+    assert [item["stage"] for item in attempts] == ["solve", "solve"]
+    assert [item["response_id"] for item in attempts] == [
+        "response-2",
+        "response-4",
+    ]
+    assert [item["call_id"] for item in attempts] == ["call-2", "call-4"]
+    assert attempts[0]["artifact"] == attempts[1]["artifact"]
+    assert all(audit_completion_attempt(session.workspace, item).valid for item in attempts)
+    assert result.terminal_response is not None
+    assert result.terminal_response["completion_attempt_id"] == 2
+
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    relevant = [
+        event
+        for event in events
+        if event["event"]
+        in {
+            "agent.completion_attempt_captured",
+            "evidence_contract.submission_checked",
+        }
+    ]
+    assert [event["event"] for event in relevant] == [
+        "agent.completion_attempt_captured",
+        "evidence_contract.submission_checked",
+        "agent.completion_attempt_captured",
+        "evidence_contract.submission_checked",
+    ]
+    checks = [
+        event["payload"]["decision"]["allowed"]
+        for event in relevant
+        if event["event"] == "evidence_contract.submission_checked"
+    ]
+    assert checks == [False, True]
+    assert [
+        event["payload"]["completion_attempt_id"]
+        for event in relevant
+        if event["event"] == "evidence_contract.submission_checked"
+    ] == [1, 2]
+    accepted_event = next(
+        event for event in events if event["event"] == "agent.terminal_submitted"
+    )
+    assert accepted_event["payload"]["completion_attempt_id"] == 2
+    assert accepted_event["payload"]["completion_attempt_call_id"] == "call-4"
+
+
+def test_opt_in_first_submit_acceptance_names_exact_completion_attempt(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    class SubmitClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> SubmitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, _: dict[str, Any], **__: Any) -> ResponseTurn:
+            return ResponseTurn(
+                "response-accepted",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-accepted",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", SubmitClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "attempt-accepted")
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        SpreadsheetToolRegistry(session, enable_code=False),
+        max_turns=1,
+        stage="solve",
+        required_tool_termination=True,
+        capture_completion_attempts=True,
+    ).run("Inspect the workbook")
+
+    assert result.completion_attempts is not None
+    assert len(result.completion_attempts) == 1
+    attempt = result.completion_attempts[0]
+    assert attempt["attempt_id"] == 1
+    assert attempt["response_id"] == "response-accepted"
+    assert attempt["call_id"] == "call-accepted"
+    assert result.terminal_response == {
+        "status": "accepted",
+        "response_id": "response-accepted",
+        "acknowledgement": {},
+        "completion_attempt_id": 1,
+    }
+    assert audit_completion_attempt(session.workspace, attempt).valid is True
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    accepted_event = next(
+        event for event in events if event["event"] == "agent.terminal_submitted"
+    )
+    assert accepted_event["payload"]["completion_attempt_id"] == 1
+    assert accepted_event["payload"]["completion_attempt_call_id"] == "call-accepted"
+
+
+def test_completion_snapshots_distinguish_hash_cycle_revisions(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    class HashCycleClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> HashCycleClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                name, arguments = "submit_result", {}
+            elif self.turn == 2:
+                name = "write_range"
+                arguments = {
+                    "sheet": "Sales",
+                    "start_cell": "A2",
+                    "values": [["Banana"]],
+                }
+            elif self.turn == 3:
+                name, arguments = "undo_last", {}
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+                name, arguments = "submit_result", {}
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", HashCycleClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "attempt-hash-cycle")
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1",
+                "not-a-real-key",
+                "test-model",
+            ),
+            SpreadsheetToolRegistry(session, enable_code=False),
+            max_turns=4,
+            stage="solve",
+            required_tool_termination=True,
+            require_workbook_change=True,
+            capture_completion_attempts=True,
+        ).run("Temporarily edit and then restore Sales!A2")
+
+    assert caught.value.reason == "workbook_unchanged"
+    attempts = caught.value.agent_result.completion_attempts
+    assert attempts is not None
+    assert caught.value.agent_result.to_dict()["completion_attempts"] == attempts
+    assert [item["attempt_id"] for item in attempts] == [1, 2]
+    assert [item["artifact"]["revision"] for item in attempts] == [0, 2]
+    assert attempts[0]["artifact"]["sha256"] == attempts[1]["artifact"]["sha256"]
+    assert attempts[0]["record_sha256"] != attempts[1]["record_sha256"]
+    assert [item["call_id"] for item in attempts] == ["call-1", "call-4"]
+    assert all(audit_completion_attempt(session.workspace, item).valid for item in attempts)
+
+
+def test_completion_snapshot_failure_denies_submit_before_evidence_gate(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    class SubmitClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> SubmitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, _: dict[str, Any], **__: Any) -> ResponseTurn:
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {},
+            )
+
+    def fail_capture(*_: Any, **__: Any) -> None:
+        raise CompletionAttemptError("injected snapshot failure")
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", SubmitClient)
+    monkeypatch.setattr(
+        "spreadsheet_harness.completion_attempt.CompletionAttemptLedger.capture",
+        fail_capture,
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "attempt-failure")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        evidence_contract=_readback_contract(),
+        contract_mode=ContractMode.ENFORCE,
+    )
+
+    def forbidden_gate() -> Any:
+        raise AssertionError("evidence gate must not run after snapshot failure")
+
+    assert tools.evidence_monitor is not None
+    monkeypatch.setattr(tools.evidence_monitor, "submission_decision", forbidden_gate)
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1",
+                "not-a-real-key",
+                "test-model",
+            ),
+            tools,
+            max_turns=1,
+            stage="solve",
+            required_tool_termination=True,
+            capture_completion_attempts=True,
+        ).run("Inspect the workbook")
+
+    failure = caught.value
+    assert failure.reason == "completion_attempt_capture_failed"
+    assert failure.agent_result.terminal_submissions == 1
+    assert failure.agent_result.completion_attempts == []
+    assert failure.agent_result.to_dict()["completion_attempts"] == []
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not any(
+        event["event"] == "evidence_contract.submission_checked" for event in events
+    )
+
+
+def test_enforced_contract_fails_with_typed_reason_when_final_submit_is_pending(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class PendingClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> PendingClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                name = "write_range"
+                arguments = {
+                    "sheet": "Sales",
+                    "start_cell": "A2",
+                    "values": [["Banana"]],
+                }
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+                name = "submit_result"
+                arguments = {}
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", PendingClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "contract-pending")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        evidence_contract=_readback_contract(),
+        contract_mode=ContractMode.ENFORCE,
+    )
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            tools,
+            max_turns=2,
+            required_tool_termination=True,
+            require_workbook_change=True,
+        ).run("Replace the item in Sales!A2 with Banana")
+
+    failure = caught.value
+    assert failure.reason == "verification_contract_unsatisfied"
+    assert failure.agent_result.observed_terminal_tool == "submit_result"
+    assert failure.agent_result.evidence_contract is not None
+    decision = failure.agent_result.evidence_contract["decision"]
+    assert decision["allowed"] is False
+    assert decision["reasons"] == ["pending_evidence_obligations"]
+    assert decision["certificate"] is None
+
+
+def test_enforced_contract_rejects_byte_changed_semantic_noop(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class NoopClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> NoopClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                name = "write_range"
+                arguments = {
+                    "sheet": "Sales",
+                    "start_cell": "A2",
+                    "values": [["Apple"]],
+                }
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+                name = "submit_result"
+                arguments = {}
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", NoopClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "contract-noop")
+    initial_sha256 = session.artifact_ref().sha256
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        evidence_contract=_readback_contract(),
+        contract_mode=ContractMode.ENFORCE,
+    )
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig(
+                "https://example.test/v1", "not-a-real-key", "test-model"
+            ),
+            tools,
+            max_turns=2,
+            required_tool_termination=True,
+            require_workbook_change=True,
+        ).run("Keep Sales!A2 set to Apple")
+
+    assert session.artifact_ref().sha256 != initial_sha256
+    failure = caught.value
+    assert failure.reason == "verification_contract_unsatisfied"
+    assert failure.agent_result.evidence_contract is not None
+    decision = failure.agent_result.evidence_contract["decision"]
+    assert decision["artifact_changed"] is False
+    assert decision["reasons"] == ["artifact_unchanged"]
+    assert failure.agent_result.evidence_contract["status"][
+        "has_committed_mutation"
+    ] is False
+
+
+def test_shadow_contract_records_pending_violation_without_blocking_submit(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ShadowClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> ShadowClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                name = "write_range"
+                arguments = {
+                    "sheet": "Sales",
+                    "start_cell": "A2",
+                    "values": [["Banana"]],
+                }
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+                name = "submit_result"
+                arguments = {}
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ShadowClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "contract-shadow")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=False,
+        evidence_contract=_readback_contract(),
+        contract_mode=ContractMode.SHADOW,
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,
+        max_turns=2,
+        required_tool_termination=True,
+        require_workbook_change=True,
+    ).run("Replace the item in Sales!A2 with Banana")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert result.evidence_contract is not None
+    decision = result.evidence_contract["decision"]
+    assert decision["allowed"] is True
+    assert decision["contract_satisfied"] is False
+    assert decision["reasons"] == ["pending_evidence_obligations"]
+    assert decision["certificate"] is None
+    assert result.evidence_contract["status"]["submission_ready"] is False
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    checks = [
+        event
+        for event in events
+        if event["event"] == "evidence_contract.submission_checked"
+    ]
+    assert checks[-1]["payload"]["decision"]["reasons"] == [
+        "pending_evidence_obligations"
+    ]
+    assert not any(
+        event["event"] == "evidence_contract.budget_route_forced"
+        for event in events
+    )
+
+
+@pytest.mark.parametrize(
+    ("required_event", "required_tool"),
+    [
+        (EventKind.RANGE_INSPECTED, "inspect_range"),
+        (EventKind.WORKBOOK_RECALCULATED, "recalculate_and_read"),
+        (EventKind.WORKBOOK_RENDERED, "render_workbook"),
+        (EventKind.RENDERED_PAGE_VIEWED, "view_image"),
+    ],
+)
+def test_enforced_contract_reserves_evidence_route_and_final_submit(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+    required_event: EventKind,
+    required_tool: str,
+) -> None:
+    initial_revision = "1" * 64
+    edited_revision = "2" * 64
+    derived_revision = "3" * 64
+    manifest_sha256 = "4" * 64
+    page_sha256 = "5" * 64
+    rule: dict[str, Any] = {
+        "id": "budget_route",
+        "trigger": "mutation.committed",
+    }
+    if required_event is EventKind.RENDERED_PAGE_VIEWED:
+        rule["require_sequence"] = [
+            {"event": "workbook.rendered", "artifact": "current"},
+            {
+                "event": "rendered_page.viewed",
+                "artifact": "same_render",
+                "scope": "changed_visual_scope",
+            },
+        ]
+    else:
+        rule["require"] = {
+            "event": required_event.value,
+            "artifact": "current",
+        }
+    spec = ContractSpec.from_mapping(
+        {"schema_version": 1, "rules": [rule]}
+    )
+    monitor = EvidenceContractMonitor(
+        spec,
+        initial_revision,
+        mode=ContractMode.ENFORCE,
+    )
+    monitor.observe(
+        EvidenceEvent(
+            EventKind.MUTATION_COMMITTED,
+            initial_revision,
+            edited_revision,
+            effects=frozenset({EffectKind.VALUE}),
+            scope=EvidenceScope.one("Sales", "A2"),
+        )
+    )
+    if required_event is EventKind.RENDERED_PAGE_VIEWED:
+        monitor.observe(
+            EvidenceEvent(
+                EventKind.WORKBOOK_RENDERED,
+                edited_revision,
+                render_id="render-1",
+                render_manifest_sha256=manifest_sha256,
+                metadata={
+                    "producer_tool": "render_workbook",
+                    "backend": "libreoffice-pymupdf",
+                    "version": {
+                        "libreoffice": "test-version",
+                        "pymupdf": "test-version",
+                    },
+                    "mode": "per_sheet",
+                    "dpi": 144,
+                    "page_count": 1,
+                    "pages": [
+                        {
+                            "page_id": "page-1",
+                            "page_index": 1,
+                            "file_sha256": page_sha256,
+                            "width": 320,
+                            "height": 240,
+                            "sheet": "Sales",
+                            "sheet_page": 1,
+                            "cell_scope": EvidenceScope.one(
+                                "Sales", "A1:B3"
+                            ).to_dict(),
+                        }
+                    ],
+                },
+            )
+        )
+
+    class EvidenceTools:
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+            self.evidence_monitor = monitor
+            self.schemas = [
+                {
+                    "type": "function",
+                    "name": required_tool,
+                    "description": "produce required evidence",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                }
+            ]
+
+        def invoke(self, name: str, _: dict[str, Any]) -> ToolOutcome:
+            assert name == required_tool
+            if required_event is EventKind.RANGE_INSPECTED:
+                event = EvidenceEvent(
+                    required_event,
+                    edited_revision,
+                    scope=EvidenceScope.one("Sales", "A1:B3"),
+                )
+            elif required_event is EventKind.WORKBOOK_RECALCULATED:
+                event = EvidenceEvent(
+                    required_event,
+                    edited_revision,
+                    derived_revision,
+                    metadata={
+                        "producer_tool": required_tool,
+                        "calculation": {
+                            "backend": "libreoffice-headless",
+                            "version": "test-version",
+                            "source_sha256": edited_revision,
+                            "output_sha256": derived_revision,
+                            "atomic_replace": True,
+                        },
+                    },
+                )
+            elif required_event is EventKind.WORKBOOK_RENDERED:
+                event = EvidenceEvent(
+                    required_event,
+                    edited_revision,
+                    render_id="render-1",
+                    render_manifest_sha256=manifest_sha256,
+                    metadata={
+                        "producer_tool": "render_workbook",
+                        "backend": "libreoffice-pymupdf",
+                        "version": {
+                            "libreoffice": "test-version",
+                            "pymupdf": "test-version",
+                        },
+                        "mode": "per_sheet",
+                        "dpi": 144,
+                        "page_count": 1,
+                        "pages": [
+                            {
+                                "page_id": "page-1",
+                                "page_index": 1,
+                                "file_sha256": page_sha256,
+                                "width": 320,
+                                "height": 240,
+                                "sheet": "Sales",
+                                "sheet_page": 1,
+                                "cell_scope": EvidenceScope.one(
+                                    "Sales", "A1:B3"
+                                ).to_dict(),
+                            }
+                        ],
+                    },
+                )
+            else:
+                page_scope = EvidenceScope.one("Sales", "A1:B3")
+                event = EvidenceEvent(
+                    required_event,
+                    edited_revision,
+                    scope=page_scope,
+                    related_render_id="render-1",
+                    related_render_manifest_sha256=manifest_sha256,
+                    page_id="page-1",
+                    page_sha256=page_sha256,
+                    metadata={
+                        "producer_tool": "view_image",
+                        "delivery_status": "provider_response_confirmed",
+                        "confirmation_id": "confirmation-1",
+                        "provider_response_id": "response-1",
+                        "attachment_file_sha256": page_sha256,
+                        "page_file_sha256": page_sha256,
+                        "page_pixel_sha256": "6" * 64,
+                        "pixel_sha256_algorithm": PIXEL_SHA256_ALGORITHM,
+                        "width": 320,
+                        "height": 240,
+                        "image_mode": "RGB",
+                        "render_mode": "per_sheet",
+                        "page_index": 1,
+                        "sheet": "Sales",
+                        "sheet_page": 1,
+                        "cell_scope": page_scope.to_dict(),
+                    },
+                )
+            self.evidence_monitor.observe(event)
+            return ToolOutcome(
+                {
+                    "ok": True,
+                    "_evidence_contract": self.evidence_monitor.compact_status(),
+                }
+            )
+
+    class RouteClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> RouteClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": required_tool,
+                }
+                assert [tool["name"] for tool in payload["tools"]] == [required_tool]
+                name = required_tool
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+                assert [tool["name"] for tool in payload["tools"]] == [
+                    "submit_result"
+                ]
+                name = "submit_result"
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", RouteClient)
+    session = WorkbookSession.create(
+        sample_workbook,
+        tmp_path / f"contract-route-{required_tool}",
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        EvidenceTools(session),  # type: ignore[arg-type]
+        max_turns=2,
+        budget=RunBudget(max_model_calls=2, max_total_tokens=100),
+        required_tool_termination=True,
+    ).run("Produce the remaining workbook evidence")
+
+    assert result.evidence_contract is not None
+    assert result.evidence_contract["decision"]["contract_satisfied"] is True
+    assert result.evidence_contract["decision"]["certificate"] is not None

@@ -1,0 +1,5 @@
+# Preserve the byte-exact official ICLR style bundle, including upstream whitespace.
+paper/fancyhdr.sty -whitespace
+paper/iclr2027_conference.bst -whitespace
+paper/iclr2027_conference.sty -whitespace
+paper/natbib.sty -whitespace

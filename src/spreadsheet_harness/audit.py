@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import shutil
 import stat
 import subprocess
+import tempfile
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from openpyxl import load_workbook
 
-from .arms import COMPARISON_FORCED_TOOL_PREFIX_POLICY, comparison_stage_turn_caps
+from .arms import (
+    comparison_forced_tool_prefix_policy,
+    comparison_stage_turn_caps,
+)
 from .benchmark import (
     SpreadsheetTask,
     _source_fingerprint,
@@ -45,9 +51,15 @@ from .comparison import (
     V26_COMPARISON_CONFIGURATION_POLICIES,
     V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V26_COMPARISON_PROTOCOL_VERSION,
+    V28_COMPARISON_CONFIGURATION_POLICIES,
+    V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V28_COMPARISON_PROTOCOL_VERSION,
+    V28_COMPLETION_EVALUATOR_ID,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
+    _v28_evidence_runtime_identity,
+    _v28_observer_budget,
     manifest_execution_contract,
     parse_pilot_run_spec_bytes,
     protected_run_spec_split_ids,
@@ -55,7 +67,54 @@ from .comparison import (
     verify_pilot_run_spec_contract,
     verify_pilot_run_spec_provenance,
 )
+from .completion_attempt import CompletionAttemptRecord, audit_completion_attempt
+from .completion_evaluation import (
+    CompletionEvaluationRecord,
+    audit_completion_evaluation,
+)
+from .deliverable import (
+    COMPARISON_RESULT_SCHEMA_VERSION,
+    DELIVERABLE_CERTIFICATE_SCHEMA_VERSION,
+    audit_deliverable_certificate,
+)
 from .errors import HarnessError
+
+_TIMING_ROUNDING_TOLERANCE_SECONDS = 2.0
+
+
+def _finite_nonnegative_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        return None
+    return normalized
+
+
+def _utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    offset = parsed.utcoffset()
+    if offset is None or offset.total_seconds() != 0:
+        return None
+    return parsed
+
+
+def _elapsed_matches_timestamps(
+    elapsed_seconds: float,
+    started_at: datetime,
+    finished_at: datetime,
+) -> bool:
+    wall_seconds = (finished_at - started_at).total_seconds()
+    return bool(
+        wall_seconds >= 0
+        and abs(elapsed_seconds - wall_seconds)
+        <= _TIMING_ROUNDING_TOLERANCE_SECONDS
+    )
 
 
 @dataclass(frozen=True)
@@ -71,6 +130,8 @@ class _AuditProtocolContract:
     require_exact_agent_evidence: bool = False
     require_truncated_terminal_evidence: bool = False
     require_accepted_terminal_evidence: bool = False
+    require_deliverable_lineage: bool = False
+    require_completion_attempts: bool = False
 
 
 _V23_AUDIT_CONTRACT = _AuditProtocolContract(
@@ -143,6 +204,27 @@ _V27_AUDIT_CONTRACT = _AuditProtocolContract(
     require_truncated_terminal_evidence=True,
     require_accepted_terminal_evidence=True,
 )
+_V28_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=V28_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V28_COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=frozenset(
+        {
+            *_V26_AUDIT_CONTRACT.allowed_model_failure_reasons,
+            "completion_attempt_capture_failed",
+            "verification_contract_unsatisfied",
+        }
+    ),
+    require_v24_outcome_fields=True,
+    strict_current_source=True,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
+    require_truncated_terminal_evidence=True,
+    require_accepted_terminal_evidence=True,
+    require_deliverable_lineage=True,
+    require_completion_attempts=True,
+)
 
 
 def _select_audit_contract(
@@ -154,6 +236,11 @@ def _select_audit_contract(
         manifest.get("comparison_protocol_version"),
         manifest.get("schema_version"),
     )
+    if identity == (
+        _V28_AUDIT_CONTRACT.protocol_version,
+        _V28_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V28_AUDIT_CONTRACT
     if identity == (
         _V27_AUDIT_CONTRACT.protocol_version,
         _V27_AUDIT_CONTRACT.manifest_schema_version,
@@ -188,6 +275,7 @@ def _select_audit_contract(
         _V25_AUDIT_CONTRACT.manifest_schema_version,
         _V26_AUDIT_CONTRACT.manifest_schema_version,
         _V27_AUDIT_CONTRACT.manifest_schema_version,
+        _V28_AUDIT_CONTRACT.manifest_schema_version,
     }:
         _add_reason(reasons, "comparison_manifest_schema_mismatch")
     if manifest.get("comparison_protocol_version") not in {
@@ -196,6 +284,7 @@ def _select_audit_contract(
         _V25_AUDIT_CONTRACT.protocol_version,
         _V26_AUDIT_CONTRACT.protocol_version,
         _V27_AUDIT_CONTRACT.protocol_version,
+        _V28_AUDIT_CONTRACT.protocol_version,
     }:
         _add_reason(reasons, "comparison_manifest_protocol_mismatch")
     return None
@@ -607,12 +696,12 @@ def _v26_accepted_terminal_response_valid(
     result: dict[str, Any],
     *,
     acknowledgement_mode: str,
+    require_completion_attempt: bool = False,
 ) -> bool:
-    if not isinstance(terminal_response, dict) or set(terminal_response) != {
-        "status",
-        "response_id",
-        "acknowledgement",
-    }:
+    expected_fields = {"status", "response_id", "acknowledgement"}
+    if require_completion_attempt:
+        expected_fields.add("completion_attempt_id")
+    if not isinstance(terminal_response, dict) or set(terminal_response) != expected_fields:
         return False
     response_id = terminal_response.get("response_id")
     if response_id is not None and (
@@ -629,6 +718,11 @@ def _v26_accepted_terminal_response_valid(
         or not isinstance(acknowledgement, dict)
     ):
         return False
+    if require_completion_attempt and not _accepted_completion_attempt_binding_valid(
+        terminal_response,
+        result,
+    ):
+        return False
     if acknowledgement_mode == "empty_ack":
         return acknowledgement == {} and final_text == "Spreadsheet task completed."
     if acknowledgement_mode != "evidence_result":
@@ -643,10 +737,32 @@ def _v26_accepted_terminal_response_valid(
     )
 
 
+def _accepted_completion_attempt_binding_valid(
+    terminal_response: dict[str, Any],
+    result: dict[str, Any],
+) -> bool:
+    raw_attempts = result.get("completion_attempts")
+    if not isinstance(raw_attempts, list) or not raw_attempts:
+        return False
+    try:
+        attempts = [CompletionAttemptRecord.from_dict(item) for item in raw_attempts]
+    except (TypeError, ValueError):
+        return False
+    attempt_ids = [item.attempt_id for item in attempts]
+    accepted_id = terminal_response.get("completion_attempt_id")
+    return bool(
+        type(accepted_id) is int
+        and attempt_ids == list(range(1, len(attempts) + 1))
+        and accepted_id == attempts[-1].attempt_id
+        and attempts[-1].response_id == terminal_response.get("response_id")
+    )
+
+
 def _v26_completed_stage_terminal_response_valid(
     stage: dict[str, Any],
     *,
     arm: str,
+    require_completion_attempt: bool = False,
 ) -> bool:
     stage_agent = stage.get("agent")
     name = stage.get("name")
@@ -665,16 +781,23 @@ def _v26_completed_stage_terminal_response_valid(
             and stage_agent.get("observed_terminal_tool") == "assistant_text"
             and stage_agent.get("terminal_submissions") == 0
         )
+    raw_attempts = stage_agent.get("completion_attempts")
+    expected_terminal_submissions = (
+        len(raw_attempts)
+        if require_completion_attempt and isinstance(raw_attempts, list) and raw_attempts
+        else 1
+    )
     return bool(
         stage.get("terminal_tool") == "submit_result"
         and stage.get("observed_terminal_tool") == "submit_result"
         and stage_agent.get("terminal_tool") == "submit_result"
         and stage_agent.get("observed_terminal_tool") == "submit_result"
-        and stage_agent.get("terminal_submissions") == 1
+        and stage_agent.get("terminal_submissions") == expected_terminal_submissions
         and _v26_accepted_terminal_response_valid(
             terminal_response,
             stage_agent,
             acknowledgement_mode=acknowledgement_mode,
+            require_completion_attempt=require_completion_attempt,
         )
     )
 
@@ -716,6 +839,7 @@ def _v26_success_terminal_evidence_valid(
     stages: list[dict[str, Any]],
     *,
     arm: str,
+    require_completion_attempt: bool = False,
 ) -> bool:
     if (
         row.get("status") != "completed"
@@ -723,8 +847,14 @@ def _v26_success_terminal_evidence_valid(
         or not stages
         or any("terminal_response" in stage for stage in stages)
         or not all(
-            _v26_completed_stage_terminal_response_valid(stage, arm=arm)
-            for stage in stages
+            _v26_completed_stage_terminal_response_valid(
+                stage,
+                arm=arm,
+                require_completion_attempt=(
+                    require_completion_attempt and index == len(stages) - 1
+                ),
+            )
+            for index, stage in enumerate(stages)
         )
     ):
         return False
@@ -746,6 +876,7 @@ def _v26_success_terminal_evidence_valid(
             terminal_response,
             final_agent,
             acknowledgement_mode=str(final_mode),
+            require_completion_attempt=require_completion_attempt,
         )
         and agent.get("terminal_response") == terminal_response
         and agent.get("final_text") == final_agent.get("final_text")
@@ -922,6 +1053,17 @@ def _absolute_path(value: Any, *, base: Path) -> Path | None:
     if not candidate.is_absolute():
         candidate = base / candidate
     return Path(os.path.abspath(candidate))
+
+
+def _portable_result_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    candidate = PurePosixPath(value)
+    return bool(
+        not candidate.is_absolute()
+        and candidate.parts
+        and all(part not in {"", ".", ".."} for part in candidate.parts)
+    )
 
 
 def _has_symlink(root: Path, target: Path) -> bool:
@@ -1180,7 +1322,7 @@ def _load_continuation_source(
             "source_fingerprint",
         }:
             raise ValueError("invalid repository source fields")
-        unsigned = {
+        hash_payload = {
             "schema_version": record.get("schema_version"),
             "comparison_manifest_sha256": record.get(
                 "comparison_manifest_sha256"
@@ -1189,7 +1331,7 @@ def _load_continuation_source(
         }
         record_sha256 = _text_sha256(
             json.dumps(
-                unsigned,
+                hash_payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1235,6 +1377,24 @@ def _audit_manifest_contract(
     manifest_sha256: str | None,
     contract: _AuditProtocolContract | None,
 ) -> None:
+    if (
+        contract is not None
+        and contract.require_deliverable_lineage
+        and manifest.get("result_schema_version") != COMPARISON_RESULT_SCHEMA_VERSION
+    ):
+        _add_reason(reasons, "comparison_manifest_result_schema_mismatch")
+    if contract is not None and contract.require_deliverable_lineage:
+        try:
+            expected_runtime = _v28_evidence_runtime_identity()
+        except (HarnessError, OSError, TypeError, ValueError):
+            _add_reason(reasons, "comparison_manifest_evidence_runtime_unavailable")
+        else:
+            if manifest.get("evidence_runtime") != expected_runtime:
+                _add_reason(reasons, "comparison_manifest_evidence_runtime_mismatch")
+    elif contract is not None and any(
+        field in manifest for field in ("result_schema_version", "evidence_runtime")
+    ):
+        _add_reason(reasons, "legacy_manifest_contains_v28_fields")
     configuration = manifest.get("configuration")
     required_configuration = {
         "model",
@@ -1357,17 +1517,30 @@ def _audit_manifest_contract(
             _add_reason(reasons, f"comparison_manifest_{field}_invalid")
     arms = tuple(str(arm) for arm in (manifest.get("arms") or []))
     max_turns = configuration.get("max_turns_per_arm") if isinstance(configuration, dict) else None
+    audited_protocol_version = (
+        contract.protocol_version
+        if contract is not None
+        else COMPARISON_PROTOCOL_VERSION
+    )
+    target_grounding = audited_protocol_version == V28_COMPARISON_PROTOCOL_VERSION
     try:
-        expected_caps = comparison_stage_turn_caps(max_turns, arms)
+        expected_caps = comparison_stage_turn_caps(
+            max_turns,
+            arms,
+            enable_target_grounding=target_grounding,
+        )
     except (TypeError, ValueError):
         _add_reason(reasons, "comparison_manifest_turn_caps_invalid")
     else:
         if manifest.get("stage_turn_caps") != expected_caps:
             _add_reason(reasons, "comparison_manifest_turn_caps_mismatch")
+        expected_routing_policy = comparison_forced_tool_prefix_policy(
+            enable_target_grounding=target_grounding
+        )
         expected_prefixes = {
             arm: {
                 stage: list(prefix)
-                for stage, prefix in COMPARISON_FORCED_TOOL_PREFIX_POLICY[arm].items()
+                for stage, prefix in expected_routing_policy[arm].items()
             }
             for arm in arms
         }
@@ -1375,21 +1548,13 @@ def _audit_manifest_contract(
             _add_reason(reasons, "comparison_manifest_forced_routing_mismatch")
         if manifest.get("stage_allowed_tools") != _stage_allowed_tools_policy(
             arms,
-            protocol_version=(
-                contract.protocol_version
-                if contract is not None
-                else COMPARISON_PROTOCOL_VERSION
-            ),
+            protocol_version=audited_protocol_version,
         ):
             _add_reason(reasons, "comparison_manifest_stage_tools_mismatch")
         if manifest.get("allowed_observed_terminals") != (
             _allowed_observed_terminals_policy(
                 expected_caps,
-                protocol_version=(
-                    contract.protocol_version
-                    if contract is not None
-                    else COMPARISON_PROTOCOL_VERSION
-                ),
+                protocol_version=audited_protocol_version,
             )
         ):
             _add_reason(reasons, "comparison_manifest_terminal_policy_mismatch")
@@ -1405,6 +1570,36 @@ def _audit_row_contract(
     contract: _AuditProtocolContract | None,
 ) -> None:
     reasons: list[str] = record["reasons"]
+    if (
+        contract is not None
+        and contract.require_deliverable_lineage
+        and row.get("result_schema_version") != COMPARISON_RESULT_SCHEMA_VERSION
+    ):
+        _add_reason(reasons, "result_schema_version_mismatch")
+    if (
+        contract is not None
+        and contract.require_deliverable_lineage
+        and row.get("evidence_runtime") != manifest.get("evidence_runtime")
+    ):
+        _add_reason(reasons, "row_manifest_mismatch:evidence_runtime")
+    elif contract is not None and not contract.require_deliverable_lineage:
+        v28_only_fields = {
+            "result_schema_version",
+            "evidence_runtime",
+            "completion_attempt_evaluations",
+            "completion_attempt_count",
+            "deliverable_certificate",
+            "scoring_workbook",
+            "scoring_copy_sha256",
+            "trajectory_sha256",
+            "agent_outcome_kind",
+            "agent_failure_reason",
+            "agent_timing",
+            "postprocess_timing",
+            "postprocess_error",
+        }
+        if v28_only_fields & set(row):
+            _add_reason(reasons, "legacy_row_contains_v28_fields")
     configuration = manifest.get("configuration")
     if not isinstance(configuration, dict):
         _add_reason(reasons, "manifest_configuration_unavailable")
@@ -1434,6 +1629,122 @@ def _audit_row_contract(
     for field, expected in expected_fields.items():
         if row.get(field) != expected:
             _add_reason(reasons, f"row_manifest_mismatch:{field}")
+    if contract is not None and contract.require_deliverable_lineage:
+        configured_model_calls = configuration.get("max_model_calls")
+        observer_model_calls = (
+            configured_model_calls
+            if isinstance(configured_model_calls, int)
+            and not isinstance(configured_model_calls, bool)
+            and configured_model_calls >= 0
+            else 0
+        )
+        expected_observer_budget = (
+            _v28_observer_budget(observer_model_calls)
+            if observer_model_calls >= 1
+            else None
+        )
+        if configuration.get("observer_budget") != expected_observer_budget:
+            _add_reason(reasons, "observer_budget_manifest_invalid")
+        agent_timing = row.get("agent_timing")
+        postprocess_timing = row.get("postprocess_timing")
+        agent_elapsed = (
+            _finite_nonnegative_number(agent_timing.get("elapsed_seconds"))
+            if isinstance(agent_timing, dict)
+            else None
+        )
+        postprocess_elapsed = (
+            _finite_nonnegative_number(postprocess_timing.get("elapsed_seconds"))
+            if isinstance(postprocess_timing, dict)
+            else None
+        )
+        agent_timing_valid = not (
+            not isinstance(agent_timing, dict)
+            or set(agent_timing) != {"started_at", "terminated_at", "elapsed_seconds"}
+            or agent_elapsed is None
+        )
+        if not agent_timing_valid:
+            _add_reason(reasons, "agent_timing_invalid")
+        postprocess_timing_valid = not (
+            not isinstance(postprocess_timing, dict)
+            or set(postprocess_timing)
+            != {"started_at", "finished_at", "elapsed_seconds", "budget", "status"}
+            or postprocess_timing.get("budget") != expected_observer_budget
+            or postprocess_timing.get("status") != "completed"
+            or postprocess_elapsed is None
+        )
+        if not postprocess_timing_valid:
+            _add_reason(reasons, "postprocess_timing_invalid")
+        if agent_timing_valid and postprocess_timing_valid:
+            assert isinstance(agent_timing, dict)
+            assert isinstance(postprocess_timing, dict)
+            assert agent_elapsed is not None
+            assert postprocess_elapsed is not None
+            agent_started = _utc_timestamp(agent_timing.get("started_at"))
+            agent_terminated = _utc_timestamp(agent_timing.get("terminated_at"))
+            postprocess_started = _utc_timestamp(postprocess_timing.get("started_at"))
+            postprocess_finished = _utc_timestamp(postprocess_timing.get("finished_at"))
+            row_started = _utc_timestamp(row.get("started_at"))
+            row_finished = _utc_timestamp(row.get("finished_at"))
+            timestamps = (
+                agent_started,
+                agent_terminated,
+                postprocess_started,
+                postprocess_finished,
+                row_started,
+                row_finished,
+            )
+            if any(item is None for item in timestamps):
+                _add_reason(reasons, "agent_postprocess_timestamps_invalid")
+            else:
+                assert agent_started is not None
+                assert agent_terminated is not None
+                assert postprocess_started is not None
+                assert postprocess_finished is not None
+                assert row_started is not None
+                assert row_finished is not None
+                if not (
+                    agent_started <= agent_terminated <= postprocess_started <= postprocess_finished
+                ):
+                    _add_reason(reasons, "agent_postprocess_timestamp_order_invalid")
+                if (
+                    agent_timing.get("started_at") != row.get("started_at")
+                    or postprocess_timing.get("finished_at") != row.get("finished_at")
+                ):
+                    _add_reason(reasons, "agent_postprocess_row_boundary_mismatch")
+                if not _elapsed_matches_timestamps(
+                    agent_elapsed,
+                    agent_started,
+                    agent_terminated,
+                ):
+                    _add_reason(reasons, "agent_elapsed_timestamp_mismatch")
+                if not _elapsed_matches_timestamps(
+                    postprocess_elapsed,
+                    postprocess_started,
+                    postprocess_finished,
+                ):
+                    _add_reason(reasons, "postprocess_elapsed_timestamp_mismatch")
+                row_elapsed = _finite_nonnegative_number(row.get("elapsed_seconds"))
+                if row_elapsed is None or not _elapsed_matches_timestamps(
+                    row_elapsed,
+                    row_started,
+                    row_finished,
+                ):
+                    _add_reason(reasons, "row_elapsed_timestamp_mismatch")
+                observer_limit = (
+                    expected_observer_budget.get("max_total_postprocess_seconds")
+                    if isinstance(expected_observer_budget, dict)
+                    else None
+                )
+                if (
+                    _finite_nonnegative_number(observer_limit) is None
+                    or postprocess_elapsed
+                    > float(observer_limit) + _TIMING_ROUNDING_TOLERANCE_SECONDS
+                ):
+                    _add_reason(reasons, "postprocess_elapsed_budget_exceeded")
+        if row.get("agent_outcome_kind") != row.get("outcome_kind"):
+            _add_reason(reasons, "agent_outcome_binding_invalid")
+        if row.get("agent_failure_reason") != row.get("model_failure_reason"):
+            _add_reason(reasons, "agent_failure_reason_binding_invalid")
     budget = row.get("budget")
     limit = budget.get("limit") if isinstance(budget, dict) else None
     used = budget.get("used") if isinstance(budget, dict) else None
@@ -1695,16 +2006,22 @@ def _audit_completed_agent(
                 _add_reason(reasons, f"agent_stage_tool_count_mismatch:{name}")
             if stage_terminal_submissions is None:
                 _add_reason(reasons, f"agent_stage_terminal_count_invalid:{name}")
-            expected_terminal_submissions = int(
-                stage.get("observed_terminal_tool") == "submit_result"
-            )
-            if (
-                arm == "paper"
-                and name != "solve"
-                and not budget_failure_stage
-                and stage.get("observed_terminal_tool") == "assistant_text"
+            stage_completion_attempts = stage_agent.get("completion_attempts")
+            if contract is not None and contract.require_completion_attempts and isinstance(
+                stage_completion_attempts, list
             ):
-                expected_terminal_submissions = 0
+                expected_terminal_submissions = len(stage_completion_attempts)
+            else:
+                expected_terminal_submissions = int(
+                    stage.get("observed_terminal_tool") == "submit_result"
+                )
+                if (
+                    arm == "paper"
+                    and name != "solve"
+                    and not budget_failure_stage
+                    and stage.get("observed_terminal_tool") == "assistant_text"
+                ):
+                    expected_terminal_submissions = 0
             if stage_terminal_submissions != expected_terminal_submissions:
                 _add_reason(reasons, f"agent_stage_terminal_count_mismatch:{name}")
             expected_function_calls = (
@@ -1897,7 +2214,11 @@ def _audit_completed_agent(
         outcome_kind = row.get("outcome_kind")
         if outcome_kind == "scored":
             terminal_evidence_valid = _v26_success_terminal_evidence_valid(
-                row, agent, stages, arm=arm
+                row,
+                agent,
+                stages,
+                arm=arm,
+                require_completion_attempt=contract.require_completion_attempts,
             )
         elif outcome_kind == "model_execution_failure":
             terminal_evidence_valid = _v26_model_failure_terminal_response_valid(
@@ -1907,6 +2228,601 @@ def _audit_completed_agent(
             terminal_evidence_valid = True
         if not terminal_evidence_valid:
             _add_reason(reasons, "accepted_terminal_response_evidence_invalid")
+
+
+def _audit_v28_trajectory(
+    record: dict[str, Any],
+    row: dict[str, Any],
+    run_dir: Path,
+    attempts: list[CompletionAttemptRecord],
+    evaluations: list[CompletionEvaluationRecord],
+) -> None:
+    """Bind completion provenance and posthoc ordering to the immutable row."""
+
+    reasons: list[str] = record["reasons"]
+    trajectory_path = run_dir / "trajectory.jsonl"
+    expected_sha256 = row.get("trajectory_sha256")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        _add_reason(reasons, "trajectory_sha256_invalid")
+        return
+    try:
+        raw = _regular_file_bytes_for_audit(trajectory_path)
+    except OSError:
+        _add_reason(reasons, "trajectory_unreadable")
+        return
+    observed_sha256 = hashlib.sha256(raw).hexdigest()
+    record["trajectory_sha256"] = observed_sha256
+    if observed_sha256 != expected_sha256:
+        _add_reason(reasons, "trajectory_sha256_mismatch")
+        return
+    if raw and not raw.endswith(b"\n"):
+        _add_reason(reasons, "trajectory_non_terminated")
+        return
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeError:
+        _add_reason(reasons, "trajectory_utf8_invalid")
+        return
+    events: list[dict[str, Any]] = []
+    expected_run_id = f"{row.get('task_id')}-{row.get('arm')}"
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(
+                line,
+                object_pairs_hook=_reject_duplicate_json_keys_for_audit,
+            )
+        except (json.JSONDecodeError, ValueError):
+            _add_reason(reasons, f"trajectory_json_invalid:{line_number}")
+            continue
+        if (
+            not isinstance(event, dict)
+            or set(event) != {"timestamp", "run_id", "event", "payload"}
+            or event.get("run_id") != expected_run_id
+            or not isinstance(event.get("event"), str)
+            or not isinstance(event.get("payload"), dict)
+            or not isinstance(event.get("timestamp"), str)
+        ):
+            _add_reason(reasons, f"trajectory_event_invalid:{line_number}")
+            continue
+        try:
+            datetime.fromisoformat(event["timestamp"])
+        except ValueError:
+            _add_reason(reasons, f"trajectory_timestamp_invalid:{line_number}")
+        events.append(event)
+    if reasons:
+        return
+    record["trajectory_event_count"] = len(events)
+
+    def positions(name: str) -> list[int]:
+        return [index for index, event in enumerate(events) if event["event"] == name]
+
+    termination_positions = positions("benchmark.agent_terminated")
+    evaluation_positions = positions("benchmark.completion_attempts_evaluated")
+    finalization_positions = positions("observer.finalization_recorded")
+    legacy_certification_positions = positions("deliverable.certified")
+    benchmark_positions = positions("benchmark.evaluated")
+    if len(termination_positions) != 1:
+        _add_reason(reasons, "agent_termination_boundary_event_invalid")
+    if len(evaluation_positions) != 1:
+        _add_reason(reasons, "completion_evaluation_event_invalid")
+    if len(finalization_positions) != 1:
+        _add_reason(reasons, "observer_finalization_event_invalid")
+    if legacy_certification_positions:
+        _add_reason(reasons, "legacy_deliverable_certification_event_present")
+    if len(benchmark_positions) != 1:
+        _add_reason(reasons, "benchmark_evaluation_event_invalid")
+    if reasons:
+        return
+    termination_index = termination_positions[0]
+    evaluation_index = evaluation_positions[0]
+    finalization_index = finalization_positions[0]
+    benchmark_index = benchmark_positions[0]
+    if not (
+        termination_index < evaluation_index < finalization_index < benchmark_index
+    ):
+        _add_reason(reasons, "posthoc_event_order_invalid")
+    forbidden_after_boundary = [
+        event["event"]
+        for event in events[termination_index + 1 :]
+        if event["event"].startswith(("agent.", "model.", "tool."))
+    ]
+    if forbidden_after_boundary:
+        _add_reason(reasons, "model_visible_event_after_termination")
+
+    capture_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event["event"] == "agent.completion_attempt_captured"
+    ]
+    capture_records_match = [
+        event["payload"].get("record") for _, event in capture_events
+    ] == [
+        attempt.to_dict() for attempt in attempts
+    ]
+    if not capture_records_match:
+        _add_reason(reasons, "completion_attempt_trajectory_binding_invalid")
+
+    stage_agent = row.get("agent")
+    stage_records = stage_agent.get("stages") if isinstance(stage_agent, dict) else None
+    final_stage_name = (
+        stage_records[-1].get("name")
+        if isinstance(stage_records, list)
+        and stage_records
+        and isinstance(stage_records[-1], dict)
+        else None
+    )
+    observed_submit_calls: list[tuple[str, int, str | None, str]] = []
+    submit_call_schema_valid = isinstance(final_stage_name, str)
+    for event in events:
+        if event["event"] != "model.responded":
+            continue
+        payload = event["payload"]
+        if payload.get("stage") != final_stage_name:
+            continue
+        function_calls = payload.get("function_calls")
+        if not isinstance(function_calls, list):
+            submit_call_schema_valid = False
+            continue
+        for call in function_calls:
+            if not isinstance(call, dict) or call.get("name") != "submit_result":
+                continue
+            if (
+                set(call) != {"call_id", "name", "arguments_sha256"}
+                or not isinstance(call.get("call_id"), str)
+                or not call["call_id"]
+                or not _valid_sha256(call.get("arguments_sha256"))
+                or isinstance(payload.get("turn"), bool)
+                or not isinstance(payload.get("turn"), int)
+                or payload["turn"] < 1
+                or (
+                    payload.get("response_id") is not None
+                    and (
+                        not isinstance(payload.get("response_id"), str)
+                        or not payload["response_id"]
+                    )
+                )
+            ):
+                submit_call_schema_valid = False
+                continue
+            observed_submit_calls.append(
+                (
+                    str(final_stage_name),
+                    payload["turn"],
+                    payload.get("response_id"),
+                    call["call_id"],
+                )
+            )
+    expected_submit_calls = [
+        (attempt.stage, attempt.turn, attempt.response_id, attempt.call_id)
+        for attempt in attempts
+    ]
+    if not submit_call_schema_valid or observed_submit_calls != expected_submit_calls:
+        _add_reason(reasons, "completion_attempt_model_call_coverage_invalid")
+
+    if len(capture_events) == len(attempts):
+        for (event_index, event), attempt in zip(
+            capture_events,
+            attempts,
+            strict=True,
+        ):
+            payload = event["payload"]
+            if (
+                event_index >= termination_index
+                or set(payload) != {"stage", "turn", "record"}
+                or payload.get("stage") != attempt.stage
+                or payload.get("turn") != attempt.turn
+            ):
+                _add_reason(reasons, "completion_attempt_capture_event_invalid")
+
+            matching_model_responses = [
+                index
+                for index, candidate in enumerate(events)
+                if candidate["event"] == "model.responded"
+                and candidate["payload"].get("stage") == attempt.stage
+                and candidate["payload"].get("turn") == attempt.turn
+                and candidate["payload"].get("response_id") == attempt.response_id
+                and isinstance(candidate["payload"].get("function_calls"), list)
+                and any(
+                    isinstance(call, dict)
+                    and call.get("call_id") == attempt.call_id
+                    and call.get("name") == "submit_result"
+                    and isinstance(call.get("arguments_sha256"), str)
+                    and len(call["arguments_sha256"]) == 64
+                    for call in candidate["payload"]["function_calls"]
+                )
+            ]
+            if (
+                len(matching_model_responses) != 1
+                or matching_model_responses[0] >= event_index
+            ):
+                _add_reason(reasons, "completion_attempt_model_call_binding_invalid")
+
+    agent = row.get("agent")
+    terminal_response = agent.get("terminal_response") if isinstance(agent, dict) else None
+    accepted_id = (
+        terminal_response.get("completion_attempt_id")
+        if isinstance(terminal_response, dict)
+        and terminal_response.get("status") == "accepted"
+        else None
+    )
+    outcome_kind = row.get("outcome_kind")
+    stages = agent.get("stages") if isinstance(agent, dict) else None
+    final_stage_agent = (
+        stages[-1].get("agent")
+        if isinstance(stages, list)
+        and stages
+        and isinstance(stages[-1], dict)
+        and isinstance(stages[-1].get("agent"), dict)
+        else None
+    )
+    completed_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event["event"] == "agent.completed"
+    ]
+    failed_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event["event"] == "agent.execution_failed"
+    ]
+    terminal_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event["event"] == "agent.terminal_submitted"
+    ]
+    completed_matches = [
+        index for index, event in completed_events if event["payload"] == final_stage_agent
+    ]
+    failed_matches = [
+        index
+        for index, event in failed_events
+        if event["payload"].get("reason") == row.get("model_failure_reason")
+        and event["payload"].get("agent") == final_stage_agent
+    ]
+    if outcome_kind == "scored":
+        if (
+            len(completed_events) != 1
+            or len(completed_matches) != 1
+            or failed_events
+            or len(terminal_events) != 1
+        ):
+            _add_reason(reasons, "agent_completion_event_binding_invalid")
+        elif completed_matches[0] >= termination_index:
+            _add_reason(reasons, "agent_completion_event_order_invalid")
+    elif outcome_kind == "model_execution_failure":
+        if (
+            len(failed_events) != 1
+            or len(failed_matches) != 1
+            or completed_events
+            or terminal_events
+        ):
+            _add_reason(reasons, "agent_failure_event_binding_invalid")
+        elif failed_matches[0] >= termination_index:
+            _add_reason(reasons, "agent_failure_event_order_invalid")
+
+    termination_payload = events[termination_index]["payload"]
+    expected_termination_payload = {
+        "schema_version": "spreadsheet-agent-termination-boundary-v1",
+        "task_id": row.get("task_id"),
+        "arm": row.get("arm"),
+        "outcome_kind": outcome_kind,
+        "model_failure_reason": row.get("model_failure_reason"),
+        "completion_attempt_count": len(attempts),
+        "response_id": agent.get("response_id") if isinstance(agent, dict) else None,
+    }
+    if termination_payload != expected_termination_payload:
+        _add_reason(reasons, "agent_termination_boundary_payload_mismatch")
+
+    evaluation_payload = events[evaluation_index]["payload"]
+    expected_evaluation_payload = {
+        "evaluator": V28_COMPLETION_EVALUATOR_ID,
+        "timing": "posthoc-after-agent-termination",
+        "fed_back_to_model": False,
+        "attempt_count": len(evaluations),
+        "attempt_ids": [item.attempt_id for item in evaluations],
+        "passed": [item.passed for item in evaluations],
+        "accepted_completion_attempt_id": accepted_id,
+    }
+    if evaluation_payload != expected_evaluation_payload:
+        _add_reason(reasons, "completion_evaluation_event_payload_mismatch")
+
+    if accepted_id is not None:
+        accepted_attempt = attempts[accepted_id - 1] if 1 <= accepted_id <= len(attempts) else None
+        accepted_capture = (
+            capture_events[accepted_id - 1]
+            if 1 <= accepted_id <= len(capture_events)
+            else None
+        )
+        accepted_checks = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event["event"] == "evidence_contract.submission_checked"
+            and event["payload"].get("completion_attempt_id") == accepted_id
+            and accepted_attempt is not None
+            and event["payload"].get("completion_attempt_call_id")
+            == accepted_attempt.call_id
+            and isinstance(event["payload"].get("decision"), dict)
+            and event["payload"]["decision"].get("allowed") is True
+        ]
+        if (
+            accepted_attempt is None
+            or accepted_capture is None
+            or len(completed_matches) != 1
+            or len(accepted_checks) != 1
+            or len(terminal_events) != 1
+            or terminal_events[0][0] >= termination_index
+            or terminal_events[0][1]["payload"].get("terminal_response")
+            != terminal_response
+            or terminal_events[0][1]["payload"].get("stage") != accepted_attempt.stage
+            or terminal_events[0][1]["payload"].get("turn") != accepted_attempt.turn
+            or terminal_events[0][1]["payload"].get("completion_attempt_id")
+            != accepted_attempt.attempt_id
+            or terminal_events[0][1]["payload"].get("completion_attempt_call_id")
+            != accepted_attempt.call_id
+        ):
+            _add_reason(reasons, "accepted_completion_attempt_trajectory_binding_invalid")
+        elif not (
+            accepted_capture[0]
+            < accepted_checks[0][0]
+            < terminal_events[0][0]
+            < completed_matches[0]
+            < termination_index
+        ):
+            _add_reason(reasons, "accepted_completion_attempt_event_order_invalid")
+
+    known_attempt_keys = {(attempt.attempt_id, attempt.call_id) for attempt in attempts}
+    for event in events:
+        if event["event"] not in {
+            "evidence_contract.submission_checked",
+            "evidence_contract.terminal_reprompted",
+        }:
+            continue
+        key = (
+            event["payload"].get("completion_attempt_id"),
+            event["payload"].get("completion_attempt_call_id"),
+        )
+        if key not in known_attempt_keys:
+            _add_reason(reasons, "unknown_completion_attempt_lifecycle_event")
+
+    failure_event_index = failed_matches[0] if len(failed_matches) == 1 else None
+    for (capture_index, _), attempt in zip(capture_events, attempts, strict=False):
+        checks = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event["event"] == "evidence_contract.submission_checked"
+            and event["payload"].get("completion_attempt_id") == attempt.attempt_id
+            and event["payload"].get("completion_attempt_call_id") == attempt.call_id
+        ]
+        if len(checks) > 1 or (checks and checks[0][0] <= capture_index):
+            _add_reason(reasons, "completion_attempt_submission_check_invalid")
+            continue
+        if not checks:
+            if failure_event_index is None or failure_event_index <= capture_index:
+                _add_reason(reasons, "completion_attempt_abort_binding_invalid")
+            continue
+        check_index, check_event = checks[0]
+        decision = check_event["payload"].get("decision")
+        if not isinstance(decision, dict) or not isinstance(decision.get("allowed"), bool):
+            _add_reason(reasons, "completion_attempt_submission_check_invalid")
+            continue
+        if decision["allowed"] is True:
+            if attempt.attempt_id != accepted_id:
+                _add_reason(reasons, "unaccepted_allowed_completion_attempt")
+            continue
+        reprompts = [
+            index
+            for index, event in enumerate(events)
+            if event["event"] == "evidence_contract.terminal_reprompted"
+            and event["payload"].get("completion_attempt_id") == attempt.attempt_id
+            and event["payload"].get("completion_attempt_call_id") == attempt.call_id
+        ]
+        next_model_response = next(
+            (
+                index
+                for index, event in enumerate(events)
+                if index > check_index and event["event"] == "model.responded"
+            ),
+            None,
+        )
+        denied_then_failed = bool(
+            failure_event_index is not None and check_index < failure_event_index
+        )
+        reprompt_valid = bool(
+            len(reprompts) == 1
+            and check_index < reprompts[0] < termination_index
+            and (next_model_response is None or reprompts[0] < next_model_response)
+        )
+        failure_without_reprompt = bool(
+            not reprompts
+            and denied_then_failed
+            and (next_model_response is None or failure_event_index < next_model_response)
+        )
+        if not (reprompt_valid or failure_without_reprompt):
+            _add_reason(reasons, "denied_completion_attempt_lifecycle_invalid")
+
+    certificate = row.get("deliverable_certificate")
+    finalization_payload = events[finalization_index]["payload"]
+    candidate_block = certificate.get("candidate") if isinstance(certificate, dict) else None
+    scoring_block = (
+        certificate.get("scoring_copy") if isinstance(certificate, dict) else None
+    )
+    candidate_outcome = (
+        candidate_block.get("outcome") if isinstance(candidate_block, dict) else None
+    )
+    expected_candidate_outcome = {
+        "scored": "accepted_candidate",
+        "model_execution_failure": "audited_noncompletion",
+    }.get(row.get("outcome_kind"))
+    expected_accepted_deliverable = candidate_outcome == "accepted_candidate"
+    expected_finalization_payload = {
+        "schema_version": DELIVERABLE_CERTIFICATE_SCHEMA_VERSION,
+        "candidate_outcome": candidate_outcome,
+        "accepted_deliverable": expected_accepted_deliverable,
+        "candidate_artifact": (
+            candidate_block.get("artifact") if isinstance(candidate_block, dict) else None
+        ),
+        "final_artifact": (
+            certificate.get("final_artifact") if isinstance(certificate, dict) else None
+        ),
+        "scoring_copy_relative_path": (
+            scoring_block.get("relative_path") if isinstance(scoring_block, dict) else None
+        ),
+        "certificate_sha256": (
+            certificate.get("certificate_sha256")
+            if isinstance(certificate, dict)
+            else None
+        ),
+    }
+    if (
+        candidate_outcome not in {"accepted_candidate", "audited_noncompletion"}
+        or candidate_outcome != expected_candidate_outcome
+        or type(finalization_payload.get("accepted_deliverable")) is not bool
+        or set(finalization_payload) != set(expected_finalization_payload)
+        or finalization_payload != expected_finalization_payload
+    ):
+        _add_reason(reasons, "observer_finalization_event_binding_invalid")
+    else:
+        record["accepted_deliverable"] = expected_accepted_deliverable
+    benchmark_payload = events[benchmark_index]["payload"]
+    if any(
+        benchmark_payload.get(field) != row.get(field)
+        for field in ("task_id", "arm", "passed", "artifact_score_passed", "outcome_kind")
+    ):
+        _add_reason(reasons, "benchmark_event_row_binding_invalid")
+
+
+def _audit_v28_completion_attempts(
+    record: dict[str, Any],
+    row: dict[str, Any],
+    task: SpreadsheetTask,
+    run_dir: Path,
+) -> None:
+    reasons: list[str] = record["reasons"]
+    agent = row.get("agent")
+    raw_attempts = agent.get("completion_attempts") if isinstance(agent, dict) else None
+    raw_evaluations = row.get("completion_attempt_evaluations")
+    if not isinstance(raw_attempts, list):
+        _add_reason(reasons, "completion_attempt_records_missing")
+        return
+    if not isinstance(raw_evaluations, list):
+        _add_reason(reasons, "completion_attempt_evaluations_missing")
+        return
+    if (
+        row.get("completion_attempt_count") != len(raw_attempts)
+        or len(raw_evaluations) != len(raw_attempts)
+    ):
+        _add_reason(reasons, "completion_attempt_count_mismatch")
+        return
+    stages = agent.get("stages") if isinstance(agent, dict) else None
+    stage_attempt_lists = (
+        [
+            stage_agent["completion_attempts"]
+            for stage in stages
+            if isinstance(stage, dict)
+            and isinstance((stage_agent := stage.get("agent")), dict)
+            and isinstance(stage_agent.get("completion_attempts"), list)
+        ]
+        if isinstance(stages, list)
+        else []
+    )
+    if (raw_attempts and (not stage_attempt_lists or stage_attempt_lists[-1] != raw_attempts)) or (
+        not raw_attempts and any(stage_attempt_lists)
+    ):
+        _add_reason(reasons, "completion_attempt_stage_aggregation_mismatch")
+
+    def evaluator(snapshot: Path):
+        from .render import recalculate_workbook
+
+        with tempfile.TemporaryDirectory(prefix="completion-audit-") as raw_directory:
+            scoring_path = Path(raw_directory) / snapshot.name
+            shutil.copy2(snapshot, scoring_path)
+            recalculate_workbook(
+                scoring_path,
+                scoring_path,
+                timeout_seconds=120.0,
+            )
+            return compare_workbooks(
+                task.golden_path,
+                scoring_path,
+                task.answer_position,
+                answer_sheet=task.answer_sheet,
+            )
+
+    parsed_attempts: list[CompletionAttemptRecord] = []
+    parsed_evaluations: list[CompletionEvaluationRecord] = []
+    passed: list[bool] = []
+    for attempt_value, evaluation_value in zip(
+        raw_attempts,
+        raw_evaluations,
+        strict=True,
+    ):
+        attempt_audit = audit_completion_attempt(run_dir, attempt_value)
+        if not attempt_audit.valid or attempt_audit.record is None:
+            _add_reason(reasons, "completion_attempt_fresh_audit_invalid")
+            continue
+        parsed_attempts.append(attempt_audit.record)
+        evaluation_audit = audit_completion_evaluation(
+            run_dir,
+            attempt_audit.record,
+            evaluation_value,
+            evaluator,
+        )
+        if not evaluation_audit.valid or evaluation_audit.record is None:
+            _add_reason(reasons, "completion_attempt_evaluation_fresh_audit_invalid")
+            continue
+        if evaluation_audit.record.evaluator != V28_COMPLETION_EVALUATOR_ID:
+            _add_reason(reasons, "completion_attempt_evaluator_mismatch")
+        parsed_evaluations.append(evaluation_audit.record)
+        passed.append(evaluation_audit.record.passed)
+
+    attempt_ids = [item.attempt_id for item in parsed_attempts]
+    if attempt_ids != list(range(1, len(raw_attempts) + 1)):
+        _add_reason(reasons, "completion_attempt_sequence_invalid")
+    if len(parsed_evaluations) != len(raw_evaluations):
+        _add_reason(reasons, "completion_attempt_evaluation_sequence_invalid")
+    terminal_response = agent.get("terminal_response") if isinstance(agent, dict) else None
+    accepted_id = (
+        terminal_response.get("completion_attempt_id")
+        if isinstance(terminal_response, dict)
+        and terminal_response.get("status") == "accepted"
+        else None
+    )
+    if accepted_id is not None and (
+        type(accepted_id) is not int or accepted_id not in attempt_ids
+    ):
+        _add_reason(reasons, "accepted_completion_attempt_binding_invalid")
+    if row.get("outcome_kind") == "scored" and accepted_id is None:
+        _add_reason(reasons, "scored_outcome_missing_accepted_completion_attempt")
+    if row.get("outcome_kind") == "model_execution_failure" and accepted_id is not None:
+        _add_reason(reasons, "noncompletion_has_accepted_completion_attempt")
+    if reasons:
+        return
+    _audit_v28_trajectory(
+        record,
+        row,
+        run_dir,
+        parsed_attempts,
+        parsed_evaluations,
+    )
+    if reasons:
+        return
+    accepted_passed = (
+        passed[accepted_id - 1]
+        if type(accepted_id) is int and 1 <= accepted_id <= len(passed)
+        else None
+    )
+    record["completion_attempt_count"] = len(raw_attempts)
+    record["completion_attempt_passed"] = passed
+    record["false_first_completion"] = bool(passed and not passed[0])
+    record["any_false_completion"] = any(not value for value in passed)
+    record["accepted_completion_attempt_id"] = accepted_id
+    record["accepted_false_completion"] = accepted_passed is False
 
 
 def _audit_completed_row(
@@ -1971,6 +2887,10 @@ def _audit_completed_row(
         _add_reason(reasons, "scored_outcome_has_failure_metadata")
     _audit_completed_agent(record, row, arm, manifest, contract)
 
+    if contract is not None and contract.require_deliverable_lineage:
+        for field in ("run_dir", "output_workbook", "scoring_workbook"):
+            if not _portable_result_path(row.get(field)):
+                _add_reason(reasons, f"nonportable_result_path:{field}")
     run_dir = _absolute_path(row.get("run_dir"), base=root)
     output = _absolute_path(row.get("output_workbook"), base=root)
     record["run_dir"] = str(run_dir) if run_dir is not None else None
@@ -2001,6 +2921,10 @@ def _audit_completed_row(
         _add_reason(reasons, "artifact_path_contains_symlink")
     if reasons:
         return
+    if contract is not None and contract.require_completion_attempts:
+        _audit_v28_completion_attempts(record, row, task, run_dir)
+        if reasons:
+            return
 
     try:
         metadata = output.lstat()
@@ -2030,6 +2954,64 @@ def _audit_completed_row(
     elif output_sha256_before != expected_sha256:
         _add_reason(reasons, "artifact_hash_mismatch")
 
+    scoring_output = output
+    scoring_sha256_before: str | None = None
+    if contract is not None and contract.require_deliverable_lineage:
+        agent_evidence = row.get("agent")
+        if not isinstance(agent_evidence, dict):
+            _add_reason(reasons, "deliverable_agent_evidence_missing")
+            return
+        certificate_value = row.get("deliverable_certificate")
+        certificate_target_grounding = (
+            certificate_value.get("target_grounding")
+            if isinstance(certificate_value, dict)
+            else None
+        )
+        solve_stage_present = any(
+            isinstance(stage, dict) and stage.get("name") == "solve"
+            for stage in agent_evidence.get("stages", [])
+        ) if isinstance(agent_evidence.get("stages"), list) else False
+        if solve_stage_present and not (
+            isinstance(certificate_target_grounding, dict)
+            and certificate_target_grounding.get("enabled") is True
+        ):
+            _add_reason(reasons, "deliverable_target_grounding_not_enforced")
+        deliverable_audit = audit_deliverable_certificate(
+            certificate_value,
+            agent_evidence=agent_evidence,
+            run_root=run_dir,
+            output_workbook=output,
+        )
+        record["deliverable_lineage_valid"] = deliverable_audit.valid
+        record["deliverable_lineage_reasons"] = list(deliverable_audit.reasons)
+        if not deliverable_audit.valid or deliverable_audit.final_artifact is None:
+            for reason in deliverable_audit.reasons or ("deliverable_lineage_invalid",):
+                _add_reason(reasons, reason)
+            return
+        if deliverable_audit.final_artifact.sha256 != output_sha256_before:
+            _add_reason(reasons, "deliverable_final_artifact_hash_mismatch")
+        scoring_output = deliverable_audit.scoring_copy or output
+        stored_scoring_path = _absolute_path(row.get("scoring_workbook"), base=root)
+        if stored_scoring_path is None or stored_scoring_path.resolve(strict=False) != (
+            scoring_output.resolve(strict=False)
+        ):
+            _add_reason(reasons, "scoring_copy_path_mismatch")
+        try:
+            scoring_sha256_before = _file_sha256(scoring_output)
+        except OSError:
+            _add_reason(reasons, "scoring_copy_unreadable")
+            return
+        record["scoring_workbook"] = str(scoring_output)
+        record["scoring_copy_sha256"] = scoring_sha256_before
+        if (
+            row.get("scoring_copy_sha256") != output_sha256_before
+            or scoring_sha256_before != output_sha256_before
+            or row.get("output_sha256") != output_sha256_before
+        ):
+            _add_reason(reasons, "deliverable_row_hash_binding_mismatch")
+        if reasons:
+            return
+
     try:
         workbook = load_workbook(output, read_only=True, data_only=False)
         try:
@@ -2044,7 +3026,7 @@ def _audit_completed_row(
     try:
         fresh = compare_workbooks(
             task.golden_path,
-            output,
+            scoring_output,
             task.answer_position,
             answer_sheet=task.answer_sheet,
         )
@@ -2075,6 +3057,14 @@ def _audit_completed_row(
         return
     if output_sha256_after != output_sha256_before:
         _add_reason(reasons, "artifact_changed_during_audit")
+    if scoring_sha256_before is not None:
+        try:
+            scoring_sha256_after = _file_sha256(scoring_output)
+        except OSError:
+            _add_reason(reasons, "scoring_copy_unreadable_after_scoring")
+        else:
+            if scoring_sha256_after != scoring_sha256_before:
+                _add_reason(reasons, "scoring_copy_changed_during_audit")
 
 
 def audit_comparison(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +31,33 @@ from spreadsheet_harness.comparison import (
     V26_COMPARISON_CONFIGURATION_POLICIES,
     V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V26_COMPARISON_PROTOCOL_VERSION,
+    V28_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     _allowed_observed_terminals_policy,
     _stage_allowed_tools_policy,
+    _v28_evidence_runtime_identity,
 )
+from spreadsheet_harness.completion_attempt import CompletionAttemptLedger
+from spreadsheet_harness.completion_evaluation import evaluate_completion_attempt
 from spreadsheet_harness.config import ProviderConfig
+from spreadsheet_harness.deliverable import (
+    COMPARISON_RESULT_SCHEMA_VERSION,
+    finalize_deliverable,
+)
+from spreadsheet_harness.evidence_contract import (
+    ArtifactRef,
+    ArtifactTransition,
+    ContractSpec,
+    EffectKind,
+    EventKind,
+    EvidenceContractMonitor,
+    EvidenceEvent,
+    EvidenceScope,
+)
 from spreadsheet_harness.skills import SkillRegistry
+from spreadsheet_harness.target_grounding import TargetGroundingStateMachine
+from spreadsheet_harness.trajectory import TrajectoryRecorder
+from spreadsheet_harness.workbook_diff import WorkbookEffectDiff
 
 
 def _sha256(path: Path) -> str:
@@ -242,6 +264,610 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
     }
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return results, task, row
+
+
+class _AuditFinalizationSession:
+    def __init__(
+        self,
+        workbook_path: Path,
+        workspace: Path,
+        initial: ArtifactRef,
+        candidate: ArtifactRef,
+    ) -> None:
+        self.workbook_path = workbook_path
+        self.workspace = workspace
+        self._artifact = candidate
+        transition = ArtifactTransition(
+            transition_id=1,
+            operation="code_interpreter",
+            kind="external_mutation",
+            before=initial,
+            after=candidate,
+        )
+        self._transitions = (transition,)
+        scope = EvidenceScope.one("Sheet1", "A1:A1")
+        grounding = TargetGroundingStateMachine(initial)
+        observation = grounding.record_trusted_observation(
+            artifact=initial,
+            scope=scope,
+        )
+        declaration = grounding.declare_target(
+            artifact=initial,
+            target_scope=scope,
+            observation_ids=(observation.observation_id,),
+        )
+        prepared = grounding.prepare_staged_diff(
+            declaration.declaration_id,
+            WorkbookEffectDiff(
+                semantic_changed=True,
+                complete=True,
+                effects=frozenset({EffectKind.VALUE}),
+                scope=scope,
+                formula_scope=EvidenceScope(),
+                changed_cell_count=1,
+                scanned_cell_count=1,
+            ),
+            staged_artifact=candidate,
+        )
+        grounding.commit_prepared(prepared, transition)
+        self._grounding = grounding
+
+    def artifact_ref(self) -> ArtifactRef:
+        return self._artifact
+
+    @property
+    def artifact_transitions(self) -> tuple[ArtifactTransition, ...]:
+        return self._transitions
+
+    @property
+    def target_grounding_enabled(self) -> bool:
+        return True
+
+    @property
+    def target_grounding_initial_artifact(self) -> ArtifactRef:
+        return self._transitions[0].before
+
+    @property
+    def target_grounding_initial_transition_count(self) -> int:
+        return 0
+
+    @property
+    def committed_target_authorizations(self) -> tuple[Any, ...]:
+        return self._grounding.committed_authorizations
+
+
+def _promote_fixture_to_v28(
+    results: Path,
+    task: SpreadsheetTask,
+    row: dict[str, Any],
+    *,
+    model_failure: bool = False,
+    rejected_then_accepted: bool = False,
+) -> dict[str, Any]:
+    run_dir = Path(row["run_dir"])
+    output = Path(row["output_workbook"])
+    initial = ArtifactRef(0, _sha256(task.input_path))
+    candidate = ArtifactRef(1, _sha256(output))
+    transition_scope = EvidenceScope.one("Sheet1", "A1:A1")
+    spec = ContractSpec.from_mapping(
+        {
+            "schema_version": 1,
+            "rules": [
+                {
+                    "id": "readback",
+                    "trigger": "mutation.committed",
+                    "require": {"event": "range.inspected", "artifact": "current"},
+                }
+            ],
+        }
+    )
+    monitor = EvidenceContractMonitor(spec, initial.sha256)
+    monitor.observe(
+        EvidenceEvent(
+            EventKind.MUTATION_COMMITTED,
+            initial.sha256,
+            candidate.sha256,
+            effects=frozenset({EffectKind.VALUE}),
+            scope=transition_scope,
+        )
+    )
+    denied_contract_decision = monitor.submission_decision().to_dict()
+    monitor.observe(
+        EvidenceEvent(
+            EventKind.RANGE_INSPECTED,
+            candidate.sha256,
+            scope=transition_scope,
+        )
+    )
+    contract_evidence = {
+        "status": monitor.status(),
+        "decision": monitor.submission_decision().to_dict(),
+    }
+    ledger = CompletionAttemptLedger(run_dir)
+    attempts = []
+    if rejected_then_accepted:
+        attempts.append(
+            ledger.capture(
+                output,
+                candidate,
+                stage="solve",
+                turn=3,
+                response_id="response-denied",
+                call_id="terminal-call-3",
+            )
+        )
+    attempts.append(
+        ledger.capture(
+            output,
+            candidate,
+            stage="solve",
+            turn=5,
+            response_id="response-final",
+            call_id="terminal-call-5",
+        )
+    )
+    attempt = attempts[-1]
+    raw_attempts = [item.to_dict() for item in attempts]
+
+    request_attempt = {"api_protocol": "responses", "endpoint": "/responses"}
+    timings = [
+        {
+            "turn": turn,
+            "stage": "solve",
+            "attempts": 1,
+            "attempt_history": [dict(request_attempt)],
+            "input_tokens": 2 if turn < 5 else 4,
+            "output_tokens": 0 if turn < 5 else 2,
+            "total_tokens": 2 if turn < 5 else 6,
+        }
+        for turn in range(1, 6)
+    ]
+    usage = {"input_tokens": 12, "output_tokens": 2, "total_tokens": 14}
+    budget = {
+        "limit": {
+            "model_calls": 5,
+            "total_tokens": 100,
+            "elapsed_seconds": 30,
+        },
+        "used": {
+            "model_calls": 5,
+            "total_tokens": 14,
+            "elapsed_seconds": 1.0,
+        },
+        "termination": None,
+    }
+    tool_trace = [
+        {"name": "inspect_range", "ok": True},
+        {"name": "declare_edit_target", "ok": True},
+        {"name": "code_interpreter", "ok": True},
+        {"name": "inspect_range", "ok": True},
+    ]
+    accepted_response_payload = {
+        "status": "accepted",
+        "response_id": "response-final",
+        "acknowledgement": {},
+        "completion_attempt_id": attempt.attempt_id,
+    }
+    final_text = "Spreadsheet task completed."
+    if model_failure:
+        final_text = "Terminal submission arguments were invalid"
+    final_agent: dict[str, Any] = {
+        "final_text": final_text,
+        "response_id": "response-final",
+        "turns": 5,
+        "tool_calls": 4,
+        "usage": usage,
+        "request_timings": json.loads(json.dumps(timings)),
+        "tool_trace": json.loads(json.dumps(tool_trace)),
+        "first_tool_choice": "inspect_range",
+        "observed_first_tool": "inspect_range",
+        "forced_tool_prefix": ["inspect_range", "declare_edit_target"],
+        "observed_forced_tool_prefix": ["inspect_range", "declare_edit_target"],
+        "post_prefix_tool_choice": "auto",
+        "terminal_tool": "submit_result",
+        "observed_terminal_tool": "submit_result",
+        "terminal_submissions": len(attempts),
+        "function_calls_total": 4 + len(attempts),
+        "budget": json.loads(json.dumps(budget)),
+        "evidence_contract": contract_evidence,
+        "completion_attempts": raw_attempts,
+    }
+    if not model_failure:
+        final_agent["terminal_response"] = accepted_response_payload
+
+    v28_runner = ComparisonBenchmarkRunner(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            reasoning_effort="none",
+        ),
+        results,
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=5,
+        max_turns_per_arm=5,
+        max_total_tokens=100,
+        max_output_tokens=64,
+        task_timeout_seconds=30,
+        recalculate=True,
+        deliverable_lineage=True,
+    )
+    manifest = v28_runner._manifest([task])
+    stage = {
+        "name": "solve",
+        "max_turns": 5,
+        "allowed_tools": manifest["stage_allowed_tools"]["bare"]["solve"],
+        "first_tool_choice": "inspect_range",
+        "observed_first_tool": "inspect_range",
+        "forced_tool_prefix": ["inspect_range", "declare_edit_target"],
+        "observed_forced_tool_prefix": ["inspect_range", "declare_edit_target"],
+        "post_prefix_tool_choice": "auto",
+        "terminal_tool": "submit_result",
+        "observed_terminal_tool": "submit_result",
+        "tool_name_trace": [item["name"] for item in tool_trace],
+        "tool_trace": json.loads(json.dumps(tool_trace)),
+        "agent": final_agent,
+    }
+    aggregate_agent: dict[str, Any] = {
+        "arm": "bare",
+        "final_text": final_text,
+        "response_id": "response-final",
+        "turns": 5,
+        "tool_calls": 4,
+        "usage": usage,
+        "request_timings": [
+            {"stage": "solve", **timing} for timing in timings
+        ],
+        "tool_trace": [
+            {"stage": "solve", **item} for item in tool_trace
+        ],
+        "first_tool_choice": "inspect_range",
+        "observed_first_tool": "inspect_range",
+        "forced_tool_prefix": ["inspect_range", "declare_edit_target"],
+        "observed_forced_tool_prefix": ["inspect_range", "declare_edit_target"],
+        "post_prefix_tool_choice": "auto",
+        "terminal_tool": "submit_result",
+        "observed_terminal_tool": "submit_result",
+        "terminal_submissions": len(attempts),
+        "function_calls_total": 4 + len(attempts),
+        "budget": json.loads(json.dumps(budget)),
+        "evidence_contract": contract_evidence,
+        "completion_attempts": raw_attempts,
+        "stages": [stage],
+    }
+    if not model_failure:
+        aggregate_agent["terminal_response"] = json.loads(
+            json.dumps(accepted_response_payload)
+        )
+
+    accepted_response = (
+        None if model_failure else aggregate_agent["terminal_response"]
+    )
+    session = _AuditFinalizationSession(output, run_dir, initial, candidate)
+
+    def unchanged_recalculation() -> dict[str, Any]:
+        return {
+            "backend": "test-recalculator",
+            "version": "1",
+            "profile": "isolated",
+            "format": "xlsx",
+            "source_sha256": candidate.sha256,
+            "output_sha256": candidate.sha256,
+            "atomic_replace": True,
+            "workbook_changed": False,
+            "artifact_revision_before": candidate.revision,
+            "artifact_revision_after": candidate.revision,
+            "artifact_transition_id": None,
+            "workbook_effects": {
+                "schema_version": "workbook-effect-diff-v1",
+                "semantic_changed": False,
+                "complete": True,
+                "effects": [],
+                "scope": EvidenceScope().to_dict(),
+                "formula_scope": EvidenceScope().to_dict(),
+                "changed_cell_count": 0,
+                "scanned_cell_count": 1,
+                "reasons": [],
+            },
+        }
+
+    bundle = finalize_deliverable(
+        session,
+        aggregate_agent,
+        recalculation_callback=unchanged_recalculation,
+    )
+
+    def evaluator(snapshot: Path):
+        from spreadsheet_harness.render import recalculate_workbook
+
+        with tempfile.TemporaryDirectory(
+            prefix="completion-fixture-",
+            dir=run_dir,
+        ) as raw_directory:
+            scoring_path = Path(raw_directory) / snapshot.name
+            shutil.copy2(snapshot, scoring_path)
+            recalculate_workbook(
+                scoring_path,
+                scoring_path,
+                timeout_seconds=120.0,
+            )
+            return compare_workbooks(
+                task.golden_path,
+                scoring_path,
+                task.answer_position,
+                answer_sheet=task.answer_sheet,
+            )
+
+    evaluations = [
+        evaluate_completion_attempt(
+            run_dir,
+            item,
+            evaluator,
+            evaluator_id="spreadsheetbench-corrected-value-after-libreoffice-v1",
+        )
+        for item in attempts
+    ]
+    manifest_path = results / "comparison-manifest.json"
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    started_at = "2026-08-14T00:00:00+00:00"
+    agent_terminated_at = "2026-08-14T00:00:01+00:00"
+    observer_started_at = "2026-08-14T00:00:02+00:00"
+    finished_at = "2026-08-14T00:00:03+00:00"
+    outcome_kind = "model_execution_failure" if model_failure else "scored"
+    model_failure_reason = "terminal_submission_invalid" if model_failure else None
+    row.update(
+        {
+            "comparison_protocol_version": V28_COMPARISON_PROTOCOL_VERSION,
+            "comparison_manifest_sha256": _sha256(manifest_path),
+            "result_schema_version": COMPARISON_RESULT_SCHEMA_VERSION,
+            "evidence_runtime": manifest["evidence_runtime"],
+            "agent": aggregate_agent,
+            "agent_outcome_kind": outcome_kind,
+            "agent_failure_reason": model_failure_reason,
+            "max_model_calls": 5,
+            "max_turns_per_arm": 5,
+            "stage_turn_caps": {"solve": 5},
+            "calculation_backend": "libreoffice",
+            "recalculation": bundle.recalculation,
+            "output_sha256": bundle.final_artifact.sha256,
+            "deliverable_certificate": bundle.certificate,
+            "run_dir": run_dir.relative_to(results).as_posix(),
+            "output_workbook": output.relative_to(results).as_posix(),
+            "scoring_workbook": bundle.scoring_copy.relative_to(results).as_posix(),
+            "scoring_copy_sha256": bundle.final_artifact.sha256,
+            "completion_attempt_evaluations": [
+                evaluation.to_dict() for evaluation in evaluations
+            ],
+            "completion_attempt_count": len(attempts),
+            "budget": budget,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "elapsed_seconds": 3.0,
+            "agent_timing": {
+                "started_at": started_at,
+                "terminated_at": agent_terminated_at,
+                "elapsed_seconds": 1.0,
+            },
+            "postprocess_timing": {
+                "started_at": observer_started_at,
+                "finished_at": finished_at,
+                "elapsed_seconds": 1.0,
+                "budget": manifest["configuration"]["observer_budget"],
+                "status": "completed",
+            },
+            "outcome_kind": outcome_kind,
+            "passed": not model_failure,
+        }
+    )
+    if model_failure:
+        row.update(
+            {
+                "error": final_text,
+                "error_type": "AgentExecutionFailure",
+                "error_retryable": False,
+                "error_category": "model_execution_failure",
+                "model_failure_reason": model_failure_reason,
+            }
+        )
+    else:
+        for field in (
+            "error",
+            "error_type",
+            "error_retryable",
+            "error_category",
+            "model_failure_reason",
+        ):
+            row.pop(field, None)
+    recorder = TrajectoryRecorder(
+        run_dir / "trajectory.jsonl",
+        f"{task.task_id}-bare",
+    )
+    if rejected_then_accepted:
+        denied_attempt = attempts[0]
+        recorder.record(
+            "model.responded",
+            {
+                "turn": denied_attempt.turn,
+                "stage": denied_attempt.stage,
+                "response_id": denied_attempt.response_id,
+                "function_calls": [
+                    {
+                        "call_id": denied_attempt.call_id,
+                        "name": "submit_result",
+                        "arguments_sha256": _text_sha256("{}"),
+                    }
+                ],
+            },
+        )
+        recorder.record(
+            "agent.completion_attempt_captured",
+            {
+                "stage": denied_attempt.stage,
+                "turn": denied_attempt.turn,
+                "record": denied_attempt.to_dict(),
+            },
+        )
+        recorder.record(
+            "evidence_contract.submission_checked",
+            {
+                "stage": denied_attempt.stage,
+                "turn": denied_attempt.turn,
+                "decision": denied_contract_decision,
+                "completion_attempt_id": denied_attempt.attempt_id,
+                "completion_attempt_call_id": denied_attempt.call_id,
+            },
+        )
+        recorder.record(
+            "evidence_contract.terminal_reprompted",
+            {
+                "stage": denied_attempt.stage,
+                "turn": denied_attempt.turn,
+                "completion_attempt_id": denied_attempt.attempt_id,
+                "completion_attempt_call_id": denied_attempt.call_id,
+            },
+        )
+    recorder.record(
+        "model.responded",
+        {
+            "turn": attempt.turn,
+            "stage": attempt.stage,
+            "response_id": attempt.response_id,
+            "function_calls": [
+                {
+                    "call_id": attempt.call_id,
+                    "name": "submit_result",
+                    "arguments_sha256": _text_sha256("{}"),
+                }
+            ],
+        },
+    )
+    recorder.record(
+        "agent.completion_attempt_captured",
+        {"stage": attempt.stage, "turn": attempt.turn, "record": attempt.to_dict()},
+    )
+    if accepted_response is not None:
+        recorder.record(
+            "evidence_contract.submission_checked",
+            {
+                "stage": "solve",
+                "turn": 5,
+                "decision": contract_evidence["decision"],
+                "completion_attempt_id": attempt.attempt_id,
+                "completion_attempt_call_id": attempt.call_id,
+            },
+        )
+        recorder.record(
+            "agent.terminal_submitted",
+            {
+                "stage": "solve",
+                "turn": 5,
+                "terminal_tool": "submit_result",
+                "terminal_response": accepted_response,
+                "completion_attempt_id": attempt.attempt_id,
+                "completion_attempt_call_id": attempt.call_id,
+            },
+        )
+        recorder.record("agent.completed", final_agent)
+    else:
+        recorder.record(
+            "agent.execution_failed",
+            {
+                "reason": model_failure_reason,
+                "agent": final_agent,
+            },
+        )
+    recorder.record(
+        "benchmark.agent_terminated",
+        {
+            "schema_version": "spreadsheet-agent-termination-boundary-v1",
+            "task_id": task.task_id,
+            "arm": "bare",
+            "outcome_kind": outcome_kind,
+            "model_failure_reason": model_failure_reason,
+            "completion_attempt_count": len(attempts),
+            "response_id": aggregate_agent["response_id"],
+        },
+    )
+    recorder.record(
+        "benchmark.completion_attempts_evaluated",
+        {
+            "evaluator": evaluations[-1].evaluator,
+            "timing": "posthoc-after-agent-termination",
+            "fed_back_to_model": False,
+            "attempt_count": len(evaluations),
+            "attempt_ids": [evaluation.attempt_id for evaluation in evaluations],
+            "passed": [evaluation.passed for evaluation in evaluations],
+            "accepted_completion_attempt_id": (
+                attempt.attempt_id if accepted_response is not None else None
+            ),
+        },
+    )
+    recorder.record(
+        "observer.finalization_recorded",
+        {
+            "schema_version": bundle.certificate["schema_version"],
+            "candidate_outcome": bundle.certificate["candidate"]["outcome"],
+            "accepted_deliverable": (
+                bundle.certificate["candidate"]["outcome"] == "accepted_candidate"
+            ),
+            "candidate_artifact": bundle.certificate["candidate"]["artifact"],
+            "final_artifact": bundle.certificate["final_artifact"],
+            "scoring_copy_relative_path": bundle.certificate["scoring_copy"][
+                "relative_path"
+            ],
+            "certificate_sha256": bundle.certificate["certificate_sha256"],
+        },
+    )
+    recorder.record(
+        "benchmark.evaluated",
+        {
+            "task_id": task.task_id,
+            "arm": "bare",
+            "passed": row["passed"],
+            "artifact_score_passed": row["artifact_score_passed"],
+            "outcome_kind": outcome_kind,
+        },
+    )
+    row["trajectory_sha256"] = _sha256(run_dir / "trajectory.jsonl")
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return row
+
+
+def _v28_trajectory_events(results: Path, row: dict[str, Any]) -> list[dict[str, Any]]:
+    trajectory = results / row["run_dir"] / "trajectory.jsonl"
+    return [
+        json.loads(line)
+        for line in trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _write_rehashed_v28_fixture(
+    results: Path,
+    row: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> None:
+    trajectory = results / row["run_dir"] / "trajectory.jsonl"
+    trajectory.write_text(
+        "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    row["trajectory_sha256"] = _sha256(trajectory)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def _rehash_deliverable_certificate(certificate: dict[str, Any]) -> None:
+    payload = {
+        key: value for key, value in certificate.items() if key != "certificate_sha256"
+    }
+    certificate["certificate_sha256"] = _text_sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def _set_final_model_execution_failure(row: dict[str, Any], message: str) -> None:
@@ -893,13 +1519,13 @@ def _continuation_source(results: Path) -> dict[str, Any]:
             "source_fingerprint": manifest["harness_source"],
         },
     }
-    unsigned = json.dumps(
+    hash_payload = json.dumps(
         record,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
-    record["record_sha256"] = _text_sha256(unsigned)
+    record["record_sha256"] = _text_sha256(hash_payload)
     return record
 
 
@@ -929,6 +1555,675 @@ def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
         "expected_output_sha256"
     ]
     assert _tree_hashes(tmp_path) == before
+
+
+def test_v27_audit_rejects_injected_v28_only_fields(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    row["evidence_runtime"] = {"contract_mode": "enforce"}
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    row_rejected = audit_comparison(results, [task])
+
+    assert row_rejected["audit_valid"] is False
+    assert "task-1::bare:legacy_row_contains_v28_fields" in row_rejected["reasons"]
+
+    row.pop("evidence_runtime")
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["result_schema_version"] = COMPARISON_RESULT_SCHEMA_VERSION
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    manifest_rejected = audit_comparison(results, [task])
+
+    assert manifest_rejected["audit_valid"] is False
+    assert "legacy_manifest_contains_v28_fields" in manifest_rejected["reasons"]
+
+
+def test_v28_audit_scores_only_recorded_copy_and_detects_copy_tampering(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    before = _tree_hashes(tmp_path)
+
+    accepted = audit_comparison(results, [task])
+
+    assert accepted["audit_valid"] is True
+    assert accepted["rows"][0]["deliverable_lineage_valid"] is True
+    assert accepted["rows"][0]["accepted_deliverable"] is True
+    assert accepted["rows"][0]["scoring_copy_sha256"] == row["output_sha256"]
+    assert _tree_hashes(tmp_path) == before
+
+    scoring_copy = results / row["scoring_workbook"]
+    scoring_copy.chmod(0o600)
+    workbook = load_workbook(scoring_copy)
+    try:
+        workbook.active["A1"] = -1
+        workbook.save(scoring_copy)
+    finally:
+        workbook.close()
+    rejected = audit_comparison(results, [task])
+    assert rejected["audit_valid"] is False
+    assert any(
+        reason.startswith("task-1::bare:deliverable_lineage_invalid")
+        for reason in rejected["reasons"]
+    )
+
+
+def test_v28_audit_accepts_noncompletion_integrity_record_and_keeps_it_failed(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row, model_failure=True)
+
+    report = audit_comparison(results, [task])
+
+    assert report["audit_valid"] is True
+    assert report["study_complete"] is True
+    assert report["known_failed_rows"] == 1
+    audited = report["rows"][0]
+    assert audited["outcome_kind"] == "model_execution_failure"
+    assert audited["outcome_passed"] is False
+    assert audited["accepted_deliverable"] is False
+    assert audited["accepted_completion_attempt_id"] is None
+    assert row["artifact_score_passed"] is True
+    assert (
+        row["deliverable_certificate"]["candidate"]["outcome"]
+        == "audited_noncompletion"
+    )
+    assert row["deliverable_certificate"]["candidate"]["evidence_certificate"] is None
+
+
+@pytest.mark.parametrize(
+    ("model_failure", "tamper", "expected_reason"),
+    [
+        (False, "accepted_false", "observer_finalization_event_binding_invalid"),
+        (False, "accepted_integer", "observer_finalization_event_binding_invalid"),
+        (True, "accepted_true", "observer_finalization_event_binding_invalid"),
+        (True, "forged_accepted", "observer_finalization_event_binding_invalid"),
+        (False, "extra_field", "observer_finalization_event_binding_invalid"),
+        (False, "legacy_name", "observer_finalization_event_invalid"),
+    ],
+)
+def test_v28_audit_rejects_forged_observer_finalization_event(
+    tmp_path: Path,
+    model_failure: bool,
+    tamper: str,
+    expected_reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row, model_failure=model_failure)
+    events = _v28_trajectory_events(results, row)
+    finalization = next(
+        event
+        for event in events
+        if event["event"] == "observer.finalization_recorded"
+    )
+    payload = finalization["payload"]
+    if tamper == "accepted_false":
+        payload["accepted_deliverable"] = False
+    elif tamper == "accepted_integer":
+        payload["accepted_deliverable"] = 1
+    elif tamper == "accepted_true":
+        payload["accepted_deliverable"] = True
+    elif tamper == "forged_accepted":
+        payload["candidate_outcome"] = "accepted_candidate"
+        payload["accepted_deliverable"] = True
+    elif tamper == "extra_field":
+        payload["observer_note"] = "not schema-authorized"
+    elif tamper == "legacy_name":
+        finalization["event"] = "deliverable.certified"
+    else:  # pragma: no cover - parameter table is closed above.
+        raise AssertionError(f"unknown tamper case: {tamper}")
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert f"task-1::bare:{expected_reason}" in rejected["reasons"]
+
+
+def test_v28_audit_binds_manifest_and_row_evidence_runtime(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["evidence_runtime"]["contract_mode"] = "shadow"
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["evidence_runtime"] = manifest["evidence_runtime"]
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    manifest_rejected = audit_comparison(results, [task])
+
+    assert manifest_rejected["audit_valid"] is False
+    assert "comparison_manifest_evidence_runtime_mismatch" in manifest_rejected["reasons"]
+
+    manifest["evidence_runtime"] = _v28_evidence_runtime_identity()
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["evidence_runtime"] = {
+        **manifest["evidence_runtime"],
+        "target_grounding": "disabled",
+    }
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    row_rejected = audit_comparison(results, [task])
+
+    assert row_rejected["audit_valid"] is False
+    assert any(
+        reason == "task-1::bare:row_manifest_mismatch:evidence_runtime"
+        for reason in row_rejected["reasons"]
+    )
+
+
+def test_v28_audit_requires_grounding_for_a_solve_stage(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    certificate = row["deliverable_certificate"]
+    target_grounding = certificate["target_grounding"]
+    target_grounding.update(
+        {
+            "enabled": False,
+            "initial_artifact": None,
+            "initial_transition_count": None,
+            "authorization_count": 0,
+            "authorization_chain_head_sha256": "0" * 64,
+            "authorizations": [],
+        }
+    )
+    certificate_payload = {
+        key: value
+        for key, value in certificate.items()
+        if key != "certificate_sha256"
+    }
+    certificate["certificate_sha256"] = _text_sha256(
+        json.dumps(
+            certificate_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    trajectory = results / row["run_dir"] / "trajectory.jsonl"
+    events = [
+        json.loads(line)
+        for line in trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    finalization = next(
+        event
+        for event in events
+        if event["event"] == "observer.finalization_recorded"
+    )
+    finalization["payload"]["certificate_sha256"] = certificate["certificate_sha256"]
+    trajectory.write_text(
+        "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    row["trajectory_sha256"] = _sha256(trajectory)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:deliverable_target_grounding_not_enforced"
+        in rejected["reasons"]
+    )
+
+
+def test_v28_audit_rejects_reordered_posthoc_events_with_rehashed_trajectory(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    trajectory = results / row["run_dir"] / "trajectory.jsonl"
+    events = [json.loads(line) for line in trajectory.read_text(encoding="utf-8").splitlines()]
+    termination_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "benchmark.agent_terminated"
+    )
+    evaluation_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "benchmark.completion_attempts_evaluated"
+    )
+    events[termination_index], events[evaluation_index] = (
+        events[evaluation_index],
+        events[termination_index],
+    )
+    trajectory.write_text(
+        "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    row["trajectory_sha256"] = _sha256(trajectory)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert "task-1::bare:posthoc_event_order_invalid" in rejected["reasons"]
+
+
+def test_v28_audit_binds_accepted_attempt_call_id_to_trajectory(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    trajectory = results / row["run_dir"] / "trajectory.jsonl"
+    events = [json.loads(line) for line in trajectory.read_text(encoding="utf-8").splitlines()]
+    accepted = next(
+        event for event in events if event["event"] == "agent.terminal_submitted"
+    )
+    accepted["payload"]["completion_attempt_call_id"] = "different-terminal-call"
+    trajectory.write_text(
+        "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    row["trajectory_sha256"] = _sha256(trajectory)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid"
+        in rejected["reasons"]
+    )
+
+
+def test_v28_audit_accepts_denied_reprompt_then_accepted_lifecycle(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row, rejected_then_accepted=True)
+
+    report = audit_comparison(results, [task])
+
+    assert report["audit_valid"] is True
+    audited = report["rows"][0]
+    assert audited["completion_attempt_count"] == 2
+    assert audited["accepted_completion_attempt_id"] == 2
+
+
+def test_v28_audit_rejects_capture_before_model_response_after_rehash(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = _v28_trajectory_events(results, row)
+    response_index = next(
+        index for index, event in enumerate(events) if event["event"] == "model.responded"
+    )
+    capture_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "agent.completion_attempt_captured"
+    )
+    events[response_index], events[capture_index] = (
+        events[capture_index],
+        events[response_index],
+    )
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:completion_attempt_model_call_binding_invalid"
+        in rejected["reasons"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_failure", "event_name", "reason"),
+    [
+        (False, "agent.completed", "agent_completion_event_binding_invalid"),
+        (True, "agent.execution_failed", "agent_failure_event_binding_invalid"),
+    ],
+)
+def test_v28_audit_rejects_missing_agent_terminal_event_after_rehash(
+    tmp_path: Path,
+    model_failure: bool,
+    event_name: str,
+    reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row, model_failure=model_failure)
+    events = [
+        event
+        for event in _v28_trajectory_events(results, row)
+        if event["event"] != event_name
+    ]
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert f"task-1::bare:{reason}" in rejected["reasons"]
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "reason"),
+    [
+        ("response_id", "completion_attempt_model_call_binding_invalid"),
+        ("call_id", "completion_attempt_model_call_binding_invalid"),
+        ("attempt_id", "accepted_completion_attempt_trajectory_binding_invalid"),
+    ],
+)
+def test_v28_audit_rejects_response_call_or_attempt_id_mismatch_after_rehash(
+    tmp_path: Path,
+    mismatch: str,
+    reason: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = _v28_trajectory_events(results, row)
+    if mismatch == "response_id":
+        responded = next(event for event in events if event["event"] == "model.responded")
+        responded["payload"]["response_id"] = "different-response"
+    elif mismatch == "call_id":
+        responded = next(event for event in events if event["event"] == "model.responded")
+        responded["payload"]["function_calls"][0]["call_id"] = "different-call"
+    else:
+        checked = next(
+            event
+            for event in events
+            if event["event"] == "evidence_contract.submission_checked"
+        )
+        checked["payload"]["completion_attempt_id"] = 999
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert f"task-1::bare:{reason}" in rejected["reasons"]
+
+
+def test_v28_audit_rejects_denied_attempt_forged_as_accepted_after_rehash(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = _v28_trajectory_events(results, row)
+    checked = next(
+        event
+        for event in events
+        if event["event"] == "evidence_contract.submission_checked"
+    )
+    checked["payload"]["decision"].update(
+        {
+            "allowed": False,
+            "contract_satisfied": False,
+            "would_block": True,
+            "reasons": ["pending obligations"],
+            "certificate": None,
+        }
+    )
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid"
+        in rejected["reasons"]
+    )
+
+
+def test_v28_audit_rejects_duplicate_terminal_submit_after_rehash(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = _v28_trajectory_events(results, row)
+    terminal_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "agent.terminal_submitted"
+    )
+    events.insert(
+        terminal_index + 1,
+        json.loads(json.dumps(events[terminal_index])),
+    )
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid"
+        in rejected["reasons"]
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_event",
+    ["agent.terminal_submitted", "agent.completed", "agent.execution_failed"],
+)
+def test_v28_audit_rejects_altered_or_contradictory_terminal_event_after_rehash(
+    tmp_path: Path,
+    extra_event: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = _v28_trajectory_events(results, row)
+    source_name = (
+        "agent.terminal_submitted"
+        if extra_event == "agent.terminal_submitted"
+        else "agent.completed"
+    )
+    source_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == source_name
+    )
+    forged = json.loads(json.dumps(events[source_index]))
+    forged["event"] = extra_event
+    if extra_event == "agent.terminal_submitted":
+        forged["payload"]["completion_attempt_call_id"] = "different-call"
+        forged["payload"]["terminal_response"]["response_id"] = "different-response"
+    elif extra_event == "agent.completed":
+        forged["payload"]["final_text"] = "forged completion"
+    else:
+        forged["payload"] = {
+            "reason": "protocol_noncompliance",
+            "agent": {"forged": True},
+        }
+    events.insert(source_index, forged)
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert "task-1::bare:agent_completion_event_binding_invalid" in rejected["reasons"]
+
+
+def test_v28_audit_rejects_missing_model_call_after_rehash(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = [
+        event
+        for event in _v28_trajectory_events(results, row)
+        if event["event"] != "model.responded"
+    ]
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:completion_attempt_model_call_binding_invalid"
+        in rejected["reasons"]
+    )
+
+
+def test_v28_audit_rejects_uncaptured_submit_call_after_rehash(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = _v28_trajectory_events(results, row)
+    responded = next(event for event in events if event["event"] == "model.responded")
+    responded["payload"]["function_calls"].append(
+        {
+            "call_id": "uncaptured-terminal-call",
+            "name": "submit_result",
+            "arguments_sha256": _text_sha256("{}"),
+        }
+    )
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:completion_attempt_model_call_coverage_invalid"
+        in rejected["reasons"]
+    )
+
+
+def test_v28_audit_rejects_reprompt_after_next_model_response_after_rehash(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row, rejected_then_accepted=True)
+    events = _v28_trajectory_events(results, row)
+    reprompt_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "evidence_contract.terminal_reprompted"
+    )
+    reprompt = events.pop(reprompt_index)
+    next_response_index = [
+        index for index, event in enumerate(events) if event["event"] == "model.responded"
+    ][1]
+    events.insert(next_response_index + 1, reprompt)
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:denied_completion_attempt_lifecycle_invalid"
+        in rejected["reasons"]
+    )
+
+
+@pytest.mark.parametrize("event_name", ["model.responded", "tool.returned"])
+def test_v28_audit_rejects_model_or_tool_event_after_termination_after_rehash(
+    tmp_path: Path,
+    event_name: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = _v28_trajectory_events(results, row)
+    termination_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "benchmark.agent_terminated"
+    )
+    injected = json.loads(json.dumps(events[0]))
+    injected["event"] = event_name
+    injected["payload"] = {"forged": True}
+    events.insert(termination_index + 1, injected)
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert "task-1::bare:model_visible_event_after_termination" in rejected["reasons"]
+
+
+def test_v28_audit_rejects_unchecked_attempt_without_failure_after_rehash(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    events = [
+        event
+        for event in _v28_trajectory_events(results, row)
+        if event["event"] != "evidence_contract.submission_checked"
+    ]
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert (
+        "task-1::bare:completion_attempt_abort_binding_invalid"
+        in rejected["reasons"]
+    )
+
+
+def test_v28_audit_rejects_rehashed_deliverable_certificate_tampering(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    certificate = row["deliverable_certificate"]
+    certificate["candidate"]["submission"]["terminal_submissions"] = 999
+    _rehash_deliverable_certificate(certificate)
+    events = _v28_trajectory_events(results, row)
+    finalization = next(
+        event
+        for event in events
+        if event["event"] == "observer.finalization_recorded"
+    )
+    finalization["payload"]["certificate_sha256"] = certificate["certificate_sha256"]
+    _write_rehashed_v28_fixture(results, row, events)
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert rejected["rows"][0]["deliverable_lineage_valid"] is False
+
+
+def test_v28_audit_rejects_observer_budget_tampering_after_rehash(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    row["postprocess_timing"]["budget"] = {
+        **row["postprocess_timing"]["budget"],
+        "max_total_postprocess_seconds": 1,
+    }
+    _write_rehashed_v28_fixture(results, row, _v28_trajectory_events(results, row))
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert "task-1::bare:postprocess_timing_invalid" in rejected["reasons"]
+
+
+@pytest.mark.parametrize("tamper", ["elapsed", "row_boundary"])
+def test_v28_audit_rejects_observer_timing_tampering_after_rehash(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    if tamper == "elapsed":
+        row["postprocess_timing"]["elapsed_seconds"] = 999.0
+    else:
+        row["postprocess_timing"]["finished_at"] = "2026-08-14T00:00:04+00:00"
+    _write_rehashed_v28_fixture(results, row, _v28_trajectory_events(results, row))
+
+    rejected = audit_comparison(results, [task])
+
+    assert rejected["audit_valid"] is False
+    assert any(
+        reason.startswith(
+            (
+                "task-1::bare:postprocess_elapsed_",
+                "task-1::bare:agent_postprocess_row_boundary_",
+            )
+        )
+        for reason in rejected["reasons"]
+    )
 
 
 def test_live_v23_pilot_audit_has_no_version_drift_false_positives() -> None:

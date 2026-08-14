@@ -700,6 +700,9 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
             circuit_breaker_threshold=args.circuit_breaker,
             split_provenance=split_provenance,
             skills=skills,
+            deliverable_lineage=bool(
+                getattr(args, "deliverable_lineage", False)
+            ),
         )
         verify_pilot_run_spec_contract(run_spec_document, actual_contract)
     elif args.resume:
@@ -747,6 +750,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         run_spec_document=run_spec_document,
         run_spec_provenance=run_spec_provenance,
         run_spec_bytes=run_spec_bytes,
+        deliverable_lineage=bool(getattr(args, "deliverable_lineage", False)),
     )
     if args.run_spec:
         runner.preflight(tasks)
@@ -811,6 +815,7 @@ def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
             circuit_breaker_threshold=resources["circuit_breaker_threshold"],
             split_provenance=split_provenance,
             skills=skills,
+            deliverable_lineage=resources.get("deliverable_lineage") is True,
         ),
     )
     runner = ComparisonBenchmarkRunner(
@@ -830,6 +835,7 @@ def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
         run_spec_document=run_spec_document,
         run_spec_provenance=run_spec_provenance,
         run_spec_bytes=run_spec_bytes,
+        deliverable_lineage=resources.get("deliverable_lineage") is True,
     )
     seal = runner.seal_interrupted_inflight(tasks)
     _json_print({"sealed": True, "seal": seal})
@@ -1085,6 +1091,14 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--limit", type=int)
     compare.add_argument("--arm", action="append", choices=AVAILABLE_COMPARISON_ARMS)
     compare.add_argument("--no-recalculate", action="store_true")
+    compare.add_argument(
+        "--deliverable-lineage",
+        action="store_true",
+        help=(
+            "Opt into v28/schema-17 final-revision certificates and an immutable "
+            "byte-identical scoring copy"
+        ),
+    )
     compare.add_argument("--skills", action="append", default=[], help="Additional skills root")
     compare.add_argument("--max-model-calls", type=int, default=20)
     compare.add_argument(

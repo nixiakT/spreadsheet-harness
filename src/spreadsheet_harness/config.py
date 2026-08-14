@@ -526,7 +526,7 @@ class ProviderConfig:
 
     def public_dict(self) -> dict[str, Any]:
         return {
-            "base_url": self.base_url,
+            "endpoint_label": f"configured-{self.api_protocol}",
             "model": self.model,
             "api_protocol": self.api_protocol,
             "reasoning_effort": self.reasoning_effort,

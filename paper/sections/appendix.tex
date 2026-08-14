@@ -1,0 +1,157 @@
+\section{Contract grammar and monitor semantics}
+\label{app:contract}
+
+The artifact supplement contains the complete machine-readable schema. A rule
+contains a unique identifier, a trusted effect trigger, and a non-empty ordered
+sequence of evidence steps. Each step selects an enumerated event type, scope
+relationship, revision relationship, and deterministic predicate. Unknown
+fields, predicates, event types, duplicate rule identifiers, booleans in place
+of integer schema versions, malformed SHA-256 digests, and impossible orderings
+are rejected. The grammar contains no arbitrary expression evaluator.
+
+\section{Conditional invariant}
+\label{app:invariant}
+
+Let $P_k$ be the pending obligation set after event $k$, $D_k$ the set of
+discharged obligations with harness-emitted witness summaries, $R_k$ the exact
+artifact reference, $G_k$ the unconsumed prospective declaration, and $B_k$ the
+scope-linked recovery blockers. The transition function has the following
+relevant cases.
+
+\begin{enumerate}
+  \item A trusted observation cannot increment $R_k$. A declaration enters
+  $G_k$ only if cited, earlier observations on $R_k$ cumulatively cover its
+  finite target scope.
+  \item A staged mutation is publishable only if its complete semantic footprint
+  is non-unknown and lies inside $G_k$. Publication increments the artifact
+  index, consumes $G_k$, clears stage-local witness coverage, and adds all
+  obligations matching the computed footprint. A semantic no-op cannot satisfy
+  the user-edit gate; a byte-changing no-op still advances the artifact index.
+  \item A read, render, or view cannot publish bytes. It advances a stage only
+  after event type, dynamic artifact selector, same-stage cumulative scope,
+  predicate, and ordering match Equation~\ref{eq:witness}.
+  \item Recalculation names explicit source and output artifacts. As a required
+  transition it updates the next stage's selector to its output; it cannot stand
+  in for the task's semantic edit. Any additional effect is independently
+  classified and handled fail closed.
+  \item A transaction that demonstrably leaves the source unchanged adds no
+  blocker. Partial or uncertain recovery adds a scope-linked blocker; only a
+  later computed footprint covering that scope clears it.
+  \item Candidate acceptance requires a semantic user mutation, a consumed
+  grounding record for every protected mutation, $P_k=\varnothing$, and
+  $B_k=\varnothing$. An accepted deliverable additionally requires a complete,
+  non-semantic postprocess footprint, a fresh workbook-scope scan, any required
+  visual equivalence witness, and final/replica hash equality. An audited
+  noncompletion receives an observer-only finalization integrity record that
+  binds termination, postprocess effects (including a fail-closed unknown),
+  final artifact, and diagnostic-copy lineage, while explicitly making no
+  acceptance, accepted-deliverable, or correctness claim. Online shadow records the
+  candidate decision but does not enforce it; offline replay alone preserves
+  the original trajectory.
+\end{enumerate}
+
+Induction on $k$ establishes that every element of $D_k$ has a harness-emitted
+witness satisfying Equation~\ref{eq:witness}, and that no stage-local coverage
+invalidated by a publication remains eligible. The declaration and acceptance
+preconditions give the prospective and retrospective parts of the invariant.
+The argument assumes the stated trusted computing base and says nothing about
+whether a declared target or contract captures user intent.
+
+\section{Detailed prior-work boundaries}
+\label{app:prior-boundaries}
+
+Spreadsheet static analyses already detect anomalous formulas, unit/type
+inconsistencies, suspicious input data, and formula smells
+\citep{barowy2018excelint,abraham2007ucheck,barowy2014checkcell,hermans2012spreadsheetcodesmells}.
+Where-provenance supports bidirectional spreadsheet editing, and empirical work
+has characterized workbook evolution
+\citep{williams2022whereprovenance,xu2017spreadsheetevolution}. These methods
+analyze workbook correctness, origin, or change patterns; they do not establish
+that an agent's completion evidence covers the latest affected scope or the
+postprocessed artifact evaluated by a scorer.
+
+Mining behavioral specifications and monitoring declarative process constraints
+also predate language-model agents
+\citep{ammons2002miningspecifications,lemieux2015texada,pesic2007declare}.
+Accordingly, our claim is not a new temporal formalism. The controlled comparison
+instead asks what changes when the same policy engine receives raw tool calls
+versus spreadsheet-enriched effects, scopes, revisions, and render identities.
+
+Finally, Sigstore supplies signing and transparency for software artifacts, and
+ReproZip packages execution dependencies for computational reproducibility
+\citep{newman2022sigstore,chirigati2016reprozip}. Neither guarantee is implied by
+our hash-bound record. ExpeL likewise predates our use of success/failure
+trajectories to derive reusable agent guidance \citep{zhao2024expel}. Our core
+evaluation uses a frozen researcher-authored contract and treats distilled
+prose only as a procedure-inspired whole-system baseline; joint artifact
+distillation is an optional, separately controlled study, not a tested core
+increment.
+
+\section{Synthetic evidence-oracle suite}
+\label{app:oracle}
+
+The suite crosses effect families (value, formula, style, structure, visual,
+opaque code) with attacks (missing, stale, wrong scope, wrong page, unreported
+effect, postprocess drift, and inconsistent finalization/certificate fields). A standard-
+library ZIP/XML oracle shares neither openpyxl nor production diff code and
+independently resolves package relationships, formulas (including shared and
+array ranges), styles, tables, charts, opaque parts, and lossy extensions. Each
+generator emits an input workbook, deterministic edit, expected semantic
+footprint, valid event chain, minimal invalid perturbations, and independent
+final-workbook assertions.
+Randomization changes sheet names, range locations, formula offsets, and style
+values without changing the tested invariant. Valid controls prevent a trivial
+reject-all monitor from scoring well.
+
+\section{Benchmark splits, budgets, and audit}
+\label{app:protocol}
+
+For each run, the supplement records the ordered task identifiers, input and
+oracle hashes, source/skill/contract hashes, arm order, model checkpoint or
+service alias, decoding parameters, request and task timeouts, retry policy,
+call/token/turn ceilings, sandbox policy, Python/package/LibreOffice versions,
+and scorer identity. A launch gate requires a clean checkout whose local,
+tracking, and anonymous published commits agree. The run is not resumed after
+an ambiguous request or after any outcome is inspected.
+
+The fresh auditor reopens every expected row, validates journal uniqueness and
+status, checks input/output/scorer-copy hashes, reconstructs the all-row
+finalization integrity record and event-chain digests, reconstructs an accepted-
+deliverable certificate only for an \texttt{accepted\_candidate}, verifies
+transition continuity and witness scopes, checks that scoring did not mutate
+the copy, and reruns the official scorer. An incomplete matrix or any invalid
+row makes the preregistered inference invalid; completed-false model outcomes
+remain in the denominator.
+
+\section{Statistical details}
+\label{app:statistics}
+
+For one seed, let $n_{10}$ be tasks passed only by \method{} and $n_{01}$ tasks
+passed only by the comparator. The paired point estimate is the mean of per-task
+success differences, and the two-sided exact McNemar $p$-value is computed from
+$\operatorname{Binomial}(n_{10}+n_{01},0.5)$. Single-seed arm proportions may
+receive Wilson 95\% intervals. For repeated seeds, we first average within each
+task; the task-cluster bootstrap or permutation resamples tasks while preserving
+their complete arm-by-seed vector. We publish the random seed, draws, percentile
+interval, and BCa sensitivity analysis. Continuous Modification uses a paired
+task-cluster interval. Holm correction applies only to five scalar hypotheses:
+task-level accepted-terminal false completion over all selected tasks (B6 vs.
+B5), postprocess-stale acceptance (FULL vs. B6), declaration elicitation (G1
+vs. G0), staged-containment enforcement (G2 vs. G1), and sealed-oracle invalid-
+attack acceptance (enriched vs. raw events under the same generic policy).
+First/any-attempt false completion is diagnostic because those snapshots are
+captured before the submission gate can act. Accuracy and coverage are
+preregistered guardrails, not extra hidden tests. All raw estimates and
+intervals remain visible.
+
+\section{Failure taxonomy and annotation}
+
+The initial taxonomy includes insufficient inspection, wrong target, task
+misunderstanding, formula/reference error, format or output error, execution
+failure, budget exhaustion, and other. Two annotators receive redacted
+trajectories with arm labels and contract diagnostics masked where tool shape
+permits. They independently assign a primary cause and optional contributing
+causes, then adjudicate after Cohen's $\kappa$ or Krippendorff's $\alpha$ is
+computed. Residual arm leakage, annotator role, and AI assistance are disclosed.
+Contract rejection reasons are deterministic monitor outputs and are analyzed
+separately from human root-cause labels.

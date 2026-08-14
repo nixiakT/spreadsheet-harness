@@ -1,0 +1,133 @@
+\section{Experiments}
+\label{sec:experiments}
+
+We ask whether (Q1) enforcing the same fixed contract used in visible shadow
+mode reduces accepted-terminal false completion without unacceptable Accuracy
+or accepted-terminal coverage loss;
+(Q2) final-artifact lineage, target declaration elicitation, staged-containment
+enforcement, and workbook-enriched events address postprocessing drift,
+off-target edits, and hidden mutations;
+(Q3) effects persist across two model families, three seeds, Debugging-100,
+Visualization-24, and LibreOffice/Excel; and (Q4) what rejection, recovery,
+collateral damage, latency, token, and trusted-component costs result.
+
+\input{tables/main_results}
+
+\subsection{Benchmarks and protocol}
+
+\paragraph{SpreadsheetBench-Verified.}
+Trace2Skill uses a nominal 400-example verified collection, with indices
+0:200 for evolution and 200:400 for held-out evaluation
+\citep{ma2024spreadsheetbench,ni2026trace2skill}. After the documented local
+exclusions, our pinned copy contains 198 usable held-out examples; we never call
+all 400 held out. A one-shot study on the final 79 locally unexposed tasks
+concerns a predecessor harness designed before SheetLedger; it is deployment
+context, not evidence for the new method. The original benchmark's sibling-
+replay Soft/Hard protocol (\texttt{solution\_once\_apply\_n}) and our one-agent-
+per-workbook protocol (\texttt{agent\_per\_workbook}) have different units and
+are never pooled or presented as the same leaderboard setting.
+
+\paragraph{SpreadsheetBench~2.}
+The primary external study seals all 100 debugging instance files and
+identifiers before development \citep{zhu2026spreadsheetbench2}. They test
+unknown defects in multi-sheet workbooks and pre-edit grounding. ``Unseen''
+means instance-artifact-unseen to this study: paper-level aggregates and the
+published case were read, and model pretraining exposure is unknown. We check
+whether that case enters the split, disclose exclusions before launch, run
+Visualization-24 for visual claims, report official Modification and Accuracy,
+and never use these instances for artifact selection.
+
+\paragraph{Evidence-oracle suite.}
+Randomized workbooks cross value, formula, style, structure, visual, opaque-code,
+rollback, and lineage effects with valid traces and minimal stale, wrong-scope,
+postprocess, and field-tamper attacks. A standard-library ZIP/XML oracle shares
+no parser with the runtime comparator and covers shared/array formulas, tables,
+names, charts, lossy extensions, and opaque parts. Held-out handcrafted cases
+and valid controls measure both missed attacks and over-rejection; the sealed
+tamper corpus is not used to author the contract.
+
+\paragraph{Models and backends.}
+The causal matrix uses pinned Qwen3.5-35B-A3B plus a different model family,
+with seeds 41/42/43. We record availability of both Trace2Skill checkpoints;
+reproducibly available Qwen3.5-122B-A10B receives a frozen, separately labeled
+protocol-alignment extension, not a replacement for the cross-family run.
+Opaque service aliases are labeled non-reproducible. LibreOffice is primary; a
+frozen Excel-COM subset measures formula, render, and official-score disagreement.
+
+Every comparison is paired by task and fixes decoding, initial files, backend,
+and arm-level call/token/time ceilings. A seeded Latin square balances order;
+manifests record code, prompts, model/service revision, and infrastructure
+incidence. There is no outcome-dependent retry, and errors stay in the Accuracy
+denominator. In every arm, common observer instrumentation freezes each submit
+pre-gate as an immutable attempt; attempts are scored only after model
+termination and never fed back. Termination without an accepted candidate
+remains an audited noncompletion, not a missing row.
+
+\subsection{Baselines and controlled variants}
+
+B0 is code-only. B1 is the Spreadsheet-RL-inspired native-tool adapter (no
+RL-trained checkpoint). B2 is the SpreadsheetAgent-inspired multi-format
+adapter, adding structural, range, text, and rendered views. Trace2Skill is a
+procedure-only inspired whole-system baseline over B2. These three prior-work-
+derived rows are clean-room inspired adapters and are never called official
+reproductions unless the released implementation and its full protocol are
+actually used.
+
+With one preregistered researcher-authored fixed contract, B5 is visible shadow
+and B6 adds only unsatisfied-submit blocking; diagnostics, tools/model,
+grounding, attempt instrumentation, and budgets stay fixed. B6 and FULL execute
+equivalent deterministic postprocessing, recalculation, final-scan, and scorer-
+copy operations; FULL alone adds exact accepted-terminal-to-final-to-copy
+lineage enforcement. FULL includes G2 by default, and B5/B6 also keep G2 fixed.
+G0 omits target declarations, G1 elicits and diagnoses declarations without
+blocking staged edits, and G2 enforces staged-footprint containment. Therefore
+G1--G0 estimates elicitation and G2--G1 estimates enforcement; G2--G0 is only
+their total contrast, not the effect of one gate.
+
+A core, same-policy comparison crosses raw versus enriched events within a
+representative generic engine; the containing $2\times2$ also crosses
+generic/restricted policy, with policies and visible fields published. Oracle
+ablations remove one of revision/scope binding, semantic or opaque-code diffing,
+stale invalidation, recalculation lineage, or recovery linkage. Joint
+procedure/contract distillation is optional secondary work after the fixed matrix
+is frozen.
+
+\subsection{Metrics and statistics}
+
+Primary Accuracy includes every selected task. At task level we report
+first/any-attempt and accepted-terminal false completion; attempt and
+accepted-terminal coverage; submission and grounding rejection/recovery; audited
+noncompletion; target precision/recall; off-target and collateral effects; and
+tamper acceptance/valid-control rejection. Because attempts precede the gate,
+accepted-terminal false completion over all tasks is the enforcement estimand;
+Accuracy, terminal coverage, and conditional risk expose abstention.
+
+Costs include tokens, logical/HTTP/tool calls, wall time, component CPU time,
+attempts, artifact transitions, and backend disagreement. For three seeds we
+first average within task, then use paired task-cluster bootstrap/permutation
+intervals preserving arm-by-seed vectors. Wilson/McNemar are limited to labeled
+single-seed binary analyses; Modification uses paired bootstrap. Four real-task
+Holm tests use the preregistered 35B checkpoint and one is model-free on the
+oracle; the second family repeats real-task estimands without cross-family pooling.
+Arm-masked annotation reports agreement, leakage, adjudication, role, and AI use.
+Margins and clustered procedures are frozen after design-stage precision
+analysis; unresolved guardrails preclude a utility-preservation claim.
+
+\subsection{Mechanism, robustness, and cost analyses}
+
+The oracle reports invalid-trace rejection and valid-control acceptance for all
+ablations and event/policy cells. Core model-free mechanism evidence comprises
+the same-policy raw/enriched comparison and a paired B6/FULL finalization
+challenge in which frozen candidate bytes are shared across arms.
+Real-task analyses stratify effect family,
+recovery/noncompletion, collateral damage, and accepted-candidate failures
+despite a consistent accepted-deliverable certificate. Visualization-24 and the
+backend subset test render/recalculation
+assumptions; accuracy--budget and reliability--budget curves test whether gains
+come only from extra calls. The fixed contract is unchanged across models;
+optional distilled-artifact transfer cannot support a main claim.
+
+\paragraph{Results policy.}
+\pending{Populate Table~\ref{tab:main} and quantitative prose only from one
+freshly audited task$\times$arm$\times$seed export; never hand-copy results or
+treat the predecessor study as SheetLedger evidence.}

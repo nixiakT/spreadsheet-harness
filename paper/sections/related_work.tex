@@ -1,0 +1,65 @@
+\section{Setting and related work}
+
+\paragraph{Spreadsheet agents and benchmarks.}
+SpreadsheetBench evaluates real-world spreadsheet manipulation with input and
+oracle workbooks \citep{ma2024spreadsheetbench}. SpreadsheetAgent improves
+large-workbook understanding through an extracted structural sketch, localized
+code/image/\LaTeX{} views, and multi-agent verification
+\citep{ren2026spreadsheetagent}. Spreadsheet-RL combines isolated Excel
+workspaces, native tools, an inspect--modify--verify harness, and outcome-based
+reinforcement learning \citep{chi2026spreadsheetrl}. SpreadsheetBench~2 shifts
+evaluation to 321 business workflows with an average of 11.8 sheets and 593.5
+modified cells; its 100 debugging tasks hide both error type and location
+\citep{zhu2026spreadsheetbench2}. We reuse localized representations and native
+tools, but study when a verification observation is sufficient to authorize
+completion.
+
+\paragraph{Spreadsheet correctness and provenance.}
+Spreadsheet Guardian separates spreadsheet test rules from their execution and
+reruns them during maintenance \citep{kulesz2018spreadsheetguardian}; automated
+spreadsheet provenance also predates our work
+\citep{asuncion2013spreadsheetprovenance}. We claim neither mechanism first.
+Instead, computed effects trigger evidence bound to affected scope, exact
+revision, postprocessing, and evaluator bytes.
+
+\paragraph{Experience-derived skills.}
+Trace2Skill analyzes successful and failed trajectories in parallel, proposes
+trajectory-local patches, and hierarchically consolidates them into a portable
+skill directory \citep{ni2026trace2skill}. We evaluate this as a
+procedure-only inspired baseline; \method's runtime contract and artifact lineage do not
+depend on how a procedure was authored. Joint procedure/contract evolution is
+kept outside the primary claims unless a same-pool factorial and cross-model
+transfer study are complete. Agent Workflow Memory also induces reusable
+workflows from trajectories \citep{wang2025agentworkflowmemory}; neither form of
+procedural memory itself enforces acceptance.
+
+\paragraph{Runtime enforcement and trace conformance.}
+Runtime verification has long separated execution from trace-property monitors
+\citep{leucker2009runtimeverification}. AgentSpec provides customizable
+trigger/check/enforce rules \citep{wang2026agentspec}; VIGIL and AgentLTL add
+finite-trace, artifact/value-flow, and typed procedural constraints
+\citep{li2026vigil,elkoussy2026agentltl}, while guardrails separate policy from
+generation \citep{rebedea2023nemo}. Thus temporal enforcement and policy
+compilation are not our novelty. Our spreadsheet front end reveals computed
+Python effects, recalculation changes, and stale render identities absent from a
+raw call trace. We compare the same policy engine on raw and enriched events,
+not against a deliberately weak adapter.
+
+\paragraph{Artifact lineage.}
+Software supply-chain systems such as in-toto bind declared steps to materials
+and products using authenticated metadata \citep{torresarias2019intoto}. Our
+accepted-deliverable certificate instead hash-binds candidate evidence,
+recalculation, final checks, and scoring replica under a trusted host and
+storage; the
+all-row observer record provides only lineage consistency. Neither provides
+signatures, external transparency, or hostile-host authentication.
+
+\input{tables/event_policy_boundary}
+
+\paragraph{Scope of the guarantee.}
+Process conformance and task correctness are complementary. A compliant agent
+may confidently modify the wrong target, while a noncompliant agent may pass by
+chance. We therefore use the official workbook evaluator as the primary outcome
+and evidence compliance as a separately audited mechanism. Our conditional
+invariant covers trusted witnesses for configured obligations; it does not
+prove that those obligations fully encode user intent.

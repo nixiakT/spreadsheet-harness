@@ -6,9 +6,11 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 import threading
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -25,8 +27,18 @@ from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .code_interpreter import validate_formula_transaction
+from .completion_attempt import CompletionAttemptLedger, CompletionAttemptRecord
 from .errors import ToolInputError, WorkbookValidationError
+from .evidence_contract import ArtifactRef, ArtifactTransition, EvidenceScope
+from .target_grounding import (
+    CommittedTargetAuthorization,
+    PreparedTargetAuthorization,
+    TargetGroundingError,
+    TargetGroundingRejected,
+    TargetGroundingStateMachine,
+)
 from .trajectory import TrajectoryRecorder
+from .workbook_diff import WorkbookEffectDiff, diff_workbooks
 
 SUPPORTED_EDIT_FORMATS = {".xlsx", ".xlsm"}
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -34,9 +46,7 @@ _FORMULA_RANGE_RE = re.compile(
     r"(?P<sheet>(?:'[^']+'|[A-Za-z_][A-Za-z0-9_ .]*)!)?"
     r"(?P<start>\$?[A-Za-z]{1,3}\$?\d+):(?P<end>\$?[A-Za-z]{1,3}\$?\d+)"
 )
-_CELL_REF_RE = re.compile(
-    r"(?P<col_abs>\$?)(?P<col>[A-Za-z]{1,3})(?P<row_abs>\$?)(?P<row>\d+)\Z"
-)
+_CELL_REF_RE = re.compile(r"(?P<col_abs>\$?)(?P<col>[A-Za-z]{1,3})(?P<row_abs>\$?)(?P<row>\d+)\Z")
 
 
 def _sha256(path: Path) -> str:
@@ -124,9 +134,7 @@ def _fill_formula_warnings(
         if start is None or end is None:
             continue
         issues: list[str] = []
-        if fills_horizontally and not (
-            start["column_absolute"] and end["column_absolute"]
-        ):
+        if fills_horizontally and not (start["column_absolute"] and end["column_absolute"]):
             issues.append("column endpoints are not both absolute")
         if fills_vertically and start["row_absolute"] != end["row_absolute"]:
             issues.append("mixed row anchors")
@@ -140,9 +148,7 @@ def _fill_formula_warnings(
                 origin=source_cell,
             ).translate_formula(destination)[1:]
             if translated != match.group(0):
-                translated_examples.append(
-                    {"cell": destination, "translated_range": translated}
-                )
+                translated_examples.append({"cell": destination, "translated_range": translated})
             if len(translated_examples) >= 3:
                 break
         if not translated_examples:
@@ -229,6 +235,13 @@ class WorkbookSession:
         self.run_id = run_id
         self._write_lock = threading.RLock()
         self._snapshot_counter = 0
+        self._artifact = ArtifactRef(0, _sha256(paths.workbook))
+        self._artifact_bytes = paths.workbook.read_bytes()
+        self._artifact_transitions: list[ArtifactTransition] = []
+        self._completion_attempt_ledger: CompletionAttemptLedger | None = None
+        self._target_grounding: TargetGroundingStateMachine | None = None
+        self._target_grounding_initial_artifact: ArtifactRef | None = None
+        self._target_grounding_initial_transition_count: int | None = None
         self.recorder = TrajectoryRecorder(
             paths.trajectory,
             run_id,
@@ -296,6 +309,473 @@ class WorkbookSession:
     def workspace(self) -> Path:
         return self.paths.root
 
+    def _assert_artifact_sync_locked(self) -> None:
+        observed_sha256 = _sha256(self.workbook_path)
+        if observed_sha256 != self._artifact.sha256:
+            raise WorkbookValidationError(
+                "Managed workbook bytes changed outside a recorded artifact transition: "
+                f"revision {self._artifact.revision} expected {self._artifact.sha256}, "
+                f"observed {observed_sha256}"
+            )
+
+    def artifact_ref(self) -> ArtifactRef:
+        with self._write_lock:
+            self._assert_artifact_sync_locked()
+            return self._artifact
+
+    def enable_completion_attempt_capture(self) -> CompletionAttemptLedger:
+        """Enable one task-wide attempt ledger without changing default runs."""
+
+        with self._write_lock:
+            self._assert_artifact_sync_locked()
+            if self._completion_attempt_ledger is None:
+                self._completion_attempt_ledger = CompletionAttemptLedger(self.workspace)
+            return self._completion_attempt_ledger
+
+    def capture_completion_attempt(
+        self,
+        *,
+        stage: str,
+        turn: int,
+        response_id: str | None,
+        call_id: str,
+    ) -> CompletionAttemptRecord:
+        """Atomically bind a submit attempt to the current revision and bytes."""
+
+        with self._write_lock:
+            self._assert_artifact_sync_locked()
+            if self._completion_attempt_ledger is None:
+                raise WorkbookValidationError(
+                    "Completion-attempt capture was not explicitly enabled"
+                )
+            return self._completion_attempt_ledger.capture(
+                self.workbook_path,
+                self._artifact,
+                stage=stage,
+                turn=turn,
+                response_id=response_id,
+                call_id=call_id,
+            )
+
+    @property
+    def artifact_transitions(self) -> tuple[ArtifactTransition, ...]:
+        with self._write_lock:
+            return tuple(self._artifact_transitions)
+
+    @property
+    def target_grounding_enabled(self) -> bool:
+        with self._write_lock:
+            return self._target_grounding is not None
+
+    @property
+    def target_grounding_initial_artifact(self) -> ArtifactRef | None:
+        with self._write_lock:
+            return self._target_grounding_initial_artifact
+
+    @property
+    def target_grounding_initial_transition_count(self) -> int | None:
+        with self._write_lock:
+            return self._target_grounding_initial_transition_count
+
+    @property
+    def committed_target_authorizations(
+        self,
+    ) -> tuple[CommittedTargetAuthorization, ...]:
+        with self._write_lock:
+            if self._target_grounding is None:
+                return ()
+            return self._target_grounding.committed_authorizations
+
+    def enable_target_grounding(self) -> None:
+        with self._write_lock:
+            self._assert_artifact_sync_locked()
+            if self._target_grounding is None:
+                gate = TargetGroundingStateMachine(self._artifact)
+                transition_count = len(self._artifact_transitions)
+                self.recorder.record(
+                    "target_grounding.enabled",
+                    {
+                        "artifact": self._artifact.to_dict(),
+                        "initial_transition_count": transition_count,
+                    },
+                )
+                self._target_grounding = gate
+                self._target_grounding_initial_artifact = self._artifact
+                self._target_grounding_initial_transition_count = transition_count
+            elif self._target_grounding.current_artifact != self._artifact:
+                raise WorkbookValidationError(
+                    "Target-grounding ledger is not synchronized with the managed artifact"
+                )
+
+    def record_target_observation(
+        self,
+        *,
+        artifact: ArtifactRef,
+        scope: EvidenceScope,
+    ) -> dict[str, Any]:
+        with self._write_lock:
+            if self._target_grounding is None:
+                raise TargetGroundingError("target grounding is not enabled")
+            self._assert_artifact_sync_locked()
+            observation = self._target_grounding.record_trusted_observation(
+                artifact=artifact,
+                scope=scope,
+            )
+            document = observation.to_dict()
+            self.recorder.record("target_grounding.observation", document)
+            return document
+
+    def declare_edit_target(
+        self,
+        *,
+        target_scope: EvidenceScope,
+        observation_ids: tuple[int, ...] | list[int],
+    ) -> dict[str, Any]:
+        with self._write_lock:
+            if self._target_grounding is None:
+                raise TargetGroundingError("target grounding is not enabled")
+            self._assert_artifact_sync_locked()
+            declaration = self._target_grounding.declare_target(
+                artifact=self._artifact,
+                target_scope=target_scope,
+                observation_ids=observation_ids,
+            )
+            document = declaration.to_dict()
+            self.recorder.record("target_grounding.declaration", document)
+            return document
+
+    def _planned_transition_locked(
+        self,
+        *,
+        operation: str,
+        kind: str,
+        before_sha256: str,
+        after_sha256: str,
+    ) -> ArtifactTransition | None:
+        if self._artifact.sha256 != before_sha256:
+            raise WorkbookValidationError(
+                "Artifact transition source does not match the managed revision"
+            )
+        if after_sha256 == before_sha256:
+            return None
+        before = self._artifact
+        return ArtifactTransition(
+            transition_id=len(self._artifact_transitions) + 1,
+            operation=operation,
+            kind=kind,
+            before=before,
+            after=ArtifactRef(before.revision + 1, after_sha256),
+        )
+
+    def _publish_artifact_locked(
+        self,
+        *,
+        operation: str,
+        kind: str,
+        before_sha256: str,
+        after_sha256: str,
+        target_prepared: PreparedTargetAuthorization | None = None,
+    ) -> ArtifactTransition | None:
+        transition = self._planned_transition_locked(
+            operation=operation,
+            kind=kind,
+            before_sha256=before_sha256,
+            after_sha256=after_sha256,
+        )
+        published_bytes: bytes | None = None
+        if transition is not None:
+            published_bytes = self.workbook_path.read_bytes()
+            if hashlib.sha256(published_bytes).hexdigest() != transition.after.sha256:
+                raise WorkbookValidationError(
+                    "Published workbook bytes changed before artifact ledger commit"
+                )
+        gate = self._target_grounding
+        committed_authorization: CommittedTargetAuthorization | None = None
+        if gate is not None:
+            if target_prepared is not None:
+                committed_authorization = gate.preview_committed_authorization(
+                    target_prepared,
+                    transition,
+                )
+            elif kind in {"mutation", "undo", "external_mutation"}:
+                raise WorkbookValidationError(
+                    "Target grounding requires a prepared authorization before publication"
+                )
+        if transition is not None:
+            # Persist the ledger entry before advancing in-memory lineage. If the
+            # recorder raises, callers can restore staged bytes while all ledgers
+            # still point at the original artifact.
+            transition_document = transition.to_dict()
+            if committed_authorization is not None:
+                transition_document["target_grounding_commit_json"] = (
+                    committed_authorization.canonical_json()
+                )
+            self.recorder.record("artifact.transition", transition_document)
+            self._artifact = transition.after
+            self._artifact_transitions.append(transition)
+        elif committed_authorization is not None:
+            self.recorder.record(
+                "target_grounding.authorization.committed",
+                {"target_grounding_commit_json": committed_authorization.canonical_json()},
+            )
+        if gate is not None:
+            if target_prepared is not None:
+                gate.commit_prepared(
+                    target_prepared,
+                    transition,
+                    committed_authorization=committed_authorization,
+                )
+            elif transition is not None:
+                gate.record_artifact_transition(transition)
+        if published_bytes is not None:
+            self._artifact_bytes = published_bytes
+        return transition
+
+    def reconcile_external_artifact(
+        self,
+        before: ArtifactRef,
+        *,
+        operation: str,
+        kind: str = "external_mutation",
+    ) -> ArtifactTransition | None:
+        """Register bytes written by a sandboxed tool that bypasses session helpers."""
+
+        with self._write_lock:
+            if before != self._artifact:
+                raise WorkbookValidationError(
+                    "External mutation source does not match the managed artifact revision"
+                )
+            try:
+                self._validate(self.workbook_path)
+                after_sha256 = _sha256(self.workbook_path)
+                return self._publish_artifact_locked(
+                    operation=operation,
+                    kind=kind,
+                    before_sha256=before.sha256,
+                    after_sha256=after_sha256,
+                )
+            except Exception:
+                if self._artifact == before:
+                    try:
+                        observed_sha256 = _sha256(self.workbook_path)
+                    except OSError:
+                        observed_sha256 = None
+                    if observed_sha256 != before.sha256:
+                        self._restore_cached_artifact_locked()
+                raise
+
+    def run_staged_external_mutation(
+        self,
+        *,
+        operation: str,
+        declaration_id: int | None,
+        runner: Callable[[Path], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run opaque code on an isolated copy and publish only an authorized diff."""
+
+        with self._write_lock:
+            if self._target_grounding is None:
+                raise TargetGroundingError("target grounding is not enabled")
+            self._assert_artifact_sync_locked()
+            artifact_before = self._artifact
+            self._snapshot_counter += 1
+            snapshot = (
+                self.paths.snapshots
+                / f"{self._snapshot_counter:04d}_{operation}{self.workbook_path.suffix}"
+            )
+            shutil.copy2(self.workbook_path, snapshot)
+            target_prepared: PreparedTargetAuthorization | None = None
+            keep_snapshot = False
+            self.recorder.record(
+                "workbook.mutation.started",
+                {
+                    "operation": operation,
+                    "arguments": {"opaque_staged_execution": True},
+                    "snapshot": snapshot,
+                },
+            )
+            try:
+                with tempfile.TemporaryDirectory(prefix="sheet-grounding-") as root:
+                    staging_root = Path(root)
+                    staged = staging_root / f"staged{self.workbook_path.suffix}"
+                    shutil.copy2(self.workbook_path, staged)
+                    result = runner(staged)
+                    if not isinstance(result, dict):
+                        raise WorkbookValidationError(
+                            "Opaque mutation runner must return a result mapping"
+                        )
+
+                    managed_sha256 = _sha256(self.workbook_path)
+                    if managed_sha256 != artifact_before.sha256:
+                        self._restore_managed_artifact_locked(snapshot)
+                        snapshot.unlink(missing_ok=True)
+                        return {
+                            **result,
+                            "ok": False,
+                            "error": (
+                                "Opaque code modified the managed workbook outside its staging "
+                                "artifact; the source bytes were restored and publication denied."
+                            ),
+                            "type": "StagingBoundaryViolation",
+                            "workbook_sha256_before": artifact_before.sha256,
+                            "workbook_sha256_rejected": managed_sha256,
+                            "workbook_sha256_after": artifact_before.sha256,
+                            "workbook_changed": False,
+                            "workbook_rolled_back": True,
+                            "mutation_published": False,
+                            "artifact_revision_before": artifact_before.revision,
+                            "artifact_revision_after": artifact_before.revision,
+                            "artifact_transition_id": None,
+                        }
+
+                    if result.get("ok") is not True:
+                        snapshot.unlink(missing_ok=True)
+                        return {
+                            **result,
+                            "workbook_sha256_before": artifact_before.sha256,
+                            "workbook_sha256_after": artifact_before.sha256,
+                            "workbook_changed": False,
+                            "mutation_published": False,
+                            "artifact_revision_before": artifact_before.revision,
+                            "artifact_revision_after": artifact_before.revision,
+                            "artifact_transition_id": None,
+                        }
+
+                    self._validate(staged)
+                    invalid_references, formula_text = validate_formula_transaction(
+                        snapshot,
+                        staged,
+                    )
+                    if invalid_references or formula_text:
+                        raise ToolInputError(
+                            "Opaque mutation introduced formula validation failures after its "
+                            "staged execution completed"
+                        )
+                    workbook_diff = diff_workbooks(snapshot, staged)
+                    after_sha256 = _sha256(staged)
+                    try:
+                        target_prepared = self._prepare_target_authorization_locked(
+                            declaration_id=declaration_id,
+                            diff=workbook_diff,
+                            after_sha256=after_sha256,
+                        )
+                    except TargetGroundingRejected as rejected:
+                        rejection = self._target_rejection_result_locked(
+                            artifact_before=artifact_before,
+                            rejected_sha256=after_sha256,
+                            diff=workbook_diff,
+                            rejected=rejected,
+                        )
+                        snapshot.unlink(missing_ok=True)
+                        rejection.update(
+                            {
+                                key: value
+                                for key, value in result.items()
+                                if key
+                                in {
+                                    "stdout",
+                                    "stderr",
+                                    "truncated",
+                                    "sandbox",
+                                    "bubblewrap_error",
+                                    "script",
+                                    "managed_mutation_attempted",
+                                    "helper_module",
+                                }
+                            }
+                        )
+                        self.recorder.record(
+                            "target_grounding.rejected",
+                            {"operation": operation, "result": rejection},
+                        )
+                        return rejection
+
+                    publish_temporary = self.workbook_path.with_name(
+                        f".{self.workbook_path.stem}.publish-{uuid.uuid4().hex}"
+                        f"{self.workbook_path.suffix}"
+                    )
+                    try:
+                        shutil.copy2(staged, publish_temporary)
+                        if _sha256(publish_temporary) != after_sha256:
+                            raise WorkbookValidationError(
+                                "Staged workbook changed while preparing atomic publication"
+                            )
+                        planned_transition = self._planned_transition_locked(
+                            operation=operation,
+                            kind="external_mutation",
+                            before_sha256=artifact_before.sha256,
+                            after_sha256=after_sha256,
+                        )
+                        self._target_grounding.validate_prepared_transition(
+                            target_prepared,
+                            planned_transition,
+                        )
+                        publish_temporary.replace(self.workbook_path)
+                        transition = self._publish_artifact_locked(
+                            operation=operation,
+                            kind="external_mutation",
+                            before_sha256=artifact_before.sha256,
+                            after_sha256=after_sha256,
+                            target_prepared=target_prepared,
+                        )
+                    finally:
+                        publish_temporary.unlink(missing_ok=True)
+
+                    keep_snapshot = bool(transition is not None and workbook_diff.semantic_changed)
+                    published = {
+                        **result,
+                        "workbook_sha256_before": artifact_before.sha256,
+                        "workbook_sha256_after": after_sha256,
+                        "workbook_changed": after_sha256 != artifact_before.sha256,
+                        "mutation_published": True,
+                        "artifact_revision_before": artifact_before.revision,
+                        "artifact_revision_after": self._artifact.revision,
+                        "artifact_transition_id": (
+                            transition.transition_id if transition is not None else None
+                        ),
+                        "workbook_effects": workbook_diff.to_dict(),
+                        "target_grounding": target_prepared.record.to_dict(),
+                    }
+                    self.recorder.record(
+                        "workbook.mutation.committed",
+                        {
+                            "operation": operation,
+                            "snapshot": snapshot,
+                            "result": published,
+                        },
+                    )
+                    return published
+            except Exception as exc:
+                if self._artifact == artifact_before:
+                    if _sha256(self.workbook_path) != artifact_before.sha256:
+                        self._restore_managed_artifact_locked(snapshot)
+                    if target_prepared is not None:
+                        try:
+                            self._target_grounding.abort_prepared(target_prepared)
+                        except TargetGroundingError:
+                            pass
+                try:
+                    self.recorder.record(
+                        "workbook.mutation.rolled_back",
+                        {"operation": operation, "snapshot": snapshot, "error": str(exc)},
+                    )
+                except Exception:
+                    pass
+                raise
+            finally:
+                if not keep_snapshot:
+                    snapshot.unlink(missing_ok=True)
+
+    @contextmanager
+    def read_artifact(self) -> Iterator[ArtifactRef]:
+        """Hold the session lock while producing evidence from stable workbook bytes."""
+
+        with self._write_lock:
+            self._assert_artifact_sync_locked()
+            artifact = self._artifact
+            yield artifact
+            self._assert_artifact_sync_locked()
+
     def _load(self, *, data_only: bool = False):
         return load_workbook(
             self.workbook_path,
@@ -321,6 +801,31 @@ class WorkbookSession:
         except Exception as exc:
             raise WorkbookValidationError(f"Workbook validation failed: {exc}") from exc
 
+    def _restore_managed_artifact_locked(self, snapshot: Path) -> None:
+        restore = self.workbook_path.with_name(
+            f".{self.workbook_path.stem}.restore-{uuid.uuid4().hex}{self.workbook_path.suffix}"
+        )
+        try:
+            shutil.copy2(snapshot, restore)
+            restore.replace(self.workbook_path)
+        finally:
+            restore.unlink(missing_ok=True)
+
+    def _restore_cached_artifact_locked(self) -> None:
+        if hashlib.sha256(self._artifact_bytes).hexdigest() != self._artifact.sha256:
+            raise WorkbookValidationError(
+                "Cached artifact bytes do not match the current artifact ledger"
+            )
+        restore = self.workbook_path.with_name(
+            f".{self.workbook_path.stem}.cached-restore-{uuid.uuid4().hex}"
+            f"{self.workbook_path.suffix}"
+        )
+        try:
+            restore.write_bytes(self._artifact_bytes)
+            restore.replace(self.workbook_path)
+        finally:
+            restore.unlink(missing_ok=True)
+
     def _sheet(self, workbook: Any, name: str) -> Worksheet:
         if name not in workbook.sheetnames:
             raise ToolInputError(f"Unknown sheet {name!r}; available: {workbook.sheetnames}")
@@ -344,13 +849,70 @@ class WorkbookSession:
             raise ToolInputError(f"Range contains {count} cells; limit is {max_cells}")
         return min_col, min_row, max_col, max_row
 
+    def _prepare_target_authorization_locked(
+        self,
+        *,
+        declaration_id: int | None,
+        diff: WorkbookEffectDiff,
+        after_sha256: str,
+    ) -> PreparedTargetAuthorization | None:
+        gate = self._target_grounding
+        if gate is None:
+            return None
+        if type(declaration_id) is not int or declaration_id < 1:
+            raise TargetGroundingError(
+                "a positive declaration_id is required for every grounded mutation"
+            )
+        staged_artifact = ArtifactRef(
+            self._artifact.revision + int(after_sha256 != self._artifact.sha256),
+            after_sha256,
+        )
+        return gate.prepare_staged_diff(
+            declaration_id,
+            diff,
+            staged_artifact=staged_artifact,
+        )
+
+    def _target_rejection_result_locked(
+        self,
+        *,
+        artifact_before: ArtifactRef,
+        rejected_sha256: str,
+        diff: WorkbookEffectDiff,
+        rejected: TargetGroundingRejected,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": str(rejected),
+            "type": type(rejected).__name__,
+            "workbook_sha256_before": artifact_before.sha256,
+            "workbook_sha256_rejected": rejected_sha256,
+            "workbook_sha256_after": artifact_before.sha256,
+            "workbook_changed": False,
+            "workbook_rolled_back": True,
+            "mutation_published": False,
+            "artifact_revision_before": artifact_before.revision,
+            "artifact_revision_after": artifact_before.revision,
+            "artifact_transition_id": None,
+            "workbook_effects": diff.to_dict(),
+            "target_grounding": rejected.record.to_dict(),
+            "message": (
+                "The staged edit was rejected before publication; inspect the exact target, "
+                "declare a newly grounded finite scope, and retry."
+            ),
+        }
+
     def _mutate(
         self,
         operation: str,
         arguments: dict[str, Any],
         callback: Callable[[Any], Any],
+        *,
+        declaration_id: int | None = None,
     ) -> Any:
         with self._write_lock:
+            self._assert_artifact_sync_locked()
+            artifact_before = self._artifact
             before_sha256 = _sha256(self.workbook_path)
             self._snapshot_counter += 1
             snapshot = (
@@ -366,6 +928,8 @@ class WorkbookSession:
                 {"operation": operation, "arguments": arguments, "snapshot": snapshot},
             )
             workbook = None
+            target_prepared: PreparedTargetAuthorization | None = None
+            keep_snapshot = False
             try:
                 workbook = self._load(data_only=False)
                 result = callback(workbook)
@@ -387,21 +951,68 @@ class WorkbookSession:
                         {(sheet, cell) for sheet, cell, *_ in invalid_references}
                         | {(sheet, cell) for sheet, cell, _ in formula_text}
                     )
-                    locations = ", ".join(
-                        f"{sheet}!{cell}" for sheet, cell in issue_locations[:8]
-                    )
+                    locations = ", ".join(f"{sheet}!{cell}" for sheet, cell in issue_locations[:8])
                     raise ToolInputError(
                         "Mutation introduced invalid or high-confidence formula-like text at "
                         f"{locations}. Excel formulas must be strings beginning with '='; "
                         "correct every reported formula issue and retry the complete edit."
                     )
+                workbook_diff = diff_workbooks(snapshot, temporary)
                 after_sha256 = _sha256(temporary)
+                try:
+                    target_prepared = self._prepare_target_authorization_locked(
+                        declaration_id=declaration_id,
+                        diff=workbook_diff,
+                        after_sha256=after_sha256,
+                    )
+                except TargetGroundingRejected as rejected:
+                    rejection = self._target_rejection_result_locked(
+                        artifact_before=artifact_before,
+                        rejected_sha256=after_sha256,
+                        diff=workbook_diff,
+                        rejected=rejected,
+                    )
+                    snapshot.unlink(missing_ok=True)
+                    self.recorder.record(
+                        "target_grounding.rejected",
+                        {
+                            "operation": operation,
+                            "result": rejection,
+                        },
+                    )
+                    return rejection
+                planned_transition = self._planned_transition_locked(
+                    operation=operation,
+                    kind="mutation",
+                    before_sha256=before_sha256,
+                    after_sha256=after_sha256,
+                )
+                if self._target_grounding is not None and target_prepared is not None:
+                    self._target_grounding.validate_prepared_transition(
+                        target_prepared,
+                        planned_transition,
+                    )
+                temporary.replace(self.workbook_path)
+                transition = self._publish_artifact_locked(
+                    operation=operation,
+                    kind="mutation",
+                    before_sha256=before_sha256,
+                    after_sha256=after_sha256,
+                    target_prepared=target_prepared,
+                )
+                keep_snapshot = bool(transition is not None and workbook_diff.semantic_changed)
                 if isinstance(result, dict):
                     result = {
                         **result,
                         "workbook_sha256_before": before_sha256,
                         "workbook_sha256_after": after_sha256,
                         "workbook_changed": before_sha256 != after_sha256,
+                        "artifact_revision_before": artifact_before.revision,
+                        "artifact_revision_after": self._artifact.revision,
+                        "artifact_transition_id": (
+                            transition.transition_id if transition is not None else None
+                        ),
+                        "workbook_effects": workbook_diff.to_dict(),
                         "message": (
                             "Workbook changed. If the target range has been verified, finish now; "
                             "otherwise run one narrow verification or correction."
@@ -409,24 +1020,48 @@ class WorkbookSession:
                             else "Workbook did not change; revise the mutation before submitting."
                         ),
                     }
-                temporary.replace(self.workbook_path)
+                    if target_prepared is not None:
+                        result["target_grounding"] = target_prepared.record.to_dict()
                 self.recorder.record(
                     "workbook.mutation.committed",
                     {"operation": operation, "snapshot": snapshot, "result": result},
                 )
                 return result
             except Exception as exc:
-                self.recorder.record(
-                    "workbook.mutation.rolled_back",
-                    {"operation": operation, "snapshot": snapshot, "error": str(exc)},
-                )
+                if self._artifact == artifact_before:
+                    observed_sha256 = _sha256(self.workbook_path)
+                    if observed_sha256 != artifact_before.sha256:
+                        self._restore_managed_artifact_locked(snapshot)
+                    if target_prepared is not None and self._target_grounding is not None:
+                        try:
+                            self._target_grounding.abort_prepared(target_prepared)
+                        except TargetGroundingError:
+                            pass
+                try:
+                    self.recorder.record(
+                        "workbook.mutation.rolled_back",
+                        {"operation": operation, "snapshot": snapshot, "error": str(exc)},
+                    )
+                except Exception:
+                    pass
                 raise
             finally:
                 if workbook is not None:
                     workbook.close()
                 temporary.unlink(missing_ok=True)
+                if not keep_snapshot:
+                    snapshot.unlink(missing_ok=True)
 
     def list_sheets(self) -> dict[str, Any]:
+        with self.read_artifact() as artifact:
+            result = self._list_sheets_unlocked()
+            return {
+                **result,
+                "artifact_revision": artifact.revision,
+                "artifact_sha256": artifact.sha256,
+            }
+
+    def _list_sheets_unlocked(self) -> dict[str, Any]:
         workbook = self._load(data_only=False)
         try:
             sheets = []
@@ -455,6 +1090,27 @@ class WorkbookSession:
         *,
         include_styles: bool = True,
         max_cells: int = 500,
+    ) -> dict[str, Any]:
+        with self.read_artifact() as artifact:
+            result = self._inspect_range_unlocked(
+                sheet,
+                range_ref,
+                include_styles=include_styles,
+                max_cells=max_cells,
+            )
+            return {
+                **result,
+                "artifact_revision": artifact.revision,
+                "artifact_sha256": artifact.sha256,
+            }
+
+    def _inspect_range_unlocked(
+        self,
+        sheet: str,
+        range_ref: str,
+        *,
+        include_styles: bool,
+        max_cells: int,
     ) -> dict[str, Any]:
         bounds = self._bounds(range_ref, max_cells=max_cells)
         min_col, min_row, max_col, max_row = bounds
@@ -581,7 +1237,14 @@ class WorkbookSession:
         finally:
             workbook.close()
 
-    def write_range(self, sheet: str, start_cell: str, values: list[list[Any]]) -> dict[str, Any]:
+    def write_range(
+        self,
+        sheet: str,
+        start_cell: str,
+        values: list[list[Any]],
+        *,
+        declaration_id: int | None = None,
+    ) -> dict[str, Any]:
         if (
             not values
             or not isinstance(values, list)
@@ -614,10 +1277,20 @@ class WorkbookSession:
             }
 
         return self._mutate(
-            "write_range", {"sheet": sheet, "start_cell": start_cell, "values": values}, apply
+            "write_range",
+            {"sheet": sheet, "start_cell": start_cell, "values": values},
+            apply,
+            declaration_id=declaration_id,
         )
 
-    def fill_formula(self, sheet: str, source_cell: str, target_range: str) -> dict[str, Any]:
+    def fill_formula(
+        self,
+        sheet: str,
+        source_cell: str,
+        target_range: str,
+        *,
+        declaration_id: int | None = None,
+    ) -> dict[str, Any]:
         normalized_target_range, expanded_from_endpoint = _normalize_fill_target_range(
             source_cell, target_range
         )
@@ -646,9 +1319,9 @@ class WorkbookSession:
             for row in range(min_row, max_row + 1):
                 for column in range(min_col, max_col + 1):
                     destination = f"{get_column_letter(column)}{row}"
-                    translated = Translator(
-                        formula, origin=source_cell
-                    ).translate_formula(destination)
+                    translated = Translator(formula, origin=source_cell).translate_formula(
+                        destination
+                    )
                     worksheet[destination] = translated
                     if destination in sample_coordinates:
                         samples.append({"cell": destination, "formula": translated})
@@ -680,6 +1353,7 @@ class WorkbookSession:
                 "normalized_target_range": normalized_target_range,
             },
             apply,
+            declaration_id=declaration_id,
         )
 
     def clear_range(
@@ -689,6 +1363,7 @@ class WorkbookSession:
         *,
         contents: bool = True,
         formats: bool = False,
+        declaration_id: int | None = None,
     ) -> dict[str, Any]:
         if not contents and not formats:
             raise ToolInputError("At least one of contents or formats must be true")
@@ -714,10 +1389,16 @@ class WorkbookSession:
             "clear_range",
             {"sheet": sheet, "range_ref": range_ref, "contents": contents, "formats": formats},
             apply,
+            declaration_id=declaration_id,
         )
 
     def format_range(
-        self, sheet: str, range_ref: str, format_spec: dict[str, Any]
+        self,
+        sheet: str,
+        range_ref: str,
+        format_spec: dict[str, Any],
+        *,
+        declaration_id: int | None = None,
     ) -> dict[str, Any]:
         if not format_spec:
             raise ToolInputError("format_spec must not be empty")
@@ -801,9 +1482,17 @@ class WorkbookSession:
             "format_range",
             {"sheet": sheet, "range_ref": range_ref, "format_spec": format_spec},
             apply,
+            declaration_id=declaration_id,
         )
 
-    def delete_rows(self, sheet: str, start: int, amount: int = 1) -> dict[str, Any]:
+    def delete_rows(
+        self,
+        sheet: str,
+        start: int,
+        amount: int = 1,
+        *,
+        declaration_id: int | None = None,
+    ) -> dict[str, Any]:
         if start < 1 or amount < 1 or amount > 10_000:
             raise ToolInputError("start and amount must be positive; amount limit is 10,000")
 
@@ -812,10 +1501,20 @@ class WorkbookSession:
             return {"ok": True, "sheet": sheet, "start": start, "rows_deleted": amount}
 
         return self._mutate(
-            "delete_rows", {"sheet": sheet, "start": start, "amount": amount}, apply
+            "delete_rows",
+            {"sheet": sheet, "start": start, "amount": amount},
+            apply,
+            declaration_id=declaration_id,
         )
 
-    def delete_columns(self, sheet: str, start: int, amount: int = 1) -> dict[str, Any]:
+    def delete_columns(
+        self,
+        sheet: str,
+        start: int,
+        amount: int = 1,
+        *,
+        declaration_id: int | None = None,
+    ) -> dict[str, Any]:
         if start < 1 or amount < 1 or amount > 1_000:
             raise ToolInputError("start and amount must be positive; amount limit is 1,000")
 
@@ -824,7 +1523,10 @@ class WorkbookSession:
             return {"ok": True, "sheet": sheet, "start": start, "columns_deleted": amount}
 
         return self._mutate(
-            "delete_columns", {"sheet": sheet, "start": start, "amount": amount}, apply
+            "delete_columns",
+            {"sheet": sheet, "start": start, "amount": amount},
+            apply,
+            declaration_id=declaration_id,
         )
 
     def manage_sheet(
@@ -835,6 +1537,7 @@ class WorkbookSession:
         new_name: str | None = None,
         source: str | None = None,
         index: int | None = None,
+        declaration_id: int | None = None,
     ) -> dict[str, Any]:
         if action not in {"create", "rename", "delete", "copy"}:
             raise ToolInputError("action must be create, rename, delete, or copy")
@@ -868,10 +1571,13 @@ class WorkbookSession:
                 "index": index,
             },
             apply,
+            declaration_id=declaration_id,
         )
 
-    def undo_last(self) -> dict[str, Any]:
+    def undo_last(self, *, declaration_id: int | None = None) -> dict[str, Any]:
         with self._write_lock:
+            self._assert_artifact_sync_locked()
+            artifact_before = self._artifact
             snapshots = sorted(self.paths.snapshots.glob(f"*{self.workbook_path.suffix}"))
             if not snapshots:
                 raise ToolInputError("No snapshot is available")
@@ -879,19 +1585,99 @@ class WorkbookSession:
             temporary = self.workbook_path.with_name(
                 f".{self.workbook_path.stem}.undo-{uuid.uuid4().hex}{self.workbook_path.suffix}"
             )
+            recovery = self.workbook_path.with_name(
+                f".{self.workbook_path.stem}.undo-recovery-{uuid.uuid4().hex}"
+                f"{self.workbook_path.suffix}"
+            )
             shutil.copy2(snapshot, temporary)
-            self._validate(temporary)
-            temporary.replace(self.workbook_path)
-            snapshot.unlink()
-            self.recorder.record("workbook.undo", {"snapshot": snapshot})
-            return {"ok": True, "restored_snapshot": snapshot.name}
+            shutil.copy2(self.workbook_path, recovery)
+            target_prepared: PreparedTargetAuthorization | None = None
+            try:
+                self._validate(temporary)
+                after_sha256 = _sha256(temporary)
+                workbook_diff = diff_workbooks(self.workbook_path, temporary)
+                try:
+                    target_prepared = self._prepare_target_authorization_locked(
+                        declaration_id=declaration_id,
+                        diff=workbook_diff,
+                        after_sha256=after_sha256,
+                    )
+                except TargetGroundingRejected as rejected:
+                    rejection = self._target_rejection_result_locked(
+                        artifact_before=artifact_before,
+                        rejected_sha256=after_sha256,
+                        diff=workbook_diff,
+                        rejected=rejected,
+                    )
+                    self.recorder.record(
+                        "target_grounding.rejected",
+                        {"operation": "undo_last", "result": rejection},
+                    )
+                    return rejection
+                planned_transition = self._planned_transition_locked(
+                    operation="undo_last",
+                    kind="undo",
+                    before_sha256=artifact_before.sha256,
+                    after_sha256=after_sha256,
+                )
+                if self._target_grounding is not None and target_prepared is not None:
+                    self._target_grounding.validate_prepared_transition(
+                        target_prepared,
+                        planned_transition,
+                    )
+                temporary.replace(self.workbook_path)
+                transition = self._publish_artifact_locked(
+                    operation="undo_last",
+                    kind="undo",
+                    before_sha256=artifact_before.sha256,
+                    after_sha256=after_sha256,
+                    target_prepared=target_prepared,
+                )
+                snapshot.unlink()
+                self.recorder.record("workbook.undo", {"snapshot": snapshot})
+                result = {
+                    "ok": True,
+                    "restored_snapshot": snapshot.name,
+                    "workbook_sha256_before": artifact_before.sha256,
+                    "workbook_sha256_after": after_sha256,
+                    "workbook_changed": artifact_before.sha256 != after_sha256,
+                    "artifact_revision_before": artifact_before.revision,
+                    "artifact_revision_after": self._artifact.revision,
+                    "artifact_transition_id": (
+                        transition.transition_id if transition is not None else None
+                    ),
+                    "workbook_effects": workbook_diff.to_dict(),
+                }
+                if target_prepared is not None:
+                    result["target_grounding"] = target_prepared.record.to_dict()
+                return result
+            except Exception:
+                if self._artifact == artifact_before:
+                    if _sha256(self.workbook_path) != artifact_before.sha256:
+                        self._restore_managed_artifact_locked(recovery)
+                    if target_prepared is not None and self._target_grounding is not None:
+                        try:
+                            self._target_grounding.abort_prepared(target_prepared)
+                        except TargetGroundingError:
+                            pass
+                raise
+            finally:
+                temporary.unlink(missing_ok=True)
+                recovery.unlink(missing_ok=True)
 
-    def recalculate(self) -> dict[str, Any]:
+    def recalculate(self, *, timeout_seconds: float = 120.0) -> dict[str, Any]:
         """Recalculate with LibreOffice while preserving a pre-operation snapshot."""
 
         from .render import recalculate_workbook
 
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
+            raise ToolInputError("timeout_seconds must be numeric")
+        if timeout_seconds <= 0:
+            raise ToolInputError("timeout_seconds must be positive")
+
         with self._write_lock:
+            self._assert_artifact_sync_locked()
+            artifact_before = self._artifact
             self._snapshot_counter += 1
             snapshot = (
                 self.paths.snapshots
@@ -902,9 +1688,35 @@ class WorkbookSession:
                 "workbook.mutation.started",
                 {"operation": "recalculate", "arguments": {}, "snapshot": snapshot},
             )
+            keep_snapshot = False
             try:
-                metadata = recalculate_workbook(self.workbook_path, self.workbook_path)
+                metadata = recalculate_workbook(
+                    self.workbook_path,
+                    self.workbook_path,
+                    timeout_seconds=float(timeout_seconds),
+                )
                 self._validate(self.workbook_path)
+                workbook_effects = diff_workbooks(snapshot, self.workbook_path).to_dict()
+                after_sha256 = _sha256(self.workbook_path)
+                transition = self._publish_artifact_locked(
+                    operation="recalculate",
+                    kind="derived_recalculation",
+                    before_sha256=artifact_before.sha256,
+                    after_sha256=after_sha256,
+                )
+                keep_snapshot = transition is not None
+                metadata = {
+                    **metadata,
+                    "workbook_sha256_before": artifact_before.sha256,
+                    "workbook_sha256_after": after_sha256,
+                    "workbook_changed": artifact_before.sha256 != after_sha256,
+                    "artifact_revision_before": artifact_before.revision,
+                    "artifact_revision_after": self._artifact.revision,
+                    "artifact_transition_id": (
+                        transition.transition_id if transition is not None else None
+                    ),
+                    "workbook_effects": workbook_effects,
+                }
                 self.recorder.record(
                     "workbook.mutation.committed",
                     {"operation": "recalculate", "snapshot": snapshot, "result": metadata},
@@ -913,12 +1725,23 @@ class WorkbookSession:
             except Exception as exc:
                 # The renderer publishes atomically, but restore explicitly in case a
                 # platform-specific replace succeeded immediately before validation.
-                shutil.copy2(snapshot, self.workbook_path)
-                self.recorder.record(
-                    "workbook.mutation.rolled_back",
-                    {"operation": "recalculate", "snapshot": snapshot, "error": str(exc)},
-                )
+                if self._artifact == artifact_before:
+                    self._restore_managed_artifact_locked(snapshot)
+                try:
+                    self.recorder.record(
+                        "workbook.mutation.rolled_back",
+                        {
+                            "operation": "recalculate",
+                            "snapshot": snapshot,
+                            "error": str(exc),
+                        },
+                    )
+                except Exception:
+                    pass
                 raise
+            finally:
+                if not keep_snapshot:
+                    snapshot.unlink(missing_ok=True)
 
     def write_manifest(self, values: dict[str, Any]) -> Path:
         path = self.paths.root / "run.json"

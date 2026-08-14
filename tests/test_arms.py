@@ -14,7 +14,8 @@ from spreadsheet_harness import arms
 from spreadsheet_harness.agent import AgentResult, ResponseTurn
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
-from spreadsheet_harness.errors import AgentBudgetError
+from spreadsheet_harness.errors import AgentBudgetError, AgentExecutionFailure
+from spreadsheet_harness.evidence_contract import ContractMode
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import ToolOutcome
 from spreadsheet_harness.trajectory import read_trajectory
@@ -31,12 +32,18 @@ class FakeTools:
         allowed_tools: set[str] | None,
         require_code_isolation: bool,
         redaction_secrets: tuple[str, ...],
+        evidence_contract: Any,
+        contract_mode: ContractMode,
+        enable_target_grounding: bool,
     ) -> None:
         self.session = session
         self.enable_code = enable_code
         self.allowed_tools = allowed_tools
         self.require_code_isolation = require_code_isolation
         self.redaction_secrets = redaction_secrets
+        self.evidence_contract = evidence_contract
+        self.contract_mode = contract_mode
+        self.target_grounding_enabled = enable_target_grounding
         self.created.append(self)
 
 
@@ -46,6 +53,8 @@ class FakeAgent:
     stage_outputs: dict[str, str] = {}
     stage_traces: dict[str, list[dict[str, Any]]] = {}
     mutate_stages: set[str] = set()
+    stage_evidence: dict[str, dict[str, Any]] = {}
+    stage_completion_attempts: dict[str, list[dict[str, Any]]] = {}
 
     def __init__(self, config: ProviderConfig, tools: FakeTools, **kwargs: Any) -> None:
         self.record = {"config": config, "tools": tools, **kwargs}
@@ -73,7 +82,12 @@ class FakeAgent:
         if stage == "vision_verify":
             default_trace = [
                 {"name": "render_workbook", "ok": True},
-                {"name": "view_image", "ok": True, "image_attached": True},
+                {
+                    "name": "view_image",
+                    "ok": True,
+                    "image_attached": True,
+                    "image_delivery_confirmed": True,
+                },
             ]
         elif stage == "latex_verify":
             default_trace = [{"name": "range_to_latex", "ok": True}]
@@ -102,6 +116,8 @@ class FakeAgent:
             observed_first_tool=first_tool_choice,
             forced_tool_prefix=forced_tool_prefix,
             observed_forced_tool_prefix=forced_tool_prefix,
+            evidence_contract=self.stage_evidence.get(stage),
+            completion_attempts=self.stage_completion_attempts.get(stage),
         )
 
 
@@ -116,6 +132,8 @@ def _patch_agents(monkeypatch: Any) -> None:
     FakeAgent.stage_outputs = {}
     FakeAgent.stage_traces = {}
     FakeAgent.mutate_stages = set()
+    FakeAgent.stage_evidence = {}
+    FakeAgent.stage_completion_attempts = {}
     monkeypatch.setattr(arms, "SpreadsheetToolRegistry", FakeTools)
     monkeypatch.setattr(arms, "SpreadsheetAgent", FakeAgent)
 
@@ -169,8 +187,27 @@ def test_paper_vision_three_turn_required_route_attaches_image_and_submits_yaml(
             if name == "render_workbook":
                 return ToolOutcome({"ok": True, "images": [str(rendered)]})
             if name == "view_image":
-                return ToolOutcome({"ok": True, "image": str(rendered)}, rendered)
+                return ToolOutcome(
+                    {
+                        "ok": True,
+                        "image": str(rendered),
+                        "visual_confirmation_id": "vision-confirmation",
+                    },
+                    rendered,
+                )
             raise AssertionError(name)
+
+        def confirm_view_image_delivery(
+            self,
+            confirmation_id: str,
+            *,
+            attached_file_sha256: str,
+            provider_response_id: str,
+        ) -> dict[str, Any]:
+            assert confirmation_id == "vision-confirmation"
+            assert len(attached_file_sha256) == 64
+            assert provider_response_id == "response-3"
+            return {"confirmed": True}
 
     class VisionClient:
         requests: list[dict[str, Any]] = []
@@ -515,6 +552,60 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         "view_image",
     ]
     assert paper_result.stages[2]["tool_name_trace"] == ["range_to_latex"]
+
+
+def test_evidence_runtime_only_wraps_editing_stage_and_survives_aggregation(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    FakeAgent.stage_evidence = {
+        "solve": {"status": {"submission_ready": True}, "decision": {}}
+    }
+    FakeAgent.stage_completion_attempts = {"solve": [{"attempt_id": 1}]}
+    contract = object()
+    session = WorkbookSession.create(sample_workbook, tmp_path / "evidence-runtime")
+
+    result = arms.run_arm(
+        "paper",
+        _config(),
+        session,
+        None,
+        "fill the Total formulas",
+        4_000,
+        300,
+        object(),
+        evidence_contract=contract,  # type: ignore[arg-type]
+        contract_mode=ContractMode.ENFORCE,
+        enable_target_grounding=True,
+        capture_completion_attempts=True,
+    )
+
+    assert [call["tools"].evidence_contract for call in FakeAgent.calls] == [
+        None,
+        None,
+        None,
+        None,
+        contract,
+    ]
+    assert [call["tools"].target_grounding_enabled for call in FakeAgent.calls] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert [call["capture_completion_attempts"] for call in FakeAgent.calls] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert FakeAgent.calls[-1]["tools"].contract_mode is ContractMode.ENFORCE
+    assert result.evidence_contract == FakeAgent.stage_evidence["solve"]
+    assert result.completion_attempts == FakeAgent.stage_completion_attempts["solve"]
 
 
 def test_profile_is_bare_plus_deterministic_evidence_and_native_omits_skills(
@@ -1061,7 +1152,12 @@ def test_paper_evidence_rejects_excessive_nesting() -> None:
             {"name": "view_image", "ok": True, "image_attached": False},
         ],
         [
-            {"name": "view_image", "ok": True, "image_attached": True},
+            {
+                "name": "view_image",
+                "ok": True,
+                "image_attached": True,
+                "image_delivery_confirmed": True,
+            },
             {"name": "render_workbook", "ok": True},
         ],
     ],
@@ -1076,10 +1172,11 @@ def test_paper_vision_requires_render_then_attached_view(
     FakeAgent.stage_traces["vision_verify"] = trace
     session = WorkbookSession.create(sample_workbook, tmp_path / "invalid-vision")
 
-    with pytest.raises(arms.PaperStageValidationError) as caught:
+    with pytest.raises(AgentExecutionFailure) as caught:
         _run_paper(session)
 
-    assert caught.value.stage == "vision_verify"
+    assert caught.value.reason == "protocol_noncompliance"
+    assert caught.value.failed_stage.name == "vision_verify"
 
 
 def test_paper_latex_requires_successful_range_to_latex(
@@ -1089,10 +1186,11 @@ def test_paper_latex_requires_successful_range_to_latex(
     FakeAgent.stage_traces["latex_verify"] = []
     session = WorkbookSession.create(sample_workbook, tmp_path / "invalid-latex")
 
-    with pytest.raises(arms.PaperStageValidationError) as caught:
+    with pytest.raises(AgentExecutionFailure) as caught:
         _run_paper(session)
 
-    assert caught.value.stage == "latex_verify"
+    assert caught.value.reason == "protocol_noncompliance"
+    assert caught.value.failed_stage.name == "latex_verify"
 
 
 def test_paper_read_only_stage_rejects_workbook_mutation(

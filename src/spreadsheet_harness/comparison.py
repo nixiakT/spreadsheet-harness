@@ -8,11 +8,13 @@ import json
 import math
 import os
 import random
+import shutil
 import stat
 import subprocess
+import tempfile
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +28,7 @@ from .agent import (
     BUDGET_EXHAUSTED_TERMINAL,
     CONNECT_RETRY_MIN_SECONDS,
     OVERLOAD_RETRY_MIN_SECONDS,
+    PROTOCOL_NONCOMPLIANCE_TERMINAL,
     RETRY_BACKOFF_MAX_SECONDS,
     SAFE_AUTOMATIC_RETRY_REASONS,
     SAFE_RETRY_HTTP_STATUSES,
@@ -34,7 +37,6 @@ from .agent import (
 from .arms import (
     BARE_TOOLS,
     COMPARISON_EDIT_RECOVERY_POLICY_VERSION,
-    COMPARISON_FORCED_TOOL_PREFIX_POLICY,
     COMPARISON_TURN_CAP_POLICY_VERSION,
     OURS_TOOLS,
     PAPER_EXTRACTION_TOOLS,
@@ -44,6 +46,7 @@ from .arms import (
     PAPER_TURN_CAP_SCALING_VERSION,
     PAPER_VISION_TOOLS,
     PaperStageValidationError,
+    comparison_forced_tool_prefix_policy,
     comparison_stage_turn_caps,
     run_arm,
 )
@@ -65,10 +68,20 @@ from .benchmark import (
 )
 from .budget import RunBudget
 from .code_interpreter import STRICT_ISOLATION_POLICY, ensure_strict_code_isolation
+from .completion_evaluation import (
+    CompletionEvaluationError,
+    evaluate_completion_attempts,
+)
 from .config import ProviderConfig
+from .deliverable import (
+    COMPARISON_RESULT_SCHEMA_VERSION,
+    finalize_deliverable,
+    score_read_only,
+)
 from .errors import (
     AGENT_EXECUTION_FAILURE_REASONS,
     LEGACY_AGENT_EXECUTION_FAILURE_REASONS,
+    OPTIONAL_AGENT_EXECUTION_FAILURE_REASONS,
     AgentBudgetError,
     AgentExecutionFailure,
     AgentRoutingError,
@@ -77,6 +90,7 @@ from .errors import (
     HarnessError,
     ProviderError,
 )
+from .evidence_contract import ContractMode, ContractSpec
 from .pacing import PACING_POLICY, RelayPacer
 from .preprocess import (
     DETERMINISTIC_PROFILE_BOUNDS,
@@ -85,6 +99,7 @@ from .preprocess import (
 )
 from .session import WorkbookSession
 from .skills import SkillRegistry
+from .tools import TARGET_GROUNDING_CONTROL_TOOLS
 
 DEFAULT_COMPARISON_ARMS = ("bare", "paper", "ours")
 AVAILABLE_COMPARISON_ARMS = ("bare", "profile", "native", "paper", "ours")
@@ -119,9 +134,52 @@ V26_RUN_SPEC_SOURCE_CONTRACT = {
 }
 COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v27"
 COMPARISON_MANIFEST_SCHEMA_VERSION = 16
-_V26_RUNTIME_PROTOCOL_VERSIONS = frozenset(
-    {V26_COMPARISON_PROTOCOL_VERSION, COMPARISON_PROTOCOL_VERSION}
+V28_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v28"
+V28_COMPARISON_MANIFEST_SCHEMA_VERSION = 17
+V28_EVIDENCE_CONTRACT_RELATIVE_PATH = "contracts/spreadsheet-evidence-v1.yaml"
+V28_EVIDENCE_CONTRACT_SOURCE_SHA256 = (
+    "37fe0b626e46be5ea26b1747cf0f7e6bbddb6b81dc4c6a00246bc49a57797ca1"
 )
+V28_EVIDENCE_CONTRACT_CANONICAL_SHA256 = (
+    "989c27b0e601aa439933e465199ace558629544839c24dbaf24d33ec7b93742d"
+)
+V28_COMPLETION_EVALUATOR_ID = (
+    "spreadsheetbench-corrected-value-after-libreoffice-v1"
+)
+V28_OBSERVER_BUDGET_POLICY_VERSION = "post-agent-independent-deadline-v1"
+V28_OBSERVER_PER_ATTEMPT_RECALC_TIMEOUT_SECONDS = 120.0
+V28_OBSERVER_FIXED_ALLOWANCE_SECONDS = 360.0
+V28_OBSERVER_PER_ATTEMPT_ALLOWANCE_SECONDS = 130.0
+_V26_RUNTIME_PROTOCOL_VERSIONS = frozenset(
+    {
+        V26_COMPARISON_PROTOCOL_VERSION,
+        COMPARISON_PROTOCOL_VERSION,
+        V28_COMPARISON_PROTOCOL_VERSION,
+    }
+)
+
+
+def _v28_observer_budget(max_model_calls: int) -> dict[str, Any]:
+    """Return the frozen post-agent observer budget for one arm-task."""
+
+    if isinstance(max_model_calls, bool) or not isinstance(max_model_calls, int):
+        raise TypeError("max_model_calls must be an integer")
+    if max_model_calls < 1:
+        raise ValueError("max_model_calls must be positive")
+    return {
+        "policy_version": V28_OBSERVER_BUDGET_POLICY_VERSION,
+        "per_attempt_recalculation_timeout_seconds": (
+            V28_OBSERVER_PER_ATTEMPT_RECALC_TIMEOUT_SECONDS
+        ),
+        "final_recalculation_timeout_seconds": 120.0,
+        "final_render_timeout_seconds": 120.0,
+        "scoring_timeout_seconds": 120.0,
+        "max_total_postprocess_seconds": (
+            V28_OBSERVER_FIXED_ALLOWANCE_SECONDS
+            + max_model_calls * V28_OBSERVER_PER_ATTEMPT_ALLOWANCE_SECONDS
+        ),
+        "timeout_policy": "observer-incomplete-never-reclassifies-agent-v1",
+    }
 PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
 PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
 PILOT_RUN_SPEC_FILENAME = "qwen35-trace2skill-local-pilot16-run-spec-v1.json"
@@ -178,7 +236,13 @@ V25_COMPARISON_CONFIGURATION_POLICIES = {
 }
 V26_COMPARISON_CONFIGURATION_POLICIES = {
     **V25_COMPARISON_CONFIGURATION_POLICIES,
-    "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
+    "model_execution_failure_reasons": [
+        "budget_exhausted",
+        "edit_recovery_exhausted",
+        "terminal_submission_invalid",
+        "terminal_submission_truncated",
+        "workbook_unchanged",
+    ],
     "terminal_submission_policy": "empty-ack-harness-final-text-v1",
     "edit_recovery_terminal_policy": "penultimate-recovery-final-submit-v1",
     "ours_tool_policy": "fixed-six-code-first-v1",
@@ -187,6 +251,66 @@ V26_COMPARISON_CONFIGURATION_POLICIES = {
 }
 # v27 changes experiment identity only; its runtime policies remain frozen to v26.
 COMPARISON_CONFIGURATION_POLICIES = dict(V26_COMPARISON_CONFIGURATION_POLICIES)
+V28_COMPARISON_CONFIGURATION_POLICIES = {
+    **COMPARISON_CONFIGURATION_POLICIES,
+    "model_execution_failure_reasons": sorted(
+        AGENT_EXECUTION_FAILURE_REASONS | OPTIONAL_AGENT_EXECUTION_FAILURE_REASONS
+    ),
+    "deliverable_lineage_policy": (
+        "accepted-or-audited-noncompletion-session-finalization-lineage-v2"
+    ),
+    "result_schema_version": COMPARISON_RESULT_SCHEMA_VERSION,
+    "scoring_copy_policy": "isolated-atomic-byte-identical-read-only-v1",
+    "scorer_mutation_guard_policy": "sha256-before-after-v1",
+    "evidence_contract_mode": ContractMode.ENFORCE.value,
+    "evidence_contract_policy": "revision-scope-predicate-bound-v1",
+    "target_grounding_policy": "inspected-declaration-staged-containment-enforce-v1",
+    "completion_attempt_capture_policy": "immutable-pre-gate-every-submit-v1",
+    "completion_attempt_evaluator_policy": (
+        "post-agent-isolated-recalculation-no-model-feedback-v1"
+    ),
+    "posthoc_event_boundary_policy": (
+        "agent-terminated-then-attempt-evaluation-then-finalization-v1"
+    ),
+}
+
+
+def _v28_evidence_contract() -> ContractSpec:
+    """Load the repository-pinned v28 contract and reject path or byte drift."""
+
+    repository_root = Path(__file__).resolve().parents[2]
+    source = repository_root / V28_EVIDENCE_CONTRACT_RELATIVE_PATH
+    current = repository_root
+    try:
+        for component in Path(V28_EVIDENCE_CONTRACT_RELATIVE_PATH).parts:
+            current /= component
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise HarnessError("v28 evidence contract path contains a symbolic link")
+        if not stat.S_ISREG(source.lstat().st_mode):
+            raise HarnessError("v28 evidence contract must be a regular file")
+        spec = ContractSpec.load(source)
+    except OSError as exc:
+        raise HarnessError("Unable to load the pinned v28 evidence contract") from exc
+    if (
+        spec.source_sha256 != V28_EVIDENCE_CONTRACT_SOURCE_SHA256
+        or spec.canonical_sha256 != V28_EVIDENCE_CONTRACT_CANONICAL_SHA256
+    ):
+        raise HarnessError("Pinned v28 evidence contract identity does not match source")
+    return spec
+
+
+def _v28_evidence_runtime_identity(spec: ContractSpec | None = None) -> dict[str, Any]:
+    contract = spec or _v28_evidence_contract()
+    return {
+        "contract_schema_version": contract.schema_version,
+        "contract_canonical_sha256": contract.canonical_sha256,
+        "contract_source_sha256": contract.source_sha256,
+        "contract_mode": ContractMode.ENFORCE.value,
+        "target_grounding": "enforce",
+        "completion_attempt_capture": "pre_gate_every_submit",
+        "completion_attempt_evaluator": V28_COMPLETION_EVALUATOR_ID,
+    }
 
 
 @dataclass(frozen=True)
@@ -560,15 +684,33 @@ def comparison_execution_contract(
     circuit_breaker_threshold: int,
     split_provenance: dict[str, Any] | None,
     skills: SkillRegistry,
+    deliverable_lineage: bool = False,
 ) -> dict[str, Any]:
+    protocol_version = (
+        V28_COMPARISON_PROTOCOL_VERSION
+        if deliverable_lineage
+        else COMPARISON_PROTOCOL_VERSION
+    )
+    manifest_schema_version = (
+        V28_COMPARISON_MANIFEST_SCHEMA_VERSION
+        if deliverable_lineage
+        else COMPARISON_MANIFEST_SCHEMA_VERSION
+    )
+    evidence_runtime = (
+        _v28_evidence_runtime_identity() if deliverable_lineage else None
+    )
     return {
-        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
-        "comparison_manifest_schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "comparison_protocol_version": protocol_version,
+        "comparison_manifest_schema_version": manifest_schema_version,
         "source_contract": _run_spec_source_fingerprint(),
         "split_provenance": split_provenance,
         "arms": list(arms),
         "provider": {
-            "base_url": config.base_url,
+            **(
+                {"endpoint_label": f"configured-{config.api_protocol}"}
+                if deliverable_lineage
+                else {"base_url": config.base_url}
+            ),
             "model": config.model,
             "api_protocol": config.api_protocol,
             "requested_reasoning_effort": (
@@ -592,6 +734,15 @@ def comparison_execution_contract(
             "task_retries": 0,
             "circuit_breaker_threshold": circuit_breaker_threshold,
             "arm_order_seed": arm_order_seed,
+            **(
+                {
+                    "deliverable_lineage": True,
+                    "evidence_runtime": evidence_runtime,
+                    "observer_budget": _v28_observer_budget(max_model_calls),
+                }
+                if deliverable_lineage
+                else {}
+            ),
         },
         "skills_for_ours_only": [
             {"name": skill.name, "sha256": skill.sha256}
@@ -617,7 +768,16 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
         "split_provenance": manifest.get("split_provenance"),
         "arms": manifest.get("arms"),
         "provider": {
-            "base_url": configuration.get("provider_base_url"),
+            **(
+                {
+                    "endpoint_label": configuration.get(
+                        "provider_endpoint_label"
+                    )
+                }
+                if manifest.get("comparison_protocol_version")
+                == V28_COMPARISON_PROTOCOL_VERSION
+                else {"base_url": configuration.get("provider_base_url")}
+            ),
             "model": configuration.get("model"),
             "api_protocol": configuration.get("api_protocol"),
             "requested_reasoning_effort": configuration.get(
@@ -649,11 +809,22 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
         "skills_for_ours_only": configuration.get("skills_for_ours_only"),
     }
     protocol_version = manifest.get("comparison_protocol_version")
+    if protocol_version == V28_COMPARISON_PROTOCOL_VERSION:
+        contract["resources"]["deliverable_lineage"] = True
+        contract["resources"]["evidence_runtime"] = manifest.get(
+            "evidence_runtime"
+        )
+        contract["resources"]["observer_budget"] = configuration.get(
+            "observer_budget"
+        )
     if protocol_version == V25_COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = dict(V25_RUN_SPEC_SOURCE_CONTRACT)
     elif protocol_version == V26_COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = dict(V26_RUN_SPEC_SOURCE_CONTRACT)
-    elif protocol_version == COMPARISON_PROTOCOL_VERSION:
+    elif protocol_version in {
+        COMPARISON_PROTOCOL_VERSION,
+        V28_COMPARISON_PROTOCOL_VERSION,
+    }:
         contract["source_contract"] = _run_spec_source_fingerprint()
     return contract
 
@@ -662,20 +833,83 @@ def _run_key(task_id: str, arm: str) -> str:
     return f"{task_id}::{arm}"
 
 
+def _evaluate_completion_attempts_posthoc(
+    session: WorkbookSession,
+    task: SpreadsheetTask,
+    agent_evidence: dict[str, Any],
+    *,
+    remaining_seconds: Callable[[str], float],
+    per_attempt_recalculation_timeout_seconds: float = (
+        V28_OBSERVER_PER_ATTEMPT_RECALC_TIMEOUT_SECONDS
+    ),
+) -> list[dict[str, Any]]:
+    """Apply the benchmark postprocess only after the agent can no longer act."""
+
+    raw_attempts = agent_evidence.get("completion_attempts")
+    if not isinstance(raw_attempts, list):
+        raise HarnessError("v28 agent evidence omitted completion-attempt records")
+
+    def evaluator(snapshot: Path):
+        from .render import recalculate_workbook
+
+        with tempfile.TemporaryDirectory(
+            prefix="completion-evaluation-",
+            dir=session.workspace,
+        ) as raw_directory:
+            scoring_path = Path(raw_directory) / snapshot.name
+            shutil.copy2(snapshot, scoring_path)
+            recalculate_workbook(
+                scoring_path,
+                scoring_path,
+                timeout_seconds=min(
+                    per_attempt_recalculation_timeout_seconds,
+                    remaining_seconds("completion_attempt_recalculate"),
+                ),
+            )
+            remaining_seconds("completion_attempt_score")
+            comparison = compare_workbooks(
+                task.golden_path,
+                scoring_path,
+                task.answer_position,
+                answer_sheet=task.answer_sheet,
+            )
+            remaining_seconds("completion_attempt_score")
+            return comparison
+
+    try:
+        evaluations = evaluate_completion_attempts(
+            session.workspace,
+            raw_attempts,
+            evaluator,
+            evaluator_id=V28_COMPLETION_EVALUATOR_ID,
+        )
+    except CompletionEvaluationError as exc:
+        raise HarnessError("Posthoc completion-attempt evaluation failed") from exc
+    return [item.to_dict() for item in evaluations]
+
+
 def _stage_allowed_tools_policy(
     arms: tuple[str, ...],
     *,
     protocol_version: str = COMPARISON_PROTOCOL_VERSION,
 ) -> dict[str, dict[str, Any]]:
+    target_grounding = protocol_version == V28_COMPARISON_PROTOCOL_VERSION
+
+    def editing_tools(base: frozenset[str]) -> list[str]:
+        return sorted(
+            set(base)
+            | (TARGET_GROUNDING_CONTROL_TOOLS if target_grounding else set())
+        )
+
     return {
         arm: (
-            {"solve": sorted(BARE_TOOLS)}
+            {"solve": editing_tools(BARE_TOOLS)}
             if arm in {"bare", "profile"}
             else {"solve": "all"}
             if arm == "native"
             else {
                 "solve": (
-                    sorted(OURS_TOOLS)
+                    editing_tools(OURS_TOOLS)
                     if protocol_version in _V26_RUNTIME_PROTOCOL_VERSIONS
                     else "all"
                 )
@@ -686,7 +920,7 @@ def _stage_allowed_tools_policy(
                 "vision_verify": sorted(PAPER_VISION_TOOLS),
                 "latex_verify": sorted(PAPER_LATEX_TOOLS),
                 "reconcile": sorted(PAPER_RECONCILIATION_TOOLS),
-                "solve": sorted(PAPER_SOLVER_TOOLS),
+                "solve": editing_tools(PAPER_SOLVER_TOOLS),
             }
         )
         for arm in arms
@@ -710,6 +944,11 @@ def _allowed_observed_terminals_policy(
                             V25_COMPARISON_PROTOCOL_VERSION,
                             *_V26_RUNTIME_PROTOCOL_VERSIONS,
                         }
+                        else []
+                    ),
+                    *(
+                        [PROTOCOL_NONCOMPLIANCE_TERMINAL]
+                        if protocol_version == V28_COMPARISON_PROTOCOL_VERSION
                         else []
                     ),
                 ]
@@ -743,6 +982,11 @@ def _allowed_observed_terminals_policy(
                             V25_COMPARISON_PROTOCOL_VERSION,
                             *_V26_RUNTIME_PROTOCOL_VERSIONS,
                         }
+                        else []
+                    ),
+                    *(
+                        [PROTOCOL_NONCOMPLIANCE_TERMINAL]
+                        if protocol_version == V28_COMPARISON_PROTOCOL_VERSION
                         else []
                     ),
                 ]
@@ -1438,6 +1682,7 @@ class ComparisonBenchmarkRunner:
         run_spec_document: dict[str, Any] | None = None,
         run_spec_provenance: dict[str, str] | None = None,
         run_spec_bytes: bytes | None = None,
+        deliverable_lineage: bool = False,
     ) -> None:
         if not arms or len(set(arms)) != len(arms) or any(
             arm not in AVAILABLE_COMPARISON_ARMS for arm in arms
@@ -1445,7 +1690,14 @@ class ComparisonBenchmarkRunner:
             raise ValueError(f"arms must be unique members of {AVAILABLE_COMPARISON_ARMS}")
         if max_model_calls < 1 or max_total_tokens < 1 or max_output_tokens < 1:
             raise ValueError("comparison budgets must be positive")
-        self.stage_turn_caps = comparison_stage_turn_caps(max_turns_per_arm, arms)
+        self.stage_turn_caps = comparison_stage_turn_caps(
+            max_turns_per_arm,
+            arms,
+            enable_target_grounding=deliverable_lineage,
+        )
+        self.forced_tool_prefix_policy = comparison_forced_tool_prefix_policy(
+            enable_target_grounding=deliverable_lineage
+        )
         if max_model_calls < max_turns_per_arm:
             raise ValueError(
                 "max_model_calls must be at least max_turns_per_arm so the declared "
@@ -1453,6 +1705,8 @@ class ComparisonBenchmarkRunner:
             )
         if task_timeout_seconds <= 0 or circuit_breaker_threshold < 1:
             raise ValueError("timeouts and circuit breaker must be positive")
+        if deliverable_lineage and not recalculate:
+            raise ValueError("v28 deliverable lineage requires harness recalculation")
         self.config = config
         self.output_dir = output_dir.resolve()
         self.skill_registry = skill_registry.freeze()
@@ -1462,7 +1716,32 @@ class ComparisonBenchmarkRunner:
         self.max_total_tokens = max_total_tokens
         self.max_output_tokens = max_output_tokens
         self.task_timeout_seconds = task_timeout_seconds
+        self.observer_budget = _v28_observer_budget(max_model_calls)
         self.recalculate = recalculate
+        self.deliverable_lineage = bool(deliverable_lineage)
+        self.evidence_contract = (
+            _v28_evidence_contract() if self.deliverable_lineage else None
+        )
+        self.evidence_runtime = (
+            _v28_evidence_runtime_identity(self.evidence_contract)
+            if self.evidence_contract is not None
+            else None
+        )
+        self.comparison_protocol_version = (
+            V28_COMPARISON_PROTOCOL_VERSION
+            if self.deliverable_lineage
+            else COMPARISON_PROTOCOL_VERSION
+        )
+        self.comparison_manifest_schema_version = (
+            V28_COMPARISON_MANIFEST_SCHEMA_VERSION
+            if self.deliverable_lineage
+            else COMPARISON_MANIFEST_SCHEMA_VERSION
+        )
+        self.comparison_configuration_policies = (
+            V28_COMPARISON_CONFIGURATION_POLICIES
+            if self.deliverable_lineage
+            else COMPARISON_CONFIGURATION_POLICIES
+        )
         self.arm_order_seed = arm_order_seed
         self.circuit_breaker_threshold = circuit_breaker_threshold
         self.split_provenance = (
@@ -1618,6 +1897,7 @@ class ComparisonBenchmarkRunner:
                 circuit_breaker_threshold=self.circuit_breaker_threshold,
                 split_provenance=self.split_provenance,
                 skills=self.skill_registry,
+                deliverable_lineage=self.deliverable_lineage,
             )
             verify_pilot_run_spec_contract(self.run_spec_document, actual_contract)
             if not verify_pilot_run_spec_provenance(self.run_spec_provenance):
@@ -1639,8 +1919,16 @@ class ComparisonBenchmarkRunner:
             else {}
         )
         return {
-            "schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
-            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "schema_version": self.comparison_manifest_schema_version,
+            "comparison_protocol_version": self.comparison_protocol_version,
+            **(
+                {
+                    "result_schema_version": COMPARISON_RESULT_SCHEMA_VERSION,
+                    "evidence_runtime": self.evidence_runtime,
+                }
+                if self.deliverable_lineage
+                else {}
+            ),
             "study": "SpreadsheetAgent-style adapted small-model comparison",
             "not_paper_reproduction": True,
             "dataset_revision": f"KAKA22/SpreadsheetBench@{VERIFIED_REVISION}",
@@ -1676,7 +1964,7 @@ class ComparisonBenchmarkRunner:
             "forced_tool_prefix_routing": {
                 arm: {
                     stage: list(prefix)
-                    for stage, prefix in COMPARISON_FORCED_TOOL_PREFIX_POLICY[arm].items()
+                    for stage, prefix in self.forced_tool_prefix_policy[arm].items()
                 }
                 for arm in self.arms
             },
@@ -1688,10 +1976,11 @@ class ComparisonBenchmarkRunner:
             },
             "stage_allowed_tools": _stage_allowed_tools_policy(
                 self.arms,
-                protocol_version=COMPARISON_PROTOCOL_VERSION,
+                protocol_version=self.comparison_protocol_version,
             ),
             "allowed_observed_terminals": _allowed_observed_terminals_policy(
-                self.stage_turn_caps
+                self.stage_turn_caps,
+                protocol_version=self.comparison_protocol_version,
             ),
             "forced_prefix_wire_policy": {
                 "tool_choice": "explicit_function",
@@ -1712,10 +2001,14 @@ class ComparisonBenchmarkRunner:
                     "reconcile": 1,
                     "solve": 7,
                 },
-                "paper_stage_minimum": "forced_tool_prefix_length_plus_one_terminal_turn",
+                "paper_stage_minimum": (
+                    "grounding-prefix-plus-mutation-readback-terminal"
+                    if self.deliverable_lineage
+                    else "forced-tool-prefix-plus-terminal"
+                ),
                 "paper_allocation": (
                     "scale 6/3/3/1/7 proportions by arm ceiling, clamp each stage to its "
-                    "forced-prefix-plus-terminal minimum, then adjust by largest remainder "
+                    "protocol-specific minimum, then adjust by largest remainder "
                     "with stage-name ties"
                 ),
             },
@@ -1745,7 +2038,15 @@ class ComparisonBenchmarkRunner:
                     self.config.requested_reasoning_effort or self.config.reasoning_effort
                 ),
                 "reasoning_effort": self.config.reasoning_effort,
-                "provider_base_url": self.config.base_url,
+                **(
+                    {
+                        "provider_endpoint_label": (
+                            f"configured-{self.config.api_protocol}"
+                        )
+                    }
+                    if self.deliverable_lineage
+                    else {"provider_base_url": self.config.base_url}
+                ),
                 "request_timeout_seconds": self.config.timeout_seconds,
                 "litellm_timeout_seconds": self.config.litellm_timeout_seconds,
                 "request_retries": self.config.max_retries,
@@ -1778,6 +2079,11 @@ class ComparisonBenchmarkRunner:
                 "max_total_tokens": self.max_total_tokens,
                 "max_output_tokens_per_call": self.max_output_tokens,
                 "task_timeout_seconds": self.task_timeout_seconds,
+                **(
+                    {"observer_budget": dict(self.observer_budget)}
+                    if self.deliverable_lineage
+                    else {}
+                ),
                 "recalculate": self.recalculate,
                 "task_retries": 0,
                 "circuit_breaker_threshold": self.circuit_breaker_threshold,
@@ -1788,7 +2094,7 @@ class ComparisonBenchmarkRunner:
                 "circuit_breaker_immediate_categories": ["provider_fatal"],
                 "skills_for_ours_only": skills,
                 "code_isolation": STRICT_ISOLATION_POLICY,
-                **COMPARISON_CONFIGURATION_POLICIES,
+                **self.comparison_configuration_policies,
             },
         }
 
@@ -1912,6 +2218,16 @@ class ComparisonBenchmarkRunner:
             path = path.with_name(f"{arm}-{uuid.uuid4().hex[:8]}")
         return path
 
+    def _result_path(self, path: Path) -> str:
+        """Return an anonymous, results-root-relative POSIX path for v28 rows."""
+
+        if not self.deliverable_lineage:
+            return str(path)
+        try:
+            return path.resolve(strict=False).relative_to(self.output_dir).as_posix()
+        except ValueError as exc:
+            raise HarnessError("v28 result path escaped the results root") from exc
+
     def _write_inflight(
         self, task_id: str, arm: str, *, comparison_manifest_sha256: str
     ) -> None:
@@ -1923,7 +2239,7 @@ class ComparisonBenchmarkRunner:
             self.inflight_path,
             {
                 "schema_version": 1,
-                "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+                "comparison_protocol_version": self.comparison_protocol_version,
                 "comparison_manifest_sha256": comparison_manifest_sha256,
                 "run_spec_provenance": self.run_spec_provenance,
                 "task_id": task_id,
@@ -1959,7 +2275,8 @@ class ComparisonBenchmarkRunner:
         if (
             set(marker) != required
             or marker.get("schema_version") != 1
-            or marker.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION
+            or marker.get("comparison_protocol_version")
+            != self.comparison_protocol_version
             or marker.get("comparison_manifest_sha256")
             != comparison_manifest_sha256
             or marker.get("run_spec_provenance") != self.run_spec_provenance
@@ -1994,7 +2311,7 @@ class ComparisonBenchmarkRunner:
             raise HarnessError("In-flight arm-task has duplicate terminal result rows")
         row = matching[0]
         if (
-            row.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION
+            row.get("comparison_protocol_version") != self.comparison_protocol_version
             or row.get("comparison_manifest_sha256") != comparison_manifest_sha256
             or row.get("split_provenance") != self.split_provenance
             or row.get("run_spec_provenance") != self.run_spec_provenance
@@ -2066,7 +2383,7 @@ class ComparisonBenchmarkRunner:
                 or task_id not in allowed_tasks
                 or arm not in self.arms
                 or seal.get("comparison_protocol_version")
-                != COMPARISON_PROTOCOL_VERSION
+                != self.comparison_protocol_version
                 or seal.get("comparison_manifest_sha256")
                 != comparison_manifest_sha256
                 or seal.get("split_provenance") != self.split_provenance
@@ -2139,7 +2456,7 @@ class ComparisonBenchmarkRunner:
             "schema_version": 1,
             "task_id": marker["task_id"],
             "arm": marker["arm"],
-            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "comparison_protocol_version": self.comparison_protocol_version,
             "comparison_manifest_sha256": comparison_manifest_sha256,
             "split_provenance": self.split_provenance,
             "run_spec_provenance": self.run_spec_provenance,
@@ -2209,7 +2526,15 @@ class ComparisonBenchmarkRunner:
         row: dict[str, Any] = {
             "task_id": task.task_id,
             "arm": arm,
-            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "comparison_protocol_version": self.comparison_protocol_version,
+            **(
+                {
+                    "result_schema_version": COMPARISON_RESULT_SCHEMA_VERSION,
+                    "evidence_runtime": self.evidence_runtime,
+                }
+                if self.deliverable_lineage
+                else {}
+            ),
             "comparison_manifest_sha256": comparison_manifest_sha256,
             "split_provenance": self.split_provenance,
             "run_spec_provenance": self.run_spec_provenance,
@@ -2227,18 +2552,42 @@ class ComparisonBenchmarkRunner:
             "max_model_calls": self.max_model_calls,
             "max_turns_per_arm": self.max_turns_per_arm,
             "stage_turn_caps": dict(self.stage_turn_caps[arm]),
-            "run_dir": str(task_dir),
+            "run_dir": self._result_path(task_dir),
             "started_at": started_at.isoformat(),
             "calculation_backend": "libreoffice" if self.recalculate else "not_recalculated",
         }
         session: WorkbookSession | None = None
+        agent_terminated_clock: float | None = None
+        observer_started_clock: float | None = None
+        observer_started_at: datetime | None = None
+        observer_deadline: float | None = None
 
         def remaining_seconds(stage: str) -> float:
             ensure_postprocess_time(stage)
-            assert budget.deadline is not None
-            return max(budget.deadline - monotonic(), 0.001)
+            deadline = (
+                observer_deadline
+                if self.deliverable_lineage
+                else budget.deadline
+            )
+            assert deadline is not None
+            return max(deadline - monotonic(), 0.001)
 
         def ensure_postprocess_time(stage: str) -> None:
+            nonlocal observer_started_clock, observer_started_at, observer_deadline
+            if self.deliverable_lineage:
+                if observer_started_clock is None:
+                    observer_started_clock = monotonic()
+                    observer_started_at = datetime.now(timezone.utc)
+                    observer_deadline = (
+                        observer_started_clock
+                        + self.observer_budget["max_total_postprocess_seconds"]
+                    )
+                assert observer_deadline is not None
+                if monotonic() >= observer_deadline:
+                    raise AgentTimeoutError(
+                        f"Observer postprocess exceeded its independent deadline during {stage}"
+                    )
+                return
             termination = budget.to_dict().get("termination")
             reason = termination.get("reason") if isinstance(termination, dict) else None
             if reason in {"max_model_calls", "max_total_tokens"}:
@@ -2259,8 +2608,8 @@ class ComparisonBenchmarkRunner:
             session.recorder.record(
                 "benchmark.configured",
                 {
-                    "schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
-                    "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+                    "schema_version": self.comparison_manifest_schema_version,
+                    "comparison_protocol_version": self.comparison_protocol_version,
                     "arm": arm,
                     "api_protocol": self.config.api_protocol,
                     "request_interval_seconds": self.config.request_interval_seconds,
@@ -2274,6 +2623,11 @@ class ComparisonBenchmarkRunner:
                     "max_total_tokens": self.max_total_tokens,
                     "max_output_tokens_per_call": self.max_output_tokens,
                     "task_timeout_seconds": self.task_timeout_seconds,
+                    **(
+                        {"evidence_runtime": self.evidence_runtime}
+                        if self.deliverable_lineage
+                        else {}
+                    ),
                 },
             )
             execution_failure: AgentExecutionFailure | None = None
@@ -2289,9 +2643,27 @@ class ComparisonBenchmarkRunner:
                     budget=budget,
                     pacer=self.relay_pacer,
                     max_turns_per_arm=self.max_turns_per_arm,
+                    evidence_contract=self.evidence_contract,
+                    contract_mode=(
+                        ContractMode.ENFORCE
+                        if self.deliverable_lineage
+                        else ContractMode.SHADOW
+                    ),
+                    enable_target_grounding=self.deliverable_lineage,
+                    capture_completion_attempts=self.deliverable_lineage,
                 )
             except AgentExecutionFailure as exc:
-                if exc.reason not in AGENT_EXECUTION_FAILURE_REASONS:
+                allowed_failure_reasons = (
+                    AGENT_EXECUTION_FAILURE_REASONS
+                    | OPTIONAL_AGENT_EXECUTION_FAILURE_REASONS
+                    if self.deliverable_lineage
+                    else frozenset(
+                        V26_COMPARISON_CONFIGURATION_POLICIES[
+                            "model_execution_failure_reasons"
+                        ]
+                    )
+                )
+                if exc.reason not in allowed_failure_reasons:
                     raise HarnessError(
                         "Agent execution failure used an unknown reason"
                     ) from exc
@@ -2301,27 +2673,157 @@ class ComparisonBenchmarkRunner:
                         "Agent execution failure omitted auditable agent evidence"
                     ) from exc
                 execution_failure = exc
-            recalculation: dict[str, Any] | None = None
-            if self.recalculate:
-                from .render import recalculate_workbook
-
-                recalculation = recalculate_workbook(
-                    session.workbook_path,
-                    session.workbook_path,
-                    timeout_seconds=min(120.0, remaining_seconds("recalculate")),
-                )
-                ensure_postprocess_time("recalculate")
-            ensure_postprocess_time("score")
-            comparison = compare_workbooks(
-                task.golden_path,
-                session.workbook_path,
-                task.answer_position,
-                answer_sheet=task.answer_sheet,
-            )
-            ensure_postprocess_time("score")
             agent_evidence = result.to_dict()
             if not isinstance(agent_evidence, dict):
                 raise HarnessError("Agent result evidence must be a JSON object")
+            agent_terminated_clock = monotonic()
+            agent_terminated_at = datetime.now(timezone.utc)
+            agent_outcome_kind = (
+                "scored" if execution_failure is None else "model_execution_failure"
+            )
+            row.update(
+                {
+                    "agent": agent_evidence,
+                    **(
+                        {
+                            "agent_outcome_kind": agent_outcome_kind,
+                            "agent_failure_reason": (
+                                execution_failure.reason
+                                if execution_failure is not None
+                                else None
+                            ),
+                            "agent_timing": {
+                                "started_at": started_at.isoformat(),
+                                "terminated_at": agent_terminated_at.isoformat(),
+                                "elapsed_seconds": round(
+                                    agent_terminated_clock - started_clock,
+                                    3,
+                                ),
+                            },
+                        }
+                        if self.deliverable_lineage
+                        else {}
+                    ),
+                }
+            )
+            completion_evaluations: list[dict[str, Any]] | None = None
+            if self.deliverable_lineage:
+                if "completion_attempts" not in agent_evidence:
+                    if execution_failure is None:
+                        raise HarnessError(
+                            "v28 successful agent evidence omitted completion attempts"
+                        )
+                    # A paper arm can fail in a read-only pre-stage, before the only
+                    # editing stage enables the task-wide completion ledger.
+                    agent_evidence["completion_attempts"] = []
+                raw_completion_attempts = agent_evidence.get("completion_attempts")
+                if not isinstance(raw_completion_attempts, list):
+                    raise HarnessError(
+                        "v28 completion-attempt evidence must be a JSON array"
+                    )
+                session.recorder.record(
+                    "benchmark.agent_terminated",
+                    {
+                        "schema_version": "spreadsheet-agent-termination-boundary-v1",
+                        "task_id": task.task_id,
+                        "arm": arm,
+                        "outcome_kind": (
+                            "scored"
+                            if execution_failure is None
+                            else "model_execution_failure"
+                        ),
+                        "model_failure_reason": (
+                            execution_failure.reason
+                            if execution_failure is not None
+                            else None
+                        ),
+                        "completion_attempt_count": len(raw_completion_attempts),
+                        "response_id": agent_evidence.get("response_id"),
+                    },
+                )
+                ensure_postprocess_time("observer_start")
+                completion_evaluations = _evaluate_completion_attempts_posthoc(
+                    session,
+                    task,
+                    agent_evidence,
+                    remaining_seconds=remaining_seconds,
+                    per_attempt_recalculation_timeout_seconds=self.observer_budget[
+                        "per_attempt_recalculation_timeout_seconds"
+                    ],
+                )
+                terminal_response = agent_evidence.get("terminal_response")
+                session.recorder.record(
+                    "benchmark.completion_attempts_evaluated",
+                    {
+                        "evaluator": V28_COMPLETION_EVALUATOR_ID,
+                        "timing": "posthoc-after-agent-termination",
+                        "fed_back_to_model": False,
+                        "attempt_count": len(completion_evaluations),
+                        "attempt_ids": [
+                            item["attempt_id"] for item in completion_evaluations
+                        ],
+                        "passed": [
+                            item["comparison"]["passed"]
+                            for item in completion_evaluations
+                        ],
+                        "accepted_completion_attempt_id": (
+                            terminal_response.get("completion_attempt_id")
+                            if isinstance(terminal_response, dict)
+                            else None
+                        ),
+                    },
+                )
+            recalculation: dict[str, Any] | None = None
+            deliverable_fields: dict[str, Any] = {}
+            if self.deliverable_lineage:
+                ensure_postprocess_time("finalize_deliverable")
+                deliverable = finalize_deliverable(
+                    session,
+                    agent_evidence,
+                    render_timeout_seconds=min(
+                        self.observer_budget["final_render_timeout_seconds"],
+                        remaining_seconds("final_render"),
+                    ),
+                )
+                ensure_postprocess_time("finalize_deliverable")
+                recalculation = deliverable.recalculation
+                if _sha256(session.workbook_path) != deliverable.final_artifact.sha256:
+                    raise HarnessError("Final artifact changed after deliverable certification")
+                ensure_postprocess_time("score")
+                comparison = score_read_only(
+                    deliverable,
+                    lambda scoring_path: compare_workbooks(
+                        task.golden_path,
+                        scoring_path,
+                        task.answer_position,
+                        answer_sheet=task.answer_sheet,
+                    ),
+                )
+                if _sha256(session.workbook_path) != deliverable.final_artifact.sha256:
+                    raise HarnessError("Final artifact changed while scoring its immutable copy")
+                deliverable_fields = {
+                    "deliverable_certificate": deliverable.certificate,
+                    "scoring_workbook": self._result_path(deliverable.scoring_copy),
+                    "scoring_copy_sha256": deliverable.final_artifact.sha256,
+                }
+            else:
+                if self.recalculate:
+                    from .render import recalculate_workbook
+
+                    recalculation = recalculate_workbook(
+                        session.workbook_path,
+                        session.workbook_path,
+                        timeout_seconds=min(120.0, remaining_seconds("recalculate")),
+                    )
+                    ensure_postprocess_time("recalculate")
+                ensure_postprocess_time("score")
+                comparison = compare_workbooks(
+                    task.golden_path,
+                    session.workbook_path,
+                    task.answer_position,
+                    answer_sheet=task.answer_sheet,
+                )
+            ensure_postprocess_time("score")
             row.update(
                 {
                     "status": "completed",
@@ -2329,9 +2831,20 @@ class ComparisonBenchmarkRunner:
                     "artifact_score_passed": comparison.passed,
                     "comparison": comparison.to_dict(),
                     "agent": agent_evidence,
+                    **(
+                        {
+                            "completion_attempt_evaluations": completion_evaluations,
+                            "completion_attempt_count": len(
+                                completion_evaluations or []
+                            ),
+                        }
+                        if self.deliverable_lineage
+                        else {}
+                    ),
                     "recalculation": recalculation,
-                    "output_workbook": str(session.workbook_path),
+                    "output_workbook": self._result_path(session.workbook_path),
                     "output_sha256": _sha256(session.workbook_path),
+                    **deliverable_fields,
                     "outcome_kind": (
                         "scored"
                         if execution_failure is None
@@ -2369,6 +2882,8 @@ class ComparisonBenchmarkRunner:
                     "scoring_metadata_sha256": _scoring_metadata_sha256(task),
                 },
             )
+            if self.deliverable_lineage:
+                row["trajectory_sha256"] = _sha256(session.paths.trajectory)
         except CodeIsolationError:
             # Comparison results are invalid if code can escape its arm. Stop
             # the entire run instead of recording an error and continuing.
@@ -2390,7 +2905,18 @@ class ComparisonBenchmarkRunner:
                     "error_category": "harness",
                 }
             )
-            if isinstance(effective_exc, AgentBudgetError):
+            if self.deliverable_lineage and agent_terminated_clock is not None:
+                row.update(
+                    {
+                        "error_category": "observer_postprocess",
+                        "postprocess_error": {
+                            "type": type(effective_exc).__name__,
+                            "message": safe_error,
+                            "agent_outcome_frozen": True,
+                        },
+                    }
+                )
+            elif isinstance(effective_exc, AgentBudgetError):
                 row["error_category"] = (
                     "task_timeout"
                     if effective_exc.reason == "max_elapsed_seconds"
@@ -2428,6 +2954,16 @@ class ComparisonBenchmarkRunner:
             row["budget"] = budget.to_dict()
             row["finished_at"] = datetime.now(timezone.utc).isoformat()
             row["elapsed_seconds"] = round(monotonic() - started_clock, 3)
+            if observer_started_clock is not None and observer_started_at is not None:
+                row["postprocess_timing"] = {
+                    "started_at": observer_started_at.isoformat(),
+                    "finished_at": row["finished_at"],
+                    "elapsed_seconds": round(monotonic() - observer_started_clock, 3),
+                    "budget": dict(self.observer_budget),
+                    "status": (
+                        "completed" if row.get("status") == "completed" else "incomplete"
+                    ),
+                }
             if session is not None:
                 if row.get("status") != "completed":
                     try:
@@ -2504,7 +3040,10 @@ class ComparisonBenchmarkRunner:
                         "Refusing to resume comparison with an unexpected arm-task row: "
                         f"{task_id}::{arm}"
                     )
-                if row.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION:
+                if (
+                    row.get("comparison_protocol_version")
+                    != self.comparison_protocol_version
+                ):
                     raise HarnessError(
                         "Refusing to resume comparison with result rows from a different "
                         f"or missing protocol: {task_id}::{arm}"
@@ -2624,7 +3163,7 @@ class ComparisonBenchmarkRunner:
                 arms=self.arms,
                 bootstrap_seed=self.arm_order_seed,
                 interrupted_keys=set(interrupted_seals),
-                expected_protocol_version=COMPARISON_PROTOCOL_VERSION,
+                expected_protocol_version=self.comparison_protocol_version,
             )
             summary["circuit_breaker_tripped"] = circuit_breaker
             summary["exhausted_transient_arm_tasks"] = exhausted_transient

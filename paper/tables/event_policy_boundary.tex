@@ -1,0 +1,23 @@
+\begin{table*}[t]
+\caption{Event construction is separated from policy expressiveness. ``If
+supplied'' means a generic engine can consume the property but does not itself
+recover it from workbook bytes. The controlled $2\times2$ experiment crosses
+raw/enriched events with generic/restricted policy; it tests event lifting, not
+the superiority of one temporal language.}
+\label{tab:event-policy}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{2.8cm}p{2.9cm}p{3.0cm}p{4.0cm}@{}}
+\toprule
+Property & Raw spreadsheet call trace & Generic policy engine & SheetLedger event front end \\
+\midrule
+Opaque-code workbook effect & Tool name and stdout & Testable if a trusted effect event is supplied & Computes pre/post XLSX semantic diff \\
+Changed-cell scope & Model/tool argument, possibly incomplete & Can enforce a supplied scope relation & Derives normalized scope from changed bytes \\
+Artifact identity and order & Path or call order & Artifact/value-flow relations are expressible & Emits monotonic revision plus exact SHA-256 \\
+Recalculation lineage & Backend call only & Source/output relation is expressible if visible & Binds backend source, output, and semantic drift \\
+Rendered-page identity & Image call/path & Manifest relation is expressible if visible & Binds artifact, manifest, sheet/page, and PNG digest \\
+Scoring-deliverable lineage & Usually outside trace & Enforceable if finalization events are supplied & Emits accepted final/replica hashes plus all-row observer records \\
+\bottomrule
+\end{tabular}
+\end{table*}
