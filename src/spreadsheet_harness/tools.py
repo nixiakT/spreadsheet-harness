@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,12 @@ from .errors import (
     RecalculationIntegrityError,
     ToolInputError,
 )
+from .formula_runtime import (
+    FormulaCoordinate,
+    formula_coordinate_sha256,
+    formula_inventory,
+    formula_runtime_report,
+)
 from .session import WorkbookSession
 
 _INSPECT_MAX_CELLS = 500
@@ -32,6 +38,7 @@ _STYLE_MAX_TEXT_CHARS = 160
 _INSPECT_DEFAULT_INCLUDE_STYLES = False
 _CALCULATION_VALIDATION_MAX_CELLS = 500
 _CALCULATION_ERROR_COORDINATE_LIMIT = 32
+_PENDING_FORMULA_VALIDATION_SCOPE = "pending_formula_changes"
 _SPREADSHEET_ERROR_VALUES = frozenset(
     {
         "#BLOCKED!",
@@ -322,6 +329,7 @@ class SpreadsheetToolRegistry:
             else None
         )
         self._last_render: dict[str, Any] | None = None
+        self._pending_formula_validation: tuple[FormulaCoordinate, ...] = ()
         self._handlers: dict[str, Callable[[dict[str, Any]], ToolOutcome]] = {
             "list_sheets": self._list_sheets,
             "inspect_range": self._inspect_range,
@@ -356,11 +364,12 @@ class SpreadsheetToolRegistry:
             ),
         }
         calculation_a1 = {
-            "type": "string",
+            "type": ["string", "null"],
             "description": (
                 "Bounded A1 validation target such as A1:F20, with a maximum of "
                 f"{_CALCULATION_VALIDATION_MAX_CELLS} cells. Larger targets are rejected "
-                "before recalculation; split them into fully inspected ranges."
+                "before recalculation. Omit this with sheet when validation_scope is "
+                "pending_formula_changes."
             ),
         }
         schemas = [
@@ -505,15 +514,27 @@ class SpreadsheetToolRegistry:
                 "recalculate_and_read",
                 (
                     "Recalculate a safe workspace copy with LibreOffice, replace the working "
-                    "copy atomically, then inspect a range. ok=true reports transport/tool "
-                    "success; calculation_valid separately reports whether the inspected "
-                    "target contains spreadsheet error values. Validation targets are limited "
-                    f"to {_CALCULATION_VALIDATION_MAX_CELLS} cells and oversized requests fail "
-                    "before recalculation."
+                    "copy atomically, then validate either one range or every formula coordinate "
+                    "changed since the last complete clean validation. Set validation_scope to "
+                    "pending_formula_changes, and omit sheet/range_ref, to validate any number "
+                    "of pending formula cells with one recalculation and a sparse error scan. "
+                    "The default range mode requires sheet and range_ref and is limited to "
+                    f"{_CALCULATION_VALIDATION_MAX_CELLS} cells. Oversized range requests fail "
+                    "before recalculation. ok=true reports transport/tool success; "
+                    "calculation_valid separately reports whether the complete selected scope "
+                    "contains spreadsheet error values."
                 ),
                 _object_schema(
-                    {"sheet": sheet, "range_ref": calculation_a1},
-                    ["sheet", "range_ref"],
+                    {
+                        "validation_scope": {
+                            "type": "string",
+                            "enum": ["range", _PENDING_FORMULA_VALIDATION_SCOPE],
+                            "default": "range",
+                        },
+                        "sheet": {**sheet, "type": ["string", "null"]},
+                        "range_ref": calculation_a1,
+                    },
+                    [],
                 ),
             ),
             self._schema(
@@ -622,6 +643,16 @@ class SpreadsheetToolRegistry:
             outcome = ToolOutcome({"ok": False, "error": str(exc), "type": type(exc).__name__})
         self.session.recorder.record("tool.returned", {"name": name, "result": outcome.data})
         return outcome
+
+    def set_pending_formula_validation_scope(
+        self,
+        coordinates: Iterable[FormulaCoordinate],
+    ) -> None:
+        """Bind the sparse validation mode to artifact-derived formula coordinates."""
+
+        self._pending_formula_validation = tuple(
+            sorted({(str(sheet), str(cell).upper()) for sheet, cell in coordinates})
+        )
 
     def _list_sheets(self, _: dict[str, Any]) -> ToolOutcome:
         return ToolOutcome(self.session.list_sheets())
@@ -802,9 +833,55 @@ class SpreadsheetToolRegistry:
         )
 
     def _recalculate_and_read(self, args: dict[str, Any]) -> ToolOutcome:
-        normalized_range, request = _bounded_inspection_range(args["range_ref"])
+        validation_scope = args.get("validation_scope", "range")
+        if validation_scope == _PENDING_FORMULA_VALIDATION_SCOPE:
+            if args.get("sheet") is not None or args.get("range_ref") is not None:
+                return self._calculation_preflight_failure(
+                    "pending_formula_changes validation must omit sheet and range_ref"
+                )
+            if not self._pending_formula_validation:
+                return self._calculation_preflight_failure(
+                    "No pending formula changes are available for sparse validation"
+                )
+            expected_scope = self._pending_formula_validation
+            expected_sha256 = formula_coordinate_sha256(expected_scope)
+            metadata = self.session.recalculate()
+            inventory = formula_inventory(self.session.workbook_path)
+            validation = formula_runtime_report(inventory, expected_scope)
+            if (
+                validation["coordinate_count"] != len(expected_scope)
+                or validation["coordinate_sha256"] != expected_sha256
+                or validation["coverage_complete"] is not True
+            ):
+                raise HarnessError(
+                    "Sparse formula validation did not bind to its complete pending scope"
+                )
+            calculation_errors = validation["calculation_errors"]
+            return ToolOutcome(
+                {
+                    "ok": True,
+                    "calculation_valid": calculation_errors["count"] == 0,
+                    "calculation_errors": calculation_errors,
+                    "validation_scope": validation,
+                    "calculation": metadata,
+                }
+            )
+        if validation_scope != "range":
+            return self._calculation_preflight_failure(
+                f"Unknown recalculation validation_scope: {validation_scope!r}"
+            )
+        sheet = args.get("sheet")
+        range_ref = args.get("range_ref")
+        if not isinstance(sheet, str) or not sheet or not isinstance(range_ref, str):
+            return self._calculation_preflight_failure(
+                "Range validation requires non-empty sheet and range_ref strings"
+            )
+        try:
+            normalized_range, request = _bounded_inspection_range(range_ref)
+        except ToolInputError as exc:
+            return self._calculation_preflight_failure(str(exc))
         if request["requested_cell_count"] > _CALCULATION_VALIDATION_MAX_CELLS:
-            raise ToolInputError(
+            return self._calculation_preflight_failure(
                 "recalculate_and_read validates at most "
                 f"{_CALCULATION_VALIDATION_MAX_CELLS} cells; requested "
                 f"{request['requested_range']} contains "
@@ -813,7 +890,7 @@ class SpreadsheetToolRegistry:
             )
         metadata = self.session.recalculate()
         inspected = self.session.inspect_range(
-            args["sheet"],
+            sheet,
             normalized_range,
             max_cells=_CALCULATION_VALIDATION_MAX_CELLS,
         )
@@ -826,6 +903,19 @@ class SpreadsheetToolRegistry:
                 "limits": {"max_cells": _CALCULATION_VALIDATION_MAX_CELLS},
                 "calculation": metadata,
                 "inspection": inspected,
+            }
+        )
+
+    @staticmethod
+    def _calculation_preflight_failure(error: str) -> ToolOutcome:
+        return ToolOutcome(
+            {
+                "ok": False,
+                "error": error,
+                "type": "ToolInputError",
+                "preflight_rejected": True,
+                "workbook_mutation_attempted": False,
+                "workbook_changed": False,
             }
         )
 

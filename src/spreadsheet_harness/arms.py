@@ -710,6 +710,7 @@ def _run_stage(
     require_evidence: bool = False,
     forced_tool_prefix: tuple[str, ...] = (),
     require_workbook_change: bool = False,
+    require_formula_runtime_validation: bool = False,
     force_code_on_stalled_edit: bool | None = None,
     pacer: RelayPacer | None = None,
 ) -> _CompletedStage:
@@ -759,6 +760,7 @@ def _run_stage(
         required_tool_termination=requires_tool_termination,
         terminal_result_required=require_evidence and requires_tool_termination,
         require_workbook_change=require_workbook_change,
+        require_formula_runtime_validation=require_formula_runtime_validation,
         force_code_on_stalled_edit=edit_recovery_enabled,
         pacer=pacer,
     )
@@ -1412,6 +1414,7 @@ def run_arm(
                 preview=preview,
                 forced_tool_prefix=COMPARISON_FORCED_TOOL_PREFIX_POLICY[arm]["solve"],
                 require_workbook_change=True,
+                require_formula_runtime_validation=arm == "ours",
                 pacer=pacer,
             )
         ]

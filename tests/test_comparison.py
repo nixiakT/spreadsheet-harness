@@ -182,8 +182,19 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["scoring_compatibility_policy"] == (
         "worksheet-only-ooxml-view-scorer-infrastructure-no-score-v1"
     )
+    assert manifest["configuration"]["formula_runtime_gate"] == (
+        "raw-ooxml-dirty-formula-scope-complete-clean-calc-v1"
+    )
+    assert manifest["configuration"]["formula_runtime_validation_scope"] == (
+        "range-or-single-recalc-sparse-pending-formulas-v1"
+    )
     assert "artifact_reopen_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert "scoring_compatibility_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
+    assert "formula_runtime_gate" not in V27_COMPARISON_CONFIGURATION_POLICIES
+    assert (
+        "formula_runtime_validation_scope"
+        not in V27_COMPARISON_CONFIGURATION_POLICIES
+    )
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
         "bare": "bare",

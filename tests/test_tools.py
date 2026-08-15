@@ -164,6 +164,9 @@ def test_recalculate_and_read_rejects_oversized_target_before_recalculation(
     ]["description"]
     assert result["ok"] is False
     assert result["type"] == "ToolInputError"
+    assert result["preflight_rejected"] is True
+    assert result["workbook_mutation_attempted"] is False
+    assert result["workbook_changed"] is False
     assert "at most 500 cells" in result["error"]
     assert "A1:Z100 contains 2600 cells" in result["error"]
     assert "no recalculation was performed" in result["error"]
@@ -212,6 +215,131 @@ def test_registry_propagates_recalculation_integrity_failure(
         and event["payload"]["name"] == "recalculate_and_read"
         for event in trajectory
     )
+
+
+def test_recalculate_and_read_sparse_pending_scope_has_no_500_cell_limit(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    workbook = load_workbook(sample_workbook)
+    sheet = workbook["Sales"]
+    coordinates = []
+    for row in range(1, 602):
+        coordinate = f"J{row}"
+        sheet[coordinate] = f"={row}+1"
+        coordinates.append(("Sales", coordinate))
+    workbook.save(sample_workbook)
+    workbook.close()
+
+    session = WorkbookSession.create(sample_workbook, tmp_path / "sparse-recalc-run")
+    recalculate_calls = 0
+
+    def recalculate() -> dict[str, Any]:
+        nonlocal recalculate_calls
+        recalculate_calls += 1
+        return {"backend": "test-libreoffice", "atomic_replace": True}
+
+    monkeypatch.setattr(session, "recalculate", recalculate)
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+    tools.set_pending_formula_validation_scope(coordinates)
+
+    result = tools.invoke(
+        "recalculate_and_read",
+        {"validation_scope": "pending_formula_changes"},
+    ).data
+
+    assert recalculate_calls == 1
+    assert result["ok"] is True
+    assert result["calculation_valid"] is True
+    assert result["validation_scope"]["coordinate_count"] == 601
+    assert result["validation_scope"]["formula_cells_present"] == 601
+    assert result["validation_scope"]["formula_cells_absent"] == 0
+    assert result["validation_scope"]["coverage_complete"] is True
+    assert result["calculation_errors"] == {
+        "count": 0,
+        "coordinates": [],
+        "coordinate_limit": 32,
+        "coordinates_truncated": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"validation_scope": "range", "sheet": "Sales"},
+        {"validation_scope": "unknown"},
+        {"validation_scope": "pending_formula_changes"},
+        {
+            "validation_scope": "pending_formula_changes",
+            "sheet": "Sales",
+        },
+    ],
+)
+def test_recalculate_and_read_rejects_invalid_scope_before_mutation(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+    arguments: dict[str, Any],
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "invalid-recalc-scope")
+    recalculate_calls = 0
+
+    def unexpected_recalculation() -> dict[str, Any]:
+        nonlocal recalculate_calls
+        recalculate_calls += 1
+        return {"backend": "should-not-run"}
+
+    monkeypatch.setattr(session, "recalculate", unexpected_recalculation)
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+    before = session.workbook_path.read_bytes()
+
+    result = tools.invoke("recalculate_and_read", arguments).data
+
+    assert result["ok"] is False
+    assert result["type"] == "ToolInputError"
+    assert result["preflight_rejected"] is True
+    assert result["workbook_mutation_attempted"] is False
+    assert result["workbook_changed"] is False
+    assert recalculate_calls == 0
+    assert session.workbook_path.read_bytes() == before
+
+
+@pytest.mark.skipif(find_libreoffice() is None, reason="LibreOffice is not installed")
+def test_sparse_pending_recalculation_detects_real_libreoffice_formula_error(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    workbook = load_workbook(sample_workbook)
+    workbook["Sales"]["H1"] = "=1/0"
+    workbook["Sales"]["H2"] = "=NO_SUCH_FUNCTION(1)"
+    workbook["Sales"]["H3"] = '="#REF!"'
+    workbook.save(sample_workbook)
+    workbook.close()
+
+    session = WorkbookSession.create(sample_workbook, tmp_path / "sparse-real-recalc-run")
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+    tools.set_pending_formula_validation_scope(
+        {("Sales", "H1"), ("Sales", "H2"), ("Sales", "H3")}
+    )
+
+    result = tools.invoke(
+        "recalculate_and_read",
+        {"validation_scope": "pending_formula_changes"},
+    ).data
+
+    assert result["ok"] is True
+    assert result["calculation_valid"] is False
+    assert result["validation_scope"]["coordinate_count"] == 3
+    assert result["calculation_errors"]["count"] == 2
+    assert result["calculation_errors"]["coordinates"] == [
+        {"sheet": "Sales", "coordinate": "H1", "error": "#DIV/0!"},
+        {"sheet": "Sales", "coordinate": "H2", "error": "#NAME?"},
+    ]
 
 
 @pytest.mark.skipif(find_libreoffice() is None, reason="LibreOffice is not installed")

@@ -218,6 +218,12 @@ COMPARISON_CONFIGURATION_POLICIES = {
     "scoring_compatibility_policy": (
         "worksheet-only-ooxml-view-scorer-infrastructure-no-score-v1"
     ),
+    "formula_runtime_gate": (
+        "raw-ooxml-dirty-formula-scope-complete-clean-calc-v1"
+    ),
+    "formula_runtime_validation_scope": (
+        "range-or-single-recalc-sparse-pending-formulas-v1"
+    ),
 }
 
 

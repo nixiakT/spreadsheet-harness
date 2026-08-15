@@ -317,6 +317,17 @@ def test_chat_completions_length_is_typed_and_discards_partial_message_before_co
             {"ok": True, "calculation_valid": True},
             False,
         ),
+        (
+            "recalculate_and_read",
+            {"sheet": "Sales", "range_ref": "A1:Z100"},
+            {
+                "ok": False,
+                "preflight_rejected": True,
+                "workbook_mutation_attempted": False,
+                "workbook_changed": False,
+            },
+            False,
+        ),
     ],
 )
 def test_failed_tool_edit_recovery_classification(

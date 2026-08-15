@@ -429,6 +429,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     )
     assert bare_call["required_tool_termination"] is True
     assert bare_call["require_workbook_change"] is True
+    assert bare_call["require_formula_runtime_validation"] is False
     assert bare_call["force_code_on_stalled_edit"] is True
     assert [call["required_tool_termination"] for call in paper_calls] == [
         True,
@@ -437,6 +438,9 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
         False,
         True,
     ]
+    assert all(
+        call["require_formula_runtime_validation"] is False for call in paper_calls
+    )
     assert [call["terminal_result_required"] for call in paper_calls] == [
         True,
         True,
@@ -446,6 +450,7 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     ]
     assert ours_call["required_tool_termination"] is True
     assert ours_call["require_workbook_change"] is True
+    assert ours_call["require_formula_runtime_validation"] is True
     assert ours_call["force_code_on_stalled_edit"] is True
     assert _preview(bare_call["prompt"]) == _preview(paper_calls[-1]["prompt"])
     assert _preview(bare_call["prompt"]) == _preview(ours_call["prompt"])
@@ -556,6 +561,8 @@ def test_profile_is_bare_plus_deterministic_evidence_and_native_omits_skills(
     assert native_call["tools"].allowed_tools is None
     assert native_call["skills"] is None
     assert native_call["forced_tool_prefix"] == ("list_sheets", "inspect_range")
+    assert profile_call["require_formula_runtime_validation"] is False
+    assert native_call["require_formula_runtime_validation"] is False
     assert profile_call["force_code_on_stalled_edit"] is True
     assert native_call["force_code_on_stalled_edit"] is True
     assert "<deterministic_workbook_profile_json>" not in native_call["prompt"]
@@ -579,6 +586,7 @@ def test_ours_consumes_deterministic_profile_with_skills(
     assert ours_call["tools"].allowed_tools == set(arms.OURS_TOOLS)
     assert ours_call["skills"] is skills
     assert ours_call["require_workbook_change"] is True
+    assert ours_call["require_formula_runtime_validation"] is True
     assert ours_call["force_code_on_stalled_edit"] is True
     assert "<deterministic_workbook_profile_json>" in ours_call["prompt"]
     assert '"schema_version":"deterministic-workbook-profile-v1"' in ours_call["prompt"]
@@ -607,6 +615,9 @@ def test_spreadsheet_core_skill_blocks_unverified_formula_submission() -> None:
     assert "both the horizontal and vertical axes" in skill
     assert "absolute rows, absolute columns" in skill
     assert "recalculate_and_read" in skill
+    assert '{"validation_scope":"pending_formula_changes"}' in skill
+    assert "exceeds 500 cells" in skill
+    assert "rewritten afterward" in skill
     assert "unexpected blank" in skill
     assert "last-N, date-filtered, blank-aware, or lookup logic" in skill
     assert "duplicate key" in skill
