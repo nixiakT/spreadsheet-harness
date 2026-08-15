@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from openpyxl import Workbook, load_workbook
 
+import spreadsheet_harness.audit as audit_module
 from spreadsheet_harness.arms import (
     COMPARISON_FORCED_TOOL_PREFIX_POLICY,
     comparison_stage_turn_caps,
@@ -42,6 +43,7 @@ from spreadsheet_harness.completion_evaluation import evaluate_completion_attemp
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.deliverable import (
     COMPARISON_RESULT_SCHEMA_VERSION,
+    LEGACY_DELIVERABLE_CERTIFICATE_SCHEMA_VERSION,
     finalize_deliverable,
 )
 from spreadsheet_harness.evidence_contract import (
@@ -237,9 +239,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
             "tool_calls": 2,
             "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
             "request_timings": json.loads(json.dumps(timings)),
-            "tool_trace": [
-                {"stage": "solve", **item} for item in tool_trace
-            ],
+            "tool_trace": [{"stage": "solve", **item} for item in tool_trace],
             "terminal_submissions": 1,
             "function_calls_total": 3,
             "post_prefix_tool_choice": "auto",
@@ -334,6 +334,47 @@ class _AuditFinalizationSession:
     @property
     def committed_target_authorizations(self) -> tuple[Any, ...]:
         return self._grounding.committed_authorizations
+
+    def recalculate_for_finalization(
+        self,
+        *,
+        timeout_seconds: float = 120.0,
+    ) -> dict[str, Any]:
+        del timeout_seconds
+        from spreadsheet_harness.ooxml_formula_scan import (
+            OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+            OOXML_NO_FORMULA_BACKEND,
+            OOXML_NO_FORMULA_PROFILE,
+            scan_ooxml_formulas,
+        )
+
+        scan = scan_ooxml_formulas(self.workbook_path)
+        return {
+            "backend": OOXML_NO_FORMULA_BACKEND,
+            "version": OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+            "profile": OOXML_NO_FORMULA_PROFILE,
+            "format": scan.workbook_format,
+            "source_sha256": self._artifact.sha256,
+            "output_sha256": self._artifact.sha256,
+            "atomic_replace": False,
+            "publication": "verified_no_write",
+            "workbook_changed": False,
+            "artifact_revision_before": self._artifact.revision,
+            "artifact_revision_after": self._artifact.revision,
+            "artifact_transition_id": None,
+            "formula_scan": scan.to_dict(),
+            "workbook_effects": {
+                "schema_version": "workbook-effect-diff-v1",
+                "semantic_changed": False,
+                "complete": True,
+                "effects": [],
+                "scope": EvidenceScope().to_dict(),
+                "formula_scope": EvidenceScope().to_dict(),
+                "changed_cell_count": 0,
+                "scanned_cell_count": scan.scanned_cell_count,
+                "reasons": [],
+            },
+        }
 
 
 def _promote_fixture_to_v28(
@@ -516,12 +557,8 @@ def _promote_fixture_to_v28(
         "turns": 5,
         "tool_calls": 4,
         "usage": usage,
-        "request_timings": [
-            {"stage": "solve", **timing} for timing in timings
-        ],
-        "tool_trace": [
-            {"stage": "solve", **item} for item in tool_trace
-        ],
+        "request_timings": [{"stage": "solve", **timing} for timing in timings],
+        "tool_trace": [{"stage": "solve", **item} for item in tool_trace],
         "first_tool_choice": "inspect_range",
         "observed_first_tool": "inspect_range",
         "forced_tool_prefix": ["inspect_range", "declare_edit_target"],
@@ -537,45 +574,14 @@ def _promote_fixture_to_v28(
         "stages": [stage],
     }
     if not model_failure:
-        aggregate_agent["terminal_response"] = json.loads(
-            json.dumps(accepted_response_payload)
-        )
+        aggregate_agent["terminal_response"] = json.loads(json.dumps(accepted_response_payload))
 
-    accepted_response = (
-        None if model_failure else aggregate_agent["terminal_response"]
-    )
+    accepted_response = None if model_failure else aggregate_agent["terminal_response"]
     session = _AuditFinalizationSession(output, run_dir, initial, candidate)
-
-    def unchanged_recalculation() -> dict[str, Any]:
-        return {
-            "backend": "test-recalculator",
-            "version": "1",
-            "profile": "isolated",
-            "format": "xlsx",
-            "source_sha256": candidate.sha256,
-            "output_sha256": candidate.sha256,
-            "atomic_replace": True,
-            "workbook_changed": False,
-            "artifact_revision_before": candidate.revision,
-            "artifact_revision_after": candidate.revision,
-            "artifact_transition_id": None,
-            "workbook_effects": {
-                "schema_version": "workbook-effect-diff-v1",
-                "semantic_changed": False,
-                "complete": True,
-                "effects": [],
-                "scope": EvidenceScope().to_dict(),
-                "formula_scope": EvidenceScope().to_dict(),
-                "changed_cell_count": 0,
-                "scanned_cell_count": 1,
-                "reasons": [],
-            },
-        }
 
     bundle = finalize_deliverable(
         session,
         aggregate_agent,
-        recalculation_callback=unchanged_recalculation,
     )
 
     def evaluator(snapshot: Path):
@@ -636,9 +642,7 @@ def _promote_fixture_to_v28(
             "output_workbook": output.relative_to(results).as_posix(),
             "scoring_workbook": bundle.scoring_copy.relative_to(results).as_posix(),
             "scoring_copy_sha256": bundle.final_artifact.sha256,
-            "completion_attempt_evaluations": [
-                evaluation.to_dict() for evaluation in evaluations
-            ],
+            "completion_attempt_evaluations": [evaluation.to_dict() for evaluation in evaluations],
             "completion_attempt_count": len(attempts),
             "budget": budget,
             "started_at": started_at,
@@ -808,14 +812,11 @@ def _promote_fixture_to_v28(
         {
             "schema_version": bundle.certificate["schema_version"],
             "candidate_outcome": bundle.certificate["candidate"]["outcome"],
-            "accepted_deliverable": (
-                bundle.certificate["candidate"]["outcome"] == "accepted_candidate"
-            ),
+            "accepted_deliverable": False,
+            "record_role": "observer_only_fresh_audit_required",
             "candidate_artifact": bundle.certificate["candidate"]["artifact"],
             "final_artifact": bundle.certificate["final_artifact"],
-            "scoring_copy_relative_path": bundle.certificate["scoring_copy"][
-                "relative_path"
-            ],
+            "scoring_copy_relative_path": bundle.certificate["scoring_copy"]["relative_path"],
             "certificate_sha256": bundle.certificate["certificate_sha256"],
         },
     )
@@ -836,10 +837,7 @@ def _promote_fixture_to_v28(
 
 def _v28_trajectory_events(results: Path, row: dict[str, Any]) -> list[dict[str, Any]]:
     trajectory = results / row["run_dir"] / "trajectory.jsonl"
-    return [
-        json.loads(line)
-        for line in trajectory.read_text(encoding="utf-8").splitlines()
-    ]
+    return [json.loads(line) for line in trajectory.read_text(encoding="utf-8").splitlines()]
 
 
 def _write_rehashed_v28_fixture(
@@ -857,9 +855,7 @@ def _write_rehashed_v28_fixture(
 
 
 def _rehash_deliverable_certificate(certificate: dict[str, Any]) -> None:
-    payload = {
-        key: value for key, value in certificate.items() if key != "certificate_sha256"
-    }
+    payload = {key: value for key, value in certificate.items() if key != "certificate_sha256"}
     certificate["certificate_sha256"] = _text_sha256(
         json.dumps(
             payload,
@@ -1106,9 +1102,7 @@ def _paper_budget_fixture(
         }
     }
     manifest["stage_allowed_tools"] = _stage_allowed_tools_policy(("paper",))
-    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
-        {"paper": caps}
-    )
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy({"paper": caps})
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
     old_run_dir = Path(row["run_dir"])
@@ -1139,8 +1133,7 @@ def _paper_budget_fixture(
         aggregate_timings.extend(json.loads(json.dumps(timings)))
         terminal_submissions = int(not is_failure and terminal_tool == "submit_result")
         tool_trace = [
-            {"name": tool_name, "ok": True}
-            for tool_name in ([] if is_failure else prefix)
+            {"name": tool_name, "ok": True} for tool_name in ([] if is_failure else prefix)
         ]
         stage_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         stage_budget = {
@@ -1170,9 +1163,7 @@ def _paper_budget_fixture(
                     if is_failure and name == "reconcile"
                     else terminal_tool
                 ),
-                "observed_terminal_tool": (
-                    "budget_exhausted" if is_failure else terminal_tool
-                ),
+                "observed_terminal_tool": ("budget_exhausted" if is_failure else terminal_tool),
                 "tool_name_trace": [item["name"] for item in tool_trace],
                 "tool_trace": json.loads(json.dumps(tool_trace)),
                 "agent": {
@@ -1224,9 +1215,7 @@ def _paper_budget_fixture(
                         "acknowledgement": {
                             "mode": "evidence_result",
                             "result_chars": len(final_text),
-                            "result_sha256": hashlib.sha256(
-                                final_text.encode("utf-8")
-                            ).hexdigest(),
+                            "result_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
                         },
                     },
                 }
@@ -1238,9 +1227,7 @@ def _paper_budget_fixture(
         aggregate_timings[-1]["input_tokens"] = used_tokens
         aggregate_timings[-1]["total_tokens"] = used_tokens
         timing_stage = next(
-            stage
-            for stage in reversed(stages)
-            if stage["agent"]["request_timings"]
+            stage for stage in reversed(stages) if stage["agent"]["request_timings"]
         )
         timing_stage["agent"]["request_timings"][-1]["input_tokens"] = used_tokens
         timing_stage["agent"]["request_timings"][-1]["total_tokens"] = used_tokens
@@ -1280,15 +1267,11 @@ def _paper_budget_fixture(
         )
     stages[-1]["agent"]["budget"] = json.loads(json.dumps(budget))
     aggregate_tool_trace = [
-        {"stage": stage["name"], **item}
-        for stage in stages
-        for item in stage["tool_trace"]
+        {"stage": stage["name"], **item} for stage in stages for item in stage["tool_trace"]
     ]
     aggregate_turns = sum(stage["agent"]["turns"] for stage in stages)
     aggregate_tool_calls = sum(stage["agent"]["tool_calls"] for stage in stages)
-    aggregate_terminal_submissions = sum(
-        stage["agent"]["terminal_submissions"] for stage in stages
-    )
+    aggregate_terminal_submissions = sum(stage["agent"]["terminal_submissions"] for stage in stages)
     row.update(
         {
             "arm": "paper",
@@ -1320,9 +1303,7 @@ def _paper_budget_fixture(
                 "request_timings": aggregate_timings,
                 "tool_trace": aggregate_tool_trace,
                 "terminal_submissions": aggregate_terminal_submissions,
-                "function_calls_total": (
-                    aggregate_tool_calls + aggregate_terminal_submissions
-                ),
+                "function_calls_total": (aggregate_tool_calls + aggregate_terminal_submissions),
                 "stages": stages,
                 "budget": budget,
             },
@@ -1344,9 +1325,11 @@ def _paper_scored_fixture(
     row = json.loads(json.dumps(row))
     stages = row["agent"]["stages"]
 
-    for budget in [row["budget"], row["agent"]["budget"], *(
-        stage["agent"]["budget"] for stage in stages
-    )]:
+    for budget in [
+        row["budget"],
+        row["agent"]["budget"],
+        *(stage["agent"]["budget"] for stage in stages),
+    ]:
         budget["termination"] = None
 
     for stage in stages:
@@ -1365,9 +1348,7 @@ def _paper_scored_fixture(
             acknowledgement = {
                 "mode": "evidence_result",
                 "result_chars": len(final_text),
-                "result_sha256": hashlib.sha256(
-                    final_text.encode("utf-8")
-                ).hexdigest(),
+                "result_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
             }
             stage_agent.update(
                 {
@@ -1382,9 +1363,7 @@ def _paper_scored_fixture(
             )
             stage["post_prefix_tool_choice"] = "auto"
         elif name == "reconcile":
-            stage_agent["final_text"] = (
-                "reconciled: true\nprovenance:\n- range: A1"
-            )
+            stage_agent["final_text"] = "reconciled: true\nprovenance:\n- range: A1"
             stage["post_prefix_tool_choice"] = None
         else:
             prefix = list(COMPARISON_FORCED_TOOL_PREFIX_POLICY["paper"]["solve"])
@@ -1418,14 +1397,10 @@ def _paper_scored_fixture(
             )
 
     aggregate_tool_trace = [
-        {"stage": stage["name"], **item}
-        for stage in stages
-        for item in stage["tool_trace"]
+        {"stage": stage["name"], **item} for stage in stages for item in stage["tool_trace"]
     ]
     aggregate_tool_calls = sum(stage["agent"]["tool_calls"] for stage in stages)
-    aggregate_terminal_submissions = sum(
-        stage["agent"]["terminal_submissions"] for stage in stages
-    )
+    aggregate_terminal_submissions = sum(stage["agent"]["terminal_submissions"] for stage in stages)
     final_agent = stages[-1]["agent"]
     row["agent"].update(
         {
@@ -1434,15 +1409,11 @@ def _paper_scored_fixture(
             "tool_calls": aggregate_tool_calls,
             "tool_trace": aggregate_tool_trace,
             "terminal_submissions": aggregate_terminal_submissions,
-            "function_calls_total": (
-                aggregate_tool_calls + aggregate_terminal_submissions
-            ),
+            "function_calls_total": (aggregate_tool_calls + aggregate_terminal_submissions),
             "post_prefix_tool_choice": "auto",
             "terminal_tool": "submit_result",
             "observed_terminal_tool": "submit_result",
-            "terminal_response": json.loads(
-                json.dumps(final_agent["terminal_response"])
-            ),
+            "terminal_response": json.loads(json.dumps(final_agent["terminal_response"])),
         }
     )
     row.update({"outcome_kind": "scored", "passed": True})
@@ -1551,9 +1522,7 @@ def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
     assert "mcnemar_exact_p" not in summary
     assert "stratified_bootstrap_95" not in summary
     assert "holm_adjusted_p" not in summary
-    assert summary["rows"][0]["output_sha256"] == summary["rows"][0][
-        "expected_output_sha256"
-    ]
+    assert summary["rows"][0]["output_sha256"] == summary["rows"][0]["expected_output_sha256"]
     assert _tree_hashes(tmp_path) == before
 
 
@@ -1612,6 +1581,98 @@ def test_v28_audit_scores_only_recorded_copy_and_detects_copy_tampering(
     )
 
 
+def test_v28_fresh_audit_scores_bound_snapshot_across_name_rename_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    scoring_copy = results / row["scoring_workbook"]
+    recorded_sha256 = _sha256(scoring_copy)
+    recorded_identity = scoring_copy.stat().st_dev, scoring_copy.stat().st_ino
+    alternate = tmp_path / "alternate-scoring.xlsx"
+    displaced = tmp_path / "displaced-scoring.xlsx"
+    _book(alternate, -1)
+    alternate.chmod(0o400)
+    original_compare = audit_module.compare_workbooks
+    observed: dict[str, Any] = {}
+
+    def compare_while_published_name_is_replaced(
+        golden_path: str | Path,
+        candidate_path: str | Path,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        candidate = Path(candidate_path)
+        if candidate == scoring_copy or candidate.name == "input.xlsx":
+            assert not observed
+            scoring_copy.replace(displaced)
+            alternate.replace(scoring_copy)
+            try:
+                observed["input_path"] = candidate
+                observed["input_sha256"] = _sha256(candidate)
+                return original_compare(golden_path, candidate, *args, **kwargs)
+            finally:
+                scoring_copy.replace(alternate)
+                displaced.replace(scoring_copy)
+        return original_compare(golden_path, candidate, *args, **kwargs)
+
+    monkeypatch.setattr(
+        audit_module,
+        "compare_workbooks",
+        compare_while_published_name_is_replaced,
+    )
+
+    report = audit_comparison(results, [task])
+
+    assert report["audit_valid"] is True
+    assert report["rows"][0]["fresh_comparison"]["passed"] is True
+    assert report["rows"][0]["accepted_deliverable"] is True
+    assert observed["input_path"] != scoring_copy
+    assert observed["input_sha256"] == recorded_sha256
+    restored = scoring_copy.stat()
+    assert (restored.st_dev, restored.st_ino) == recorded_identity
+    assert _sha256(scoring_copy) == recorded_sha256
+
+
+def test_v28_audit_keeps_legacy_v2_finalization_event_and_backend_compatible(
+    tmp_path: Path,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    _promote_fixture_to_v28(results, task, row)
+    certificate = row["deliverable_certificate"]
+    certificate["schema_version"] = LEGACY_DELIVERABLE_CERTIFICATE_SCHEMA_VERSION
+    del certificate["recalculation_attestation"]
+    recalculation = certificate["postprocess"]["recalculation"]
+    recalculation.update(
+        {
+            "backend": "legacy-test-recalculator",
+            "version": "1",
+            "profile": "isolated",
+            "atomic_replace": True,
+        }
+    )
+    del recalculation["publication"]
+    del recalculation["formula_scan"]
+    row["recalculation"] = json.loads(json.dumps(recalculation))
+    _rehash_deliverable_certificate(certificate)
+
+    events = _v28_trajectory_events(results, row)
+    finalization = next(
+        event for event in events if event["event"] == "observer.finalization_recorded"
+    )
+    finalization["payload"]["schema_version"] = LEGACY_DELIVERABLE_CERTIFICATE_SCHEMA_VERSION
+    finalization["payload"]["accepted_deliverable"] = True
+    del finalization["payload"]["record_role"]
+    finalization["payload"]["certificate_sha256"] = certificate["certificate_sha256"]
+    _write_rehashed_v28_fixture(results, row, events)
+
+    report = audit_comparison(results, [task])
+
+    assert report["audit_valid"] is True
+    assert report["rows"][0]["deliverable_lineage_valid"] is True
+
+
 def test_v28_audit_accepts_noncompletion_integrity_record_and_keeps_it_failed(
     tmp_path: Path,
 ) -> None:
@@ -1629,17 +1690,14 @@ def test_v28_audit_accepts_noncompletion_integrity_record_and_keeps_it_failed(
     assert audited["accepted_deliverable"] is False
     assert audited["accepted_completion_attempt_id"] is None
     assert row["artifact_score_passed"] is True
-    assert (
-        row["deliverable_certificate"]["candidate"]["outcome"]
-        == "audited_noncompletion"
-    )
+    assert row["deliverable_certificate"]["candidate"]["outcome"] == "audited_noncompletion"
     assert row["deliverable_certificate"]["candidate"]["evidence_certificate"] is None
 
 
 @pytest.mark.parametrize(
     ("model_failure", "tamper", "expected_reason"),
     [
-        (False, "accepted_false", "observer_finalization_event_binding_invalid"),
+        (False, "accepted_true", "observer_finalization_event_binding_invalid"),
         (False, "accepted_integer", "observer_finalization_event_binding_invalid"),
         (True, "accepted_true", "observer_finalization_event_binding_invalid"),
         (True, "forged_accepted", "observer_finalization_event_binding_invalid"),
@@ -1657,17 +1715,13 @@ def test_v28_audit_rejects_forged_observer_finalization_event(
     _promote_fixture_to_v28(results, task, row, model_failure=model_failure)
     events = _v28_trajectory_events(results, row)
     finalization = next(
-        event
-        for event in events
-        if event["event"] == "observer.finalization_recorded"
+        event for event in events if event["event"] == "observer.finalization_recorded"
     )
     payload = finalization["payload"]
-    if tamper == "accepted_false":
-        payload["accepted_deliverable"] = False
+    if tamper == "accepted_true":
+        payload["accepted_deliverable"] = True
     elif tamper == "accepted_integer":
         payload["accepted_deliverable"] = 1
-    elif tamper == "accepted_true":
-        payload["accepted_deliverable"] = True
     elif tamper == "forged_accepted":
         payload["candidate_outcome"] = "accepted_candidate"
         payload["accepted_deliverable"] = True
@@ -1683,6 +1737,7 @@ def test_v28_audit_rejects_forged_observer_finalization_event(
 
     assert rejected["audit_valid"] is False
     assert f"task-1::bare:{expected_reason}" in rejected["reasons"]
+    assert rejected["rows"][0]["accepted_deliverable"] is False
 
 
 def test_v28_audit_binds_manifest_and_row_evidence_runtime(tmp_path: Path) -> None:
@@ -1735,9 +1790,7 @@ def test_v28_audit_requires_grounding_for_a_solve_stage(tmp_path: Path) -> None:
         }
     )
     certificate_payload = {
-        key: value
-        for key, value in certificate.items()
-        if key != "certificate_sha256"
+        key: value for key, value in certificate.items() if key != "certificate_sha256"
     }
     certificate["certificate_sha256"] = _text_sha256(
         json.dumps(
@@ -1748,14 +1801,9 @@ def test_v28_audit_requires_grounding_for_a_solve_stage(tmp_path: Path) -> None:
         )
     )
     trajectory = results / row["run_dir"] / "trajectory.jsonl"
-    events = [
-        json.loads(line)
-        for line in trajectory.read_text(encoding="utf-8").splitlines()
-    ]
+    events = [json.loads(line) for line in trajectory.read_text(encoding="utf-8").splitlines()]
     finalization = next(
-        event
-        for event in events
-        if event["event"] == "observer.finalization_recorded"
+        event for event in events if event["event"] == "observer.finalization_recorded"
     )
     finalization["payload"]["certificate_sha256"] = certificate["certificate_sha256"]
     trajectory.write_text(
@@ -1768,10 +1816,7 @@ def test_v28_audit_requires_grounding_for_a_solve_stage(tmp_path: Path) -> None:
     rejected = audit_comparison(results, [task])
 
     assert rejected["audit_valid"] is False
-    assert (
-        "task-1::bare:deliverable_target_grounding_not_enforced"
-        in rejected["reasons"]
-    )
+    assert "task-1::bare:deliverable_target_grounding_not_enforced" in rejected["reasons"]
 
 
 def test_v28_audit_rejects_reordered_posthoc_events_with_rehashed_trajectory(
@@ -1815,9 +1860,7 @@ def test_v28_audit_binds_accepted_attempt_call_id_to_trajectory(
     _promote_fixture_to_v28(results, task, row)
     trajectory = results / row["run_dir"] / "trajectory.jsonl"
     events = [json.loads(line) for line in trajectory.read_text(encoding="utf-8").splitlines()]
-    accepted = next(
-        event for event in events if event["event"] == "agent.terminal_submitted"
-    )
+    accepted = next(event for event in events if event["event"] == "agent.terminal_submitted")
     accepted["payload"]["completion_attempt_call_id"] = "different-terminal-call"
     trajectory.write_text(
         "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
@@ -1830,8 +1873,7 @@ def test_v28_audit_binds_accepted_attempt_call_id_to_trajectory(
 
     assert rejected["audit_valid"] is False
     assert (
-        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid"
-        in rejected["reasons"]
+        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid" in rejected["reasons"]
     )
 
 
@@ -1872,10 +1914,7 @@ def test_v28_audit_rejects_capture_before_model_response_after_rehash(
     rejected = audit_comparison(results, [task])
 
     assert rejected["audit_valid"] is False
-    assert (
-        "task-1::bare:completion_attempt_model_call_binding_invalid"
-        in rejected["reasons"]
-    )
+    assert "task-1::bare:completion_attempt_model_call_binding_invalid" in rejected["reasons"]
 
 
 @pytest.mark.parametrize(
@@ -1894,9 +1933,7 @@ def test_v28_audit_rejects_missing_agent_terminal_event_after_rehash(
     results, task, row = _fixture(tmp_path)
     _promote_fixture_to_v28(results, task, row, model_failure=model_failure)
     events = [
-        event
-        for event in _v28_trajectory_events(results, row)
-        if event["event"] != event_name
+        event for event in _v28_trajectory_events(results, row) if event["event"] != event_name
     ]
     _write_rehashed_v28_fixture(results, row, events)
 
@@ -1930,9 +1967,7 @@ def test_v28_audit_rejects_response_call_or_attempt_id_mismatch_after_rehash(
         responded["payload"]["function_calls"][0]["call_id"] = "different-call"
     else:
         checked = next(
-            event
-            for event in events
-            if event["event"] == "evidence_contract.submission_checked"
+            event for event in events if event["event"] == "evidence_contract.submission_checked"
         )
         checked["payload"]["completion_attempt_id"] = 999
     _write_rehashed_v28_fixture(results, row, events)
@@ -1950,9 +1985,7 @@ def test_v28_audit_rejects_denied_attempt_forged_as_accepted_after_rehash(
     _promote_fixture_to_v28(results, task, row)
     events = _v28_trajectory_events(results, row)
     checked = next(
-        event
-        for event in events
-        if event["event"] == "evidence_contract.submission_checked"
+        event for event in events if event["event"] == "evidence_contract.submission_checked"
     )
     checked["payload"]["decision"].update(
         {
@@ -1969,8 +2002,7 @@ def test_v28_audit_rejects_denied_attempt_forged_as_accepted_after_rehash(
 
     assert rejected["audit_valid"] is False
     assert (
-        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid"
-        in rejected["reasons"]
+        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid" in rejected["reasons"]
     )
 
 
@@ -1981,9 +2013,7 @@ def test_v28_audit_rejects_duplicate_terminal_submit_after_rehash(
     _promote_fixture_to_v28(results, task, row)
     events = _v28_trajectory_events(results, row)
     terminal_index = next(
-        index
-        for index, event in enumerate(events)
-        if event["event"] == "agent.terminal_submitted"
+        index for index, event in enumerate(events) if event["event"] == "agent.terminal_submitted"
     )
     events.insert(
         terminal_index + 1,
@@ -1995,8 +2025,7 @@ def test_v28_audit_rejects_duplicate_terminal_submit_after_rehash(
 
     assert rejected["audit_valid"] is False
     assert (
-        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid"
-        in rejected["reasons"]
+        "task-1::bare:accepted_completion_attempt_trajectory_binding_invalid" in rejected["reasons"]
     )
 
 
@@ -2017,9 +2046,7 @@ def test_v28_audit_rejects_altered_or_contradictory_terminal_event_after_rehash(
         else "agent.completed"
     )
     source_index = next(
-        index
-        for index, event in enumerate(events)
-        if event["event"] == source_name
+        index for index, event in enumerate(events) if event["event"] == source_name
     )
     forged = json.loads(json.dumps(events[source_index]))
     forged["event"] = extra_event
@@ -2055,10 +2082,7 @@ def test_v28_audit_rejects_missing_model_call_after_rehash(tmp_path: Path) -> No
     rejected = audit_comparison(results, [task])
 
     assert rejected["audit_valid"] is False
-    assert (
-        "task-1::bare:completion_attempt_model_call_binding_invalid"
-        in rejected["reasons"]
-    )
+    assert "task-1::bare:completion_attempt_model_call_binding_invalid" in rejected["reasons"]
 
 
 def test_v28_audit_rejects_uncaptured_submit_call_after_rehash(
@@ -2080,10 +2104,7 @@ def test_v28_audit_rejects_uncaptured_submit_call_after_rehash(
     rejected = audit_comparison(results, [task])
 
     assert rejected["audit_valid"] is False
-    assert (
-        "task-1::bare:completion_attempt_model_call_coverage_invalid"
-        in rejected["reasons"]
-    )
+    assert "task-1::bare:completion_attempt_model_call_coverage_invalid" in rejected["reasons"]
 
 
 def test_v28_audit_rejects_reprompt_after_next_model_response_after_rehash(
@@ -2107,10 +2128,7 @@ def test_v28_audit_rejects_reprompt_after_next_model_response_after_rehash(
     rejected = audit_comparison(results, [task])
 
     assert rejected["audit_valid"] is False
-    assert (
-        "task-1::bare:denied_completion_attempt_lifecycle_invalid"
-        in rejected["reasons"]
-    )
+    assert "task-1::bare:denied_completion_attempt_lifecycle_invalid" in rejected["reasons"]
 
 
 @pytest.mark.parametrize("event_name", ["model.responded", "tool.returned"])
@@ -2153,10 +2171,7 @@ def test_v28_audit_rejects_unchecked_attempt_without_failure_after_rehash(
     rejected = audit_comparison(results, [task])
 
     assert rejected["audit_valid"] is False
-    assert (
-        "task-1::bare:completion_attempt_abort_binding_invalid"
-        in rejected["reasons"]
-    )
+    assert "task-1::bare:completion_attempt_abort_binding_invalid" in rejected["reasons"]
 
 
 def test_v28_audit_rejects_rehashed_deliverable_certificate_tampering(
@@ -2169,9 +2184,7 @@ def test_v28_audit_rejects_rehashed_deliverable_certificate_tampering(
     _rehash_deliverable_certificate(certificate)
     events = _v28_trajectory_events(results, row)
     finalization = next(
-        event
-        for event in events
-        if event["event"] == "observer.finalization_recorded"
+        event for event in events if event["event"] == "observer.finalization_recorded"
     )
     finalization["payload"]["certificate_sha256"] = certificate["certificate_sha256"]
     _write_rehashed_v28_fixture(results, row, events)
@@ -2227,15 +2240,11 @@ def test_v28_audit_rejects_observer_timing_tampering_after_rehash(
 
 
 def test_live_v23_pilot_audit_has_no_version_drift_false_positives() -> None:
-    results = Path(
-        "benchmarks/results/qwen36-local-pilot16-v2-bare-ours-v23-seed41"
-    )
+    results = Path("benchmarks/results/qwen36-local-pilot16-v2-bare-ours-v23-seed41")
     dataset = Path("benchmarks/data/spreadsheetbench_verified_400")
     if not results.is_dir() or not dataset.is_dir():
         pytest.skip("ignored historical v23 pilot artifacts are not available")
-    manifest = json.loads(
-        (results / "comparison-manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((results / "comparison-manifest.json").read_text(encoding="utf-8"))
     from spreadsheet_harness.benchmark import load_verified_tasks
 
     tasks_by_id = {task.task_id: task for task in load_verified_tasks(dataset)}
@@ -2259,9 +2268,7 @@ def test_live_v23_pilot_audit_has_no_version_drift_false_positives() -> None:
 
     assert not (set(summary["reasons"]) & forbidden_exact)
     assert not any(
-        fragment in reason
-        for reason in summary["reasons"]
-        for fragment in forbidden_fragments
+        fragment in reason for reason in summary["reasons"] for fragment in forbidden_fragments
     )
     assert summary["valid_rows"] == 9
     assert summary["known_passed_rows"] == 6
@@ -2284,9 +2291,7 @@ def test_audit_accepts_known_model_execution_failure_as_completed_false(
             "model_failure_reason": "workbook_unchanged",
         }
     )
-    (results / "results.jsonl").write_text(
-        json.dumps(row) + "\n", encoding="utf-8"
-    )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     summary = audit_comparison(results, [task])
 
@@ -2323,9 +2328,7 @@ def test_v26_audit_rejects_accepted_response_on_model_execution_failure(
     if target == "aggregate":
         row["agent"]["terminal_response"] = accepted_response
     else:
-        row["agent"]["stages"][-1]["agent"][
-            "terminal_response"
-        ] = accepted_response
+        row["agent"]["stages"][-1]["agent"]["terminal_response"] = accepted_response
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     summary = audit_comparison(results, [task])
@@ -2388,9 +2391,7 @@ def test_audit_accepts_only_one_provable_response_token_overage(
     assert accepted["audit_valid"] is True
     assert not _row_reason(accepted, "budget_used_invalid:total_tokens")
 
-    for timing, tokens in zip(
-        row["agent"]["request_timings"], (50, 50, 10), strict=True
-    ):
+    for timing, tokens in zip(row["agent"]["request_timings"], (50, 50, 10), strict=True):
         timing["input_tokens"] = tokens
         timing["output_tokens"] = 0
         timing["total_tokens"] = tokens
@@ -2482,9 +2483,7 @@ def test_nonbudget_failure_still_requires_exact_forced_prefix(
             "model_failure_reason": "workbook_unchanged",
         }
     )
-    row["agent"]["stages"][0]["observed_forced_tool_prefix"] = [
-        "code_interpreter"
-    ]
+    row["agent"]["stages"][0]["observed_forced_tool_prefix"] = ["code_interpreter"]
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     summary = audit_comparison(results, [task])
@@ -2559,9 +2558,7 @@ def test_paper_reconcile_budget_terminal_depends_on_failure_path(
 
     zero_row = json.loads(json.dumps(zero_row))
     zero_row["agent"]["stages"][-1]["terminal_tool"] = None
-    (zero_results / "results.jsonl").write_text(
-        json.dumps(zero_row) + "\n", encoding="utf-8"
-    )
+    (zero_results / "results.jsonl").write_text(json.dumps(zero_row) + "\n", encoding="utf-8")
     zero_rejected = audit_comparison(zero_results, [zero_task])
     assert zero_rejected["audit_valid"] is False
     assert _row_reason(zero_rejected, "agent_terminal_tool_mismatch:reconcile")
@@ -2641,8 +2638,9 @@ def test_v24_contract_keeps_historical_failure_taxonomy_and_budget_rule(
     assert summary["audit_valid"] is False
     assert _row_reason(summary, "model_execution_failure_reason_invalid")
     assert _row_reason(summary, "budget_used_invalid:total_tokens")
-    assert manifest["configuration"]["model_execution_failure_reasons"] != (
-        COMPARISON_CONFIGURATION_POLICIES["model_execution_failure_reasons"]
+    assert (
+        manifest["configuration"]["model_execution_failure_reasons"]
+        != (COMPARISON_CONFIGURATION_POLICIES["model_execution_failure_reasons"])
     )
 
 
@@ -2828,9 +2826,7 @@ def test_v26_audit_accepts_exact_truncated_terminal_evidence(tmp_path: Path) -> 
     summary = audit_comparison(results, [task])
 
     assert summary["audit_valid"] is True
-    assert summary["rows"][0]["model_failure_reason"] == (
-        "terminal_submission_truncated"
-    )
+    assert summary["rows"][0]["model_failure_reason"] == ("terminal_submission_truncated")
 
 
 def test_v26_audit_accepts_budget_precedence_with_truncated_response(
@@ -2905,9 +2901,7 @@ def test_v26_audit_rejects_evidence_result_for_bare_solve(tmp_path: Path) -> Non
     final_agent["final_text"] = final_text
     final_agent["terminal_response"]["acknowledgement"] = acknowledgement
     row["agent"]["final_text"] = final_text
-    row["agent"]["terminal_response"] = json.loads(
-        json.dumps(final_agent["terminal_response"])
-    )
+    row["agent"]["terminal_response"] = json.loads(json.dumps(final_agent["terminal_response"]))
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     summary = audit_comparison(results, [task])
@@ -2943,9 +2937,7 @@ def test_v26_audit_rejects_terminal_response_mode_for_wrong_paper_stage(
 ) -> None:
     results, task, row = _paper_scored_fixture(tmp_path)
     row = json.loads(json.dumps(row))
-    stage = next(
-        item for item in row["agent"]["stages"] if item["name"] == stage_name
-    )
+    stage = next(item for item in row["agent"]["stages"] if item["name"] == stage_name)
     stage_agent = stage["agent"]
     response_id = stage_agent["response_id"]
     if wrong_mode == "empty_ack":
@@ -2960,16 +2952,12 @@ def test_v26_audit_rejects_terminal_response_mode_for_wrong_paper_stage(
             "acknowledgement": {
                 "mode": "evidence_result",
                 "result_chars": len(final_text),
-                "result_sha256": hashlib.sha256(
-                    final_text.encode("utf-8")
-                ).hexdigest(),
+                "result_sha256": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
             },
         }
     if stage_name == "solve":
         row["agent"]["final_text"] = stage_agent["final_text"]
-        row["agent"]["terminal_response"] = json.loads(
-            json.dumps(stage_agent["terminal_response"])
-        )
+        row["agent"]["terminal_response"] = json.loads(json.dumps(stage_agent["terminal_response"]))
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     summary = audit_comparison(results, [task])
@@ -3172,9 +3160,7 @@ def test_audit_rejects_tampered_model_execution_failure_taxonomy(
         }
     )
     row[field] = value
-    (results / "results.jsonl").write_text(
-        json.dumps(row) + "\n", encoding="utf-8"
-    )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     summary = audit_comparison(results, [task])
 
@@ -3240,16 +3226,10 @@ def test_audit_allows_missing_empty_journal_when_every_key_is_sealed(
 def test_audit_binds_result_to_exact_continuation_source(tmp_path: Path) -> None:
     results, task, row = _fixture(tmp_path)
     continuation = _continuation_source(results)
-    manifest = json.loads(
-        (results / "comparison-manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((results / "comparison-manifest.json").read_text(encoding="utf-8"))
     manifest["repository_source"] = continuation["repository_source"]
-    (results / "comparison-manifest.json").write_text(
-        json.dumps(manifest) + "\n", encoding="utf-8"
-    )
-    row["comparison_manifest_sha256"] = _sha256(
-        results / "comparison-manifest.json"
-    )
+    (results / "comparison-manifest.json").write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(results / "comparison-manifest.json")
     continuation = _continuation_source(results)
     _write_continuation_source(results, continuation)
     row["continuation_source"] = continuation
@@ -3282,9 +3262,7 @@ def test_audit_rejects_manifest_continuation_repository_source_mismatch(
     continuation = _continuation_source(results)
     _write_continuation_source(results, continuation)
     row["continuation_source"] = continuation
-    (results / "results.jsonl").write_text(
-        json.dumps(row) + "\n", encoding="utf-8"
-    )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
     summary = audit_comparison(results, [task])
 
@@ -3299,12 +3277,8 @@ def test_audit_rejects_registered_v27_manifest_not_bound_to_current_git(
     results, task, _ = _fixture(tmp_path)
     manifest_path = results / "comparison-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["split_provenance"] = {
-        "manifest_id": "qwen35-trace2skill-local-v27-reserve79-v1"
-    }
-    manifest["repository_source"] = _continuation_source(results)[
-        "repository_source"
-    ]
+    manifest["split_provenance"] = {"manifest_id": "qwen35-trace2skill-local-v27-reserve79-v1"}
+    manifest["repository_source"] = _continuation_source(results)["repository_source"]
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
     monkeypatch.setattr(
         "spreadsheet_harness.audit._current_repository_git_identity",
@@ -3434,9 +3408,7 @@ def test_audit_rejects_result_row_conflicting_with_interrupted_seal(
     summary = audit_comparison(results, [task])
 
     assert summary["journal_integrity_valid"] is False
-    assert "result_row_conflicts_with_interrupted_seal:task-1::bare" in summary[
-        "reasons"
-    ]
+    assert "result_row_conflicts_with_interrupted_seal:task-1::bare" in summary["reasons"]
 
 
 def test_audit_rejects_split_provenance_tampering(tmp_path: Path) -> None:
@@ -3447,13 +3419,9 @@ def test_audit_rejects_split_provenance_tampering(tmp_path: Path) -> None:
     provenance = {
         "manifest_id": "qwen35-trace2skill-local-unattempted-pilot16-v2",
         "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
-        "manifest_sha256": (
-            "f29d6e5627161b355c24acfbda6c5dcc250d12b5f4933d3c3fb0c50a8bac39b3"
-        ),
+        "manifest_sha256": ("f29d6e5627161b355c24acfbda6c5dcc250d12b5f4933d3c3fb0c50a8bac39b3"),
         "task_count": len(task_ids),
-        "task_ids_sha256": _text_sha256(
-            "".join(f"{task_id}\n" for task_id in task_ids)
-        ),
+        "task_ids_sha256": _text_sha256("".join(f"{task_id}\n" for task_id in task_ids)),
         "dataset_json_sha256": manifest["dataset_manifest_sha256"],
     }
     manifest["split_provenance"] = provenance
@@ -3548,9 +3516,7 @@ def test_audit_rejects_protocol_provenance_mismatch(
 ) -> None:
     results, task, row = _fixture(tmp_path)
     path = (
-        results / "comparison-manifest.json"
-        if target == "manifest"
-        else results / "results.jsonl"
+        results / "comparison-manifest.json" if target == "manifest" else results / "results.jsonl"
     )
     if target == "manifest":
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -3765,9 +3731,7 @@ def test_audit_rejects_tampered_workbook(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("path_field", ["run_dir", "output_workbook"])
-def test_audit_rejects_artifact_path_outside_managed_arm(
-    tmp_path: Path, path_field: str
-) -> None:
+def test_audit_rejects_artifact_path_outside_managed_arm(tmp_path: Path, path_field: str) -> None:
     results, task, row = _fixture(tmp_path)
     outside_run = tmp_path / "outside"
     outside_output = outside_run / "artifacts" / "output.xlsx"

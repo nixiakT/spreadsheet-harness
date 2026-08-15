@@ -622,9 +622,7 @@ class WorkbookSession:
                             committed_advisory.canonical_json()
                         ),
                         "target_grounding_mode": TargetGroundingMode.ADVISORY.value,
-                        "target_grounding_decision": (
-                            "published_after_advisory_assessment"
-                        ),
+                        "target_grounding_decision": ("published_after_advisory_assessment"),
                         "target_grounding_would_reject": (
                             committed_advisory.assessment.would_reject
                         ),
@@ -649,9 +647,7 @@ class WorkbookSession:
                     "mode": TargetGroundingMode.ADVISORY.value,
                     "decision": "published_after_advisory_assessment",
                     "would_reject": committed_advisory.assessment.would_reject,
-                    "target_grounding_advisory_commit_json": (
-                        committed_advisory.canonical_json()
-                    ),
+                    "target_grounding_advisory_commit_json": (committed_advisory.canonical_json()),
                 },
             )
         if gate is not None:
@@ -1988,6 +1984,88 @@ class WorkbookSession:
             finally:
                 if not keep_snapshot:
                     snapshot.unlink(missing_ok=True)
+
+    def recalculate_for_finalization(
+        self,
+        *,
+        timeout_seconds: float = 120.0,
+    ) -> dict[str, Any]:
+        """Return a byte-identical no-op only after an independent formula scan.
+
+        Formula-bearing and ambiguous packages fail before any snapshot, trajectory
+        event, artifact transition, or LibreOffice process is created. A future
+        cache-preserving formula path can extend this boundary transactionally.
+        """
+
+        from .ooxml_formula_scan import (
+            OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+            OOXML_NO_FORMULA_BACKEND,
+            OOXML_NO_FORMULA_PROFILE,
+            OOXMLFormulaScanError,
+            OOXMLFormulaScanLease,
+        )
+
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
+            raise ToolInputError("timeout_seconds must be numeric")
+        if timeout_seconds <= 0:
+            raise ToolInputError("timeout_seconds must be positive")
+
+        with self._write_lock:
+            self._assert_artifact_sync_locked()
+            artifact = self._artifact
+            if hashlib.sha256(self._artifact_bytes).hexdigest() != artifact.sha256:
+                raise WorkbookValidationError(
+                    "Cached artifact bytes do not match the finalization candidate"
+                )
+            try:
+                with OOXMLFormulaScanLease.open(self.workbook_path) as scan_lease:
+                    scan = scan_lease.scan
+                    if (
+                        scan.package_sha256 != artifact.sha256
+                        or scan_lease.snapshot_bytes != self._artifact_bytes
+                    ):
+                        raise WorkbookValidationError(
+                            "Formula scan is not bound to the managed artifact revision"
+                        )
+                    if scan.has_formulas:
+                        raise WorkbookValidationError(
+                            "Formula-bearing finalization requires a cache-preserving "
+                            "transactional recalculation backend"
+                        )
+                    result = {
+                        "backend": OOXML_NO_FORMULA_BACKEND,
+                        "version": OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+                        "profile": OOXML_NO_FORMULA_PROFILE,
+                        "format": scan.workbook_format,
+                        "source_sha256": artifact.sha256,
+                        "output_sha256": artifact.sha256,
+                        "atomic_replace": False,
+                        "publication": "verified_no_write",
+                        "workbook_sha256_before": artifact.sha256,
+                        "workbook_sha256_after": artifact.sha256,
+                        "workbook_changed": False,
+                        "artifact_revision_before": artifact.revision,
+                        "artifact_revision_after": artifact.revision,
+                        "artifact_transition_id": None,
+                        "formula_scan": scan.to_dict(),
+                        "workbook_effects": {
+                            "schema_version": "workbook-effect-diff-v1",
+                            "semantic_changed": False,
+                            "complete": True,
+                            "effects": [],
+                            "scope": EvidenceScope().to_dict(),
+                            "formula_scope": EvidenceScope().to_dict(),
+                            "changed_cell_count": 0,
+                            "scanned_cell_count": scan.scanned_cell_count,
+                            "reasons": [],
+                        },
+                    }
+                    scan_lease.verify_binding(checkpoint="session_finalization")
+                    return result
+            except OOXMLFormulaScanError as exc:
+                raise WorkbookValidationError(
+                    "Finalization cannot certify a safe no-formula recalculation"
+                ) from exc
 
     def write_manifest(self, values: dict[str, Any]) -> Path:
         path = self.paths.root / "run.json"

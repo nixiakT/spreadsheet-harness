@@ -9,12 +9,15 @@ SHA-256 digests, not private-key signatures or hostile-storage authentication.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
+import io
 import json
 import os
 import re
-import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -45,13 +48,13 @@ from .target_grounding import (
     validate_committed_authorization_chain,
 )
 
-DELIVERABLE_CERTIFICATE_SCHEMA_VERSION = "spreadsheet-deliverable-certificate-v2"
+LEGACY_DELIVERABLE_CERTIFICATE_SCHEMA_VERSION = "spreadsheet-deliverable-certificate-v2"
+DELIVERABLE_CERTIFICATE_SCHEMA_VERSION = "spreadsheet-deliverable-certificate-v3"
+NO_FORMULA_ATTESTATION_SCHEMA_VERSION = "ooxml-no-formula-finalization-witness-v1"
 TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION = "target-grounding-commit-chain-v1"
-ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION = (
-    "target-grounding-observer-ledger-v2"
-)
+ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION = "target-grounding-observer-ledger-v2"
 COMPARISON_RESULT_SCHEMA_VERSION = "spreadsheet-comparison-result-v28"
-SCORING_COPY_RELATIVE_PATH = "scoring/output.xlsx"
+SCORING_COPY_RELATIVE_PATH = "scoring-output.xlsx"
 FINAL_RENDER_RELATIVE_DIR = "postprocess/final-render"
 _AUTHORIZATION_CHAIN_GENESIS_SHA256 = "0" * 64
 _ACCEPTED_CANDIDATE = "accepted_candidate"
@@ -143,6 +146,8 @@ class _DeliverableSession(Protocol):
 
     def recalculate(self, *, timeout_seconds: float = 120.0) -> dict[str, Any]: ...
 
+    def recalculate_for_finalization(self, *, timeout_seconds: float = 120.0) -> dict[str, Any]: ...
+
 
 @dataclass(frozen=True)
 class DeliverableBundle:
@@ -153,6 +158,222 @@ class DeliverableBundle:
     scoring_copy: Path
     recalculation: dict[str, Any]
     certificate: dict[str, Any]
+
+
+@dataclass
+class _ScoringCopyPublication:
+    sha256: str
+    identity: tuple[int, int]
+    source_path: Path
+    destination_path: Path
+    source_identity: tuple[int, int, int, int, int, int, int]
+    source_parent_identity: tuple[int, int]
+    workspace_identity: tuple[int, int]
+    source_descriptor: int | None
+    source_parent_descriptor: int | None
+    scoring_descriptor: int | None
+    workspace_descriptor: int | None
+
+    def _require_open(self) -> tuple[int, int, int, int]:
+        descriptors = (
+            self.source_descriptor,
+            self.source_parent_descriptor,
+            self.scoring_descriptor,
+            self.workspace_descriptor,
+        )
+        if any(descriptor is None for descriptor in descriptors):
+            raise DeliverableValidationError("Scoring publication lease is closed")
+        return tuple(descriptors)  # type: ignore[return-value]
+
+    def verify(self) -> None:
+        (
+            source_descriptor,
+            source_parent_descriptor,
+            scoring_descriptor,
+            workspace_descriptor,
+        ) = self._require_open()
+        try:
+            _validate_real_directory_path(
+                self.source_path.parent,
+                expected_identity=self.source_parent_identity,
+                label="scoring source parent",
+            )
+            _validate_real_directory_path(
+                self.destination_path.parent,
+                expected_identity=self.workspace_identity,
+                label="scoring workspace",
+            )
+            source_descriptor_metadata = os.fstat(source_descriptor)
+            source_name_metadata = os.stat(
+                self.source_path.name,
+                dir_fd=source_parent_descriptor,
+                follow_symlinks=False,
+            )
+            source_path_metadata = self.source_path.lstat()
+            if not all(
+                _stable_file_identity(metadata) == self.source_identity
+                for metadata in (
+                    source_descriptor_metadata,
+                    source_name_metadata,
+                    source_path_metadata,
+                )
+            ):
+                raise DeliverableValidationError(
+                    "Scoring source changed identity during finalization"
+                )
+            if (
+                not stat.S_ISREG(source_descriptor_metadata.st_mode)
+                or source_descriptor_metadata.st_nlink != 1
+                or _sha256_descriptor(
+                    source_descriptor,
+                    expected_size=source_descriptor_metadata.st_size,
+                )
+                != self.sha256
+            ):
+                raise DeliverableValidationError(
+                    "Scoring source changed contents during finalization"
+                )
+            if any(
+                _stable_file_identity(metadata) != self.source_identity
+                for metadata in (
+                    os.fstat(source_descriptor),
+                    os.stat(
+                        self.source_path.name,
+                        dir_fd=source_parent_descriptor,
+                        follow_symlinks=False,
+                    ),
+                    self.source_path.lstat(),
+                )
+            ):
+                raise DeliverableValidationError(
+                    "Scoring source changed identity during finalization"
+                )
+
+            workspace_descriptor_metadata = os.fstat(workspace_descriptor)
+            workspace_path_metadata = self.destination_path.parent.lstat()
+            if not stat.S_ISDIR(workspace_descriptor_metadata.st_mode) or any(
+                (metadata.st_dev, metadata.st_ino) != self.workspace_identity
+                for metadata in (
+                    workspace_descriptor_metadata,
+                    workspace_path_metadata,
+                )
+            ):
+                raise DeliverableValidationError(
+                    "Scoring workspace changed identity during finalization"
+                )
+
+            scoring_descriptor_metadata = os.fstat(scoring_descriptor)
+            scoring_stable_identity = _stable_file_identity(scoring_descriptor_metadata)
+            scoring_name_metadata = os.stat(
+                self.destination_path.name,
+                dir_fd=workspace_descriptor,
+                follow_symlinks=False,
+            )
+            scoring_path_metadata = self.destination_path.lstat()
+            if (
+                not stat.S_ISREG(scoring_descriptor_metadata.st_mode)
+                or (
+                    scoring_descriptor_metadata.st_dev,
+                    scoring_descriptor_metadata.st_ino,
+                )
+                != self.identity
+                or scoring_descriptor_metadata.st_nlink != 1
+                or stat.S_IMODE(scoring_descriptor_metadata.st_mode) != 0o400
+                or scoring_descriptor_metadata.st_size != source_descriptor_metadata.st_size
+                or any(
+                    _stable_file_identity(metadata) != scoring_stable_identity
+                    for metadata in (
+                        scoring_descriptor_metadata,
+                        scoring_name_metadata,
+                        scoring_path_metadata,
+                    )
+                )
+                or _sha256_descriptor(
+                    scoring_descriptor,
+                    expected_size=scoring_descriptor_metadata.st_size,
+                )
+                != self.sha256
+            ):
+                raise DeliverableValidationError(
+                    "Scoring replica changed identity or contents during finalization"
+                )
+            if any(
+                _stable_file_identity(metadata) != scoring_stable_identity
+                for metadata in (
+                    os.fstat(scoring_descriptor),
+                    os.stat(
+                        self.destination_path.name,
+                        dir_fd=workspace_descriptor,
+                        follow_symlinks=False,
+                    ),
+                    self.destination_path.lstat(),
+                )
+            ):
+                raise DeliverableValidationError(
+                    "Scoring replica changed identity or contents during finalization"
+                )
+            _validate_real_directory_path(
+                self.destination_path.parent,
+                expected_identity=self.workspace_identity,
+                label="scoring workspace",
+            )
+            _validate_real_directory_path(
+                self.source_path.parent,
+                expected_identity=self.source_parent_identity,
+                label="scoring source parent",
+            )
+            final_workspace_metadata = os.fstat(workspace_descriptor)
+            if (
+                not stat.S_ISDIR(final_workspace_metadata.st_mode)
+                or (
+                    final_workspace_metadata.st_dev,
+                    final_workspace_metadata.st_ino,
+                )
+                != self.workspace_identity
+            ):
+                raise DeliverableValidationError(
+                    "Scoring workspace changed identity during finalization"
+                )
+        except DeliverableValidationError:
+            raise
+        except OSError as exc:
+            raise DeliverableValidationError(
+                "Failed to verify the live scoring publication lease"
+            ) from exc
+
+    def close(self) -> None:
+        failure: OSError | None = None
+        for attribute in (
+            "scoring_descriptor",
+            "source_descriptor",
+            "source_parent_descriptor",
+            "workspace_descriptor",
+        ):
+            descriptor = getattr(self, attribute)
+            setattr(self, attribute, None)
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                failure = failure or exc
+        if failure is not None:
+            raise DeliverableValidationError(
+                "Failed to close the scoring publication lease"
+            ) from failure
+
+    def commit(self) -> None:
+        self.verify()
+        self.close()
+
+    def rollback(self) -> None:
+        """Abandon the lease without mutating a published namespace.
+
+        Once the anonymous inode is linked, retaining that immutable name is the
+        only race-safe failure behavior; a later finalization attempt adopts it.
+        """
+
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -823,6 +1044,55 @@ def _sanitized_workbook_effects(
     return normalized
 
 
+def _sanitized_formula_scan(value: Any, *, artifact: ArtifactRef) -> dict[str, Any]:
+    from .ooxml_formula_scan import (
+        OOXML_FORMULA_POLICY_VERSION,
+        OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+    )
+
+    expected = {
+        "schema_version",
+        "formula_policy_version",
+        "package_sha256",
+        "workbook_format",
+        "xml_part_count",
+        "worksheet_count",
+        "scanned_cell_count",
+        "formula_marker_count",
+        "formula_kinds",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise DeliverableValidationError("Formula scan attestation schema is invalid")
+    if (
+        value.get("schema_version") != OOXML_FORMULA_SCAN_SCHEMA_VERSION
+        or value.get("formula_policy_version") != OOXML_FORMULA_POLICY_VERSION
+        or value.get("package_sha256") != artifact.sha256
+        or value.get("workbook_format") not in {"xlsx", "xlsm"}
+    ):
+        raise DeliverableValidationError("Formula scan attestation binding is invalid")
+    for field in (
+        "xml_part_count",
+        "worksheet_count",
+        "scanned_cell_count",
+        "formula_marker_count",
+    ):
+        item = value.get(field)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise DeliverableValidationError("Formula scan attestation counts are invalid")
+    kinds = value.get("formula_kinds")
+    if (
+        not isinstance(kinds, list)
+        or not all(isinstance(item, str) and item for item in kinds)
+        or kinds != sorted(set(kinds))
+    ):
+        raise DeliverableValidationError("Formula scan attestation kinds are invalid")
+    if value.get("formula_marker_count") != 0 or kinds:
+        raise DeliverableValidationError("Formula scan attestation is not formula-free")
+    return json.loads(
+        _canonical_json_bytes(value, label="formula scan attestation").decode("ascii")
+    )
+
+
 def _sanitize_recalculation(
     value: Any,
     *,
@@ -850,6 +1120,13 @@ def _sanitize_recalculation(
     version = value.get("version")
     profile = value.get("profile")
     workbook_format = value.get("format")
+    from .ooxml_formula_scan import (
+        OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+        OOXML_NO_FORMULA_BACKEND,
+        OOXML_NO_FORMULA_PROFILE,
+    )
+
+    verified_no_write = backend == OOXML_NO_FORMULA_BACKEND
     if not isinstance(backend, str) or not backend.strip():
         raise DeliverableValidationError("Recalculation backend must be a non-empty string")
     if not isinstance(version, str) or not version.strip():
@@ -866,7 +1143,6 @@ def _sanitize_recalculation(
         or value.get("artifact_revision_before") != before.revision
         or value.get("artifact_revision_after") != after.revision
         or value.get("workbook_changed") is not (before != after)
-        or value.get("atomic_replace") is not True
     ):
         raise DeliverableValidationError("Session recalculation metadata does not match lineage")
     transition_id = value.get("artifact_transition_id")
@@ -881,10 +1157,38 @@ def _sanitize_recalculation(
         value.get("workbook_effects"),
         allow_incomplete=candidate_outcome == _AUDITED_NONCOMPLETION,
     )
-    if (
-        workbook_effects["semantic_changed"] is True
-        and candidate_outcome == _ACCEPTED_CANDIDATE
-    ):
+    formula_scan: dict[str, Any] | None = None
+    if verified_no_write:
+        if (
+            version != OOXML_FORMULA_SCAN_SCHEMA_VERSION
+            or profile != OOXML_NO_FORMULA_PROFILE
+            or value.get("atomic_replace") is not False
+            or value.get("publication") != "verified_no_write"
+            or before != after
+            or transition_id is not None
+        ):
+            raise DeliverableValidationError(
+                "Verified no-write recalculation metadata is inconsistent"
+            )
+        formula_scan = _sanitized_formula_scan(value.get("formula_scan"), artifact=after)
+        strict_noop = {
+            "schema_version": "workbook-effect-diff-v1",
+            "semantic_changed": False,
+            "complete": True,
+            "effects": [],
+            "scope": EvidenceScope().to_dict(),
+            "formula_scope": EvidenceScope().to_dict(),
+            "changed_cell_count": 0,
+            "scanned_cell_count": formula_scan["scanned_cell_count"],
+            "reasons": [],
+        }
+        if workbook_effects != strict_noop:
+            raise DeliverableValidationError(
+                "Verified no-write recalculation effects are not a strict no-op"
+            )
+    elif value.get("atomic_replace") is not True:
+        raise DeliverableValidationError("Legacy recalculation must attest atomic replacement")
+    if workbook_effects["semantic_changed"] is True and candidate_outcome == _ACCEPTED_CANDIDATE:
         raise DeliverableValidationError("Postprocess recalculation changed workbook semantics")
     sanitized = {
         "backend": backend,
@@ -900,25 +1204,73 @@ def _sanitize_recalculation(
         "workbook_changed": value.get("workbook_changed"),
         "workbook_effects": workbook_effects,
     }
+    if verified_no_write:
+        sanitized["publication"] = "verified_no_write"
+        sanitized["formula_scan"] = formula_scan
     _canonical_json_bytes(sanitized, label="sanitized recalculation metadata")
     return sanitized
 
 
-def _scan_final_revision(path: Path, artifact: ArtifactRef) -> dict[str, Any]:
+def _no_formula_attestation(
+    recalculation: Mapping[str, Any],
+    *,
+    artifact: ArtifactRef,
+) -> dict[str, Any]:
+    from .ooxml_formula_scan import (
+        OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+        OOXML_NO_FORMULA_BACKEND,
+        OOXML_NO_FORMULA_PROFILE,
+    )
+
+    formula_scan = _sanitized_formula_scan(
+        recalculation.get("formula_scan"),
+        artifact=artifact,
+    )
+    payload = {
+        "schema_version": NO_FORMULA_ATTESTATION_SCHEMA_VERSION,
+        "artifact": artifact.to_dict(),
+        "backend": OOXML_NO_FORMULA_BACKEND,
+        "version": OOXML_FORMULA_SCAN_SCHEMA_VERSION,
+        "profile": OOXML_NO_FORMULA_PROFILE,
+        "publication": "verified_no_write",
+        "formula_scan": formula_scan,
+        "claims": {
+            "formula_free": True,
+            "byte_identical": True,
+            "managed_artifact_write": False,
+            "artifact_transition": False,
+            "offline_rescan_required": True,
+        },
+    }
+    return {
+        **payload,
+        "witness_sha256": _canonical_sha256(
+            payload,
+            label="no-formula finalization witness",
+        ),
+    }
+
+
+def _scan_final_revision_snapshot(
+    payload: bytes,
+    artifact: ArtifactRef,
+    *,
+    workbook_format: str,
+) -> dict[str, Any]:
     formulas = cached = None
     try:
         formulas = load_workbook(
-            path,
+            io.BytesIO(payload),
             data_only=False,
             read_only=True,
-            keep_vba=path.suffix.lower() == ".xlsm",
+            keep_vba=workbook_format == "xlsm",
             keep_links=True,
         )
         cached = load_workbook(
-            path,
+            io.BytesIO(payload),
             data_only=True,
             read_only=True,
-            keep_vba=path.suffix.lower() == ".xlsm",
+            keep_vba=workbook_format == "xlsm",
             keep_links=True,
         )
         if not formulas.sheetnames or formulas.sheetnames != cached.sheetnames:
@@ -1303,31 +1655,982 @@ def _visual_equivalence_witness(
     }
 
 
-def _atomic_scoring_copy(source: Path, destination: Path) -> str:
-    if destination.exists():
+def _link_anonymous_file_noreplace_at(
+    source_descriptor: int,
+    destination_parent_descriptor: int,
+    destination_name: str,
+) -> None:
+    """Publish one held anonymous inode without consulting a source pathname."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    linkat = getattr(libc, "linkat", None)
+    if linkat is None:
+        raise DeliverableValidationError("Anonymous scoring-file publication is unavailable")
+    linkat.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    linkat.restype = ctypes.c_int
+    destination_bytes = os.fsencode(destination_name)
+    if (
+        linkat(
+            source_descriptor,
+            b"",
+            destination_parent_descriptor,
+            destination_bytes,
+            0x1000,  # AT_EMPTY_PATH
+        )
+        == 0
+    ):
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.ENOENT, errno.EPERM}:
+        # Unprivileged Linux may require the kernel-owned procfs descriptor
+        # symlink instead of AT_EMPTY_PATH. It still names only the held inode.
+        proc_descriptor_path = os.fsencode(f"/proc/self/fd/{source_descriptor}")
+        if (
+            linkat(
+                -100,  # AT_FDCWD
+                proc_descriptor_path,
+                destination_parent_descriptor,
+                destination_bytes,
+                0x400,  # AT_SYMLINK_FOLLOW
+            )
+            == 0
+        ):
+            return
+        error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
         raise DeliverableValidationError("Scoring copy already exists")
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=destination.parent,
-        prefix=f".{destination.stem}.copy-",
-        suffix=destination.suffix,
+    raise OSError(error_number, os.strerror(error_number), destination_name)
+
+
+def _stable_file_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
     )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
+
+
+def _validate_real_directory_path(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int],
+    label: str,
+) -> None:
+    absolute = path.absolute()
+    for candidate in (absolute, *absolute.parents):
+        metadata = candidate.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise DeliverableValidationError(f"{label} path contains a symbolic component")
+    metadata = absolute.lstat()
+    if (metadata.st_dev, metadata.st_ino) != expected_identity:
+        raise DeliverableValidationError(f"{label} changed identity")
+
+
+def _close_all_descriptors(*descriptors: int | None) -> OSError | None:
+    failure: OSError | None = None
+    for descriptor in descriptors:
+        if descriptor is None:
+            continue
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            failure = failure or exc
+    return failure
+
+
+def _sha256_descriptor(descriptor: int, *, expected_size: int) -> str:
+    """Hash a descriptor without changing its shared file offset."""
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < expected_size:
+        chunk = os.pread(descriptor, min(1024 * 1024, expected_size - offset), offset)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    if offset != expected_size or os.pread(descriptor, 1, offset):
+        raise DeliverableValidationError("Scoring descriptor size changed while hashing")
+    return digest.hexdigest()
+
+
+def _open_bound_scoring_source(
+    source: Path,
+    *,
+    directory_flags: int,
+) -> tuple[
+    int,
+    int,
+    tuple[int, int, int, int, int, int, int],
+    tuple[int, int],
+    str,
+]:
+    parent_descriptor: int | None = None
+    source_descriptor: int | None = None
     try:
-        shutil.copy2(source, temporary)
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
-        source_sha256 = _sha256(source)
-        if _sha256(temporary) != source_sha256:
-            raise DeliverableValidationError("Atomic scoring copy is not byte-identical")
-        temporary.replace(destination)
-        os.chmod(destination, 0o400)
+        parent_descriptor = os.open(source.parent, directory_flags)
+        parent_metadata = os.fstat(parent_descriptor)
+        path_parent_metadata = source.parent.lstat()
+        if not stat.S_ISDIR(parent_metadata.st_mode) or (
+            parent_metadata.st_dev,
+            parent_metadata.st_ino,
+        ) != (path_parent_metadata.st_dev, path_parent_metadata.st_ino):
+            raise DeliverableValidationError("Scoring source parent changed identity")
+        parent_identity = (parent_metadata.st_dev, parent_metadata.st_ino)
+        _validate_real_directory_path(
+            source.parent,
+            expected_identity=parent_identity,
+            label="scoring source parent",
+        )
+        name_metadata = os.stat(
+            source.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        path_metadata = source.lstat()
+        source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        source_descriptor = os.open(
+            source.name,
+            source_flags,
+            dir_fd=parent_descriptor,
+        )
+        descriptor_metadata = os.fstat(source_descriptor)
+        identity = _stable_file_identity(descriptor_metadata)
+        if (
+            not stat.S_ISREG(descriptor_metadata.st_mode)
+            or descriptor_metadata.st_nlink != 1
+            or _stable_file_identity(name_metadata) != identity
+            or _stable_file_identity(path_metadata) != identity
+        ):
+            raise DeliverableValidationError("Scoring source must be a stable one-link file")
+        digest = _sha256_descriptor(
+            source_descriptor,
+            expected_size=descriptor_metadata.st_size,
+        )
+        if any(
+            _stable_file_identity(metadata) != identity
+            for metadata in (
+                os.fstat(source_descriptor),
+                os.stat(
+                    source.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                ),
+                source.lstat(),
+            )
+        ):
+            raise DeliverableValidationError("Scoring source changed while it was hashed")
+        return parent_descriptor, source_descriptor, identity, parent_identity, digest
+    except BaseException as exc:
+        close_error = _close_all_descriptors(source_descriptor, parent_descriptor)
+        if close_error is not None:
+            raise DeliverableValidationError(
+                f"Failed to close scoring-source descriptors: {close_error}"
+            ) from exc
+        raise
+
+
+def _atomic_scoring_copy(
+    source: Path,
+    destination: Path,
+) -> _ScoringCopyPublication:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    source_descriptor: int | None = None
+    source_parent_descriptor: int | None = None
+    workspace_descriptor: int | None = None
+    scoring_descriptor: int | None = None
+    scoring_identity: tuple[int, int] | None = None
+    source_identity: tuple[int, int, int, int, int, int, int] | None = None
+    source_parent_identity: tuple[int, int] | None = None
+    source_sha256: str | None = None
+    try:
+        if destination.name in {"", ".", ".."}:
+            raise DeliverableValidationError("Scoring copy name is invalid")
+        workspace = destination.parent
+        workspace_descriptor = os.open(workspace, directory_flags)
+        workspace_metadata = os.fstat(workspace_descriptor)
+        workspace_path_metadata = workspace.lstat()
+        if not stat.S_ISDIR(workspace_metadata.st_mode) or (
+            workspace_metadata.st_dev,
+            workspace_metadata.st_ino,
+        ) != (
+            workspace_path_metadata.st_dev,
+            workspace_path_metadata.st_ino,
+        ):
+            raise OSError("scoring workspace is not a directory")
+        workspace_identity = (
+            workspace_metadata.st_dev,
+            workspace_metadata.st_ino,
+        )
+        _validate_real_directory_path(
+            workspace,
+            expected_identity=workspace_identity,
+            label="scoring workspace",
+        )
+        try:
+            os.stat(
+                destination.name,
+                dir_fd=workspace_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise DeliverableValidationError("Scoring copy already exists")
+        (
+            source_parent_descriptor,
+            source_descriptor,
+            source_identity,
+            source_parent_identity,
+            source_sha256,
+        ) = _open_bound_scoring_source(source, directory_flags=directory_flags)
+        assert source_descriptor is not None
+        assert source_parent_descriptor is not None
+        assert source_identity is not None
+        assert source_parent_identity is not None
+        assert source_sha256 is not None
+        anonymous_flag = getattr(os, "O_TMPFILE", 0)
+        if not anonymous_flag:
+            raise DeliverableValidationError("Anonymous scoring-file creation is unavailable")
+        scoring_flags = os.O_RDWR | anonymous_flag | getattr(os, "O_CLOEXEC", 0)
+        scoring_descriptor = os.open(
+            ".",
+            scoring_flags,
+            0o600,
+            dir_fd=workspace_descriptor,
+        )
+        created_scoring_metadata = os.fstat(scoring_descriptor)
+        scoring_identity = (
+            created_scoring_metadata.st_dev,
+            created_scoring_metadata.st_ino,
+        )
+        if (
+            not stat.S_ISREG(created_scoring_metadata.st_mode)
+            or created_scoring_metadata.st_nlink != 0
+            or created_scoring_metadata.st_dev != workspace_metadata.st_dev
+            or created_scoring_metadata.st_uid != os.geteuid()
+        ):
+            raise DeliverableValidationError(
+                "Scoring copy was not created as a private anonymous regular file"
+            )
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            copied += len(chunk)
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(scoring_descriptor, chunk[offset:])
+                if written <= 0:
+                    raise OSError("Scoring copy write made no progress")
+                offset += written
+        final_source_metadata = os.fstat(source_descriptor)
+        if (
+            _stable_file_identity(final_source_metadata) != source_identity
+            or _stable_file_identity(
+                os.stat(
+                    source.name,
+                    dir_fd=source_parent_descriptor,
+                    follow_symlinks=False,
+                )
+            )
+            != source_identity
+            or _stable_file_identity(source.lstat()) != source_identity
+            or copied != final_source_metadata.st_size
+            or digest.hexdigest() != source_sha256
+        ):
+            raise DeliverableValidationError("Scoring source changed while it was copied")
+        os.fchmod(scoring_descriptor, 0o400)
+        os.fsync(scoring_descriptor)
+        prepared_scoring_metadata = os.fstat(scoring_descriptor)
+        if (
+            not stat.S_ISREG(prepared_scoring_metadata.st_mode)
+            or (prepared_scoring_metadata.st_dev, prepared_scoring_metadata.st_ino)
+            != scoring_identity
+            or prepared_scoring_metadata.st_nlink != 0
+            or prepared_scoring_metadata.st_size != copied
+            or stat.S_IMODE(prepared_scoring_metadata.st_mode) != 0o400
+        ):
+            raise DeliverableValidationError("Prepared scoring copy is not a read-only file")
+        if _sha256_descriptor(scoring_descriptor, expected_size=copied) != source_sha256:
+            raise DeliverableValidationError(
+                "Prepared scoring copy is not byte-identical to its source"
+            )
+        os.fsync(workspace_descriptor)
+        prepared_workspace_metadata = os.fstat(workspace_descriptor)
+        if (
+            not stat.S_ISDIR(prepared_workspace_metadata.st_mode)
+            or (
+                prepared_workspace_metadata.st_dev,
+                prepared_workspace_metadata.st_ino,
+            )
+            != workspace_identity
+            or _stable_file_identity(os.fstat(scoring_descriptor))
+            != _stable_file_identity(prepared_scoring_metadata)
+            or _stable_file_identity(
+                os.stat(
+                    source.name,
+                    dir_fd=source_parent_descriptor,
+                    follow_symlinks=False,
+                )
+            )
+            != source_identity
+            or _stable_file_identity(source.lstat()) != source_identity
+        ):
+            raise DeliverableValidationError("Prepared scoring publication changed identity")
+        _validate_real_directory_path(
+            workspace,
+            expected_identity=workspace_identity,
+            label="scoring workspace",
+        )
+        try:
+            os.stat(
+                destination.name,
+                dir_fd=workspace_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise DeliverableValidationError("Scoring copy already exists")
+        publication = _ScoringCopyPublication(
+            sha256=source_sha256,
+            identity=scoring_identity,
+            source_path=source,
+            destination_path=destination,
+            source_identity=source_identity,
+            source_parent_identity=source_parent_identity,
+            workspace_identity=workspace_identity,
+            source_descriptor=source_descriptor,
+            source_parent_descriptor=source_parent_descriptor,
+            scoring_descriptor=scoring_descriptor,
+            workspace_descriptor=workspace_descriptor,
+        )
+        _link_anonymous_file_noreplace_at(
+            scoring_descriptor,
+            workspace_descriptor,
+            destination.name,
+        )
+        publication.verify()
+        # A failed durability sync has an ambiguous commit outcome. Keep the
+        # exact immutable publication in place so a retry can adopt it.
+        os.fsync(workspace_descriptor)
+        source_descriptor = None
+        source_parent_descriptor = None
+        scoring_descriptor = None
+        workspace_descriptor = None
+        return publication
+    except BaseException as exc:
+        if isinstance(exc, DeliverableValidationError):
+            raise
+        if not isinstance(exc, Exception):
+            raise
+        raise DeliverableValidationError("Failed to publish the scoring copy") from exc
     finally:
-        temporary.unlink(missing_ok=True)
-    if _sha256(destination) != source_sha256:
-        raise DeliverableValidationError("Published scoring copy is not byte-identical")
-    return source_sha256
+        active_error = sys.exc_info()[1]
+        close_error = _close_all_descriptors(
+            scoring_descriptor,
+            source_descriptor,
+            source_parent_descriptor,
+            workspace_descriptor,
+        )
+        if close_error is not None:
+            message = f"Failed to close scoring-publication descriptors: {close_error}"
+            if active_error is not None:
+                raise DeliverableValidationError(message) from active_error
+            raise DeliverableValidationError(message) from close_error
+
+
+def _existing_scoring_copy(
+    source: Path,
+    destination: Path,
+) -> _ScoringCopyPublication:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    source_descriptor: int | None = None
+    source_parent_descriptor: int | None = None
+    scoring_descriptor: int | None = None
+    workspace_descriptor: int | None = None
+    try:
+        (
+            source_parent_descriptor,
+            source_descriptor,
+            source_identity,
+            source_parent_identity,
+            source_sha256,
+        ) = _open_bound_scoring_source(source, directory_flags=directory_flags)
+        workspace_descriptor = os.open(destination.parent, directory_flags)
+        workspace_metadata = os.fstat(workspace_descriptor)
+        workspace_path_metadata = destination.parent.lstat()
+        if not stat.S_ISDIR(workspace_metadata.st_mode) or (
+            workspace_metadata.st_dev,
+            workspace_metadata.st_ino,
+        ) != (workspace_path_metadata.st_dev, workspace_path_metadata.st_ino):
+            raise DeliverableValidationError("Scoring workspace changed identity")
+        workspace_identity = (workspace_metadata.st_dev, workspace_metadata.st_ino)
+        _validate_real_directory_path(
+            destination.parent,
+            expected_identity=workspace_identity,
+            label="scoring workspace",
+        )
+        scoring_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        scoring_descriptor = os.open(
+            destination.name,
+            scoring_flags,
+            dir_fd=workspace_descriptor,
+        )
+        scoring_metadata = os.fstat(scoring_descriptor)
+        scoring_name_metadata = os.stat(
+            destination.name,
+            dir_fd=workspace_descriptor,
+            follow_symlinks=False,
+        )
+        scoring_path_metadata = destination.lstat()
+        scoring_identity = (scoring_metadata.st_dev, scoring_metadata.st_ino)
+        if (
+            not stat.S_ISREG(scoring_metadata.st_mode)
+            or scoring_metadata.st_nlink != 1
+            or stat.S_IMODE(scoring_metadata.st_mode) != 0o400
+            or (scoring_name_metadata.st_dev, scoring_name_metadata.st_ino) != scoring_identity
+            or (scoring_path_metadata.st_dev, scoring_path_metadata.st_ino) != scoring_identity
+            or scoring_metadata.st_size != source_identity[4]
+            or _sha256_descriptor(
+                scoring_descriptor,
+                expected_size=scoring_metadata.st_size,
+            )
+            != source_sha256
+        ):
+            raise DeliverableValidationError(
+                "Published scoring copy is not an exact read-only regular-file replica"
+            )
+        publication = _ScoringCopyPublication(
+            sha256=source_sha256,
+            identity=scoring_identity,
+            source_path=source,
+            destination_path=destination,
+            source_identity=source_identity,
+            source_parent_identity=source_parent_identity,
+            workspace_identity=workspace_identity,
+            source_descriptor=source_descriptor,
+            source_parent_descriptor=source_parent_descriptor,
+            scoring_descriptor=scoring_descriptor,
+            workspace_descriptor=workspace_descriptor,
+        )
+        publication.verify()
+        source_descriptor = None
+        source_parent_descriptor = None
+        scoring_descriptor = None
+        workspace_descriptor = None
+        return publication
+    except BaseException as exc:
+        if isinstance(exc, DeliverableValidationError):
+            raise
+        if not isinstance(exc, Exception):
+            raise
+        raise DeliverableValidationError("Failed to bind the existing scoring copy") from exc
+    finally:
+        active_error = sys.exc_info()[1]
+        close_error = _close_all_descriptors(
+            scoring_descriptor,
+            source_descriptor,
+            source_parent_descriptor,
+            workspace_descriptor,
+        )
+        if close_error is not None:
+            message = f"Failed to close existing-scoring descriptors: {close_error}"
+            if active_error is not None:
+                raise DeliverableValidationError(message) from active_error
+            raise DeliverableValidationError(message) from close_error
+
+
+def _record_secondary_exception(error: BaseException, note: str) -> None:
+    """Attach diagnostics without allowing note handling to replace the error."""
+
+    try:
+        add_note = getattr(error, "add_note", None)
+        if callable(add_note):
+            add_note(note)
+            return
+        notes = list(getattr(error, "__notes__", ()))
+        notes.append(note)
+        error.__notes__ = notes
+    except BaseException:
+        pass
+
+
+@dataclass
+class _BoundScoringInputDirectory:
+    """A temporary directory whose cleanup never trusts its pathname alone."""
+
+    path: Path
+    identity: tuple[int, int]
+    parent_identity: tuple[int, int]
+    descriptor: int | None
+    parent_descriptor: int | None
+
+    @classmethod
+    def create(cls) -> _BoundScoringInputDirectory:
+        path = Path(os.path.abspath(tempfile.mkdtemp(prefix="sheetledger-scoring-input-")))
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        parent_descriptor: int | None = None
+        descriptor: int | None = None
+        try:
+            parent_descriptor = os.open(path.parent, directory_flags)
+            parent_metadata = os.fstat(parent_descriptor)
+            parent_path_metadata = path.parent.lstat()
+            parent_identity = (parent_metadata.st_dev, parent_metadata.st_ino)
+            if (
+                not stat.S_ISDIR(parent_metadata.st_mode)
+                or (parent_path_metadata.st_dev, parent_path_metadata.st_ino) != parent_identity
+            ):
+                raise DeliverableValidationError("Temporary scoring parent changed identity")
+            _validate_real_directory_path(
+                path.parent,
+                expected_identity=parent_identity,
+                label="temporary scoring parent",
+            )
+            name_metadata = os.stat(
+                path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            descriptor = os.open(path.name, directory_flags, dir_fd=parent_descriptor)
+            directory_metadata = os.fstat(descriptor)
+            path_metadata = path.lstat()
+            identity = (directory_metadata.st_dev, directory_metadata.st_ino)
+            if (
+                not stat.S_ISDIR(directory_metadata.st_mode)
+                or stat.S_ISLNK(directory_metadata.st_mode)
+                or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+                or directory_metadata.st_uid != os.geteuid()
+                or any(
+                    (metadata.st_dev, metadata.st_ino) != identity
+                    for metadata in (name_metadata, path_metadata)
+                )
+            ):
+                raise DeliverableValidationError(
+                    "Temporary scoring directory could not be bound safely"
+                )
+            return cls(
+                path=path,
+                identity=identity,
+                parent_identity=parent_identity,
+                descriptor=descriptor,
+                parent_descriptor=parent_descriptor,
+            )
+        except BaseException as exc:
+            close_error = _close_all_descriptors(descriptor, parent_descriptor)
+            if close_error is not None:
+                _record_secondary_exception(
+                    exc,
+                    "Temporary scoring directory descriptor cleanup also failed: "
+                    f"{type(close_error).__name__}: {close_error}",
+                )
+            _record_secondary_exception(
+                exc,
+                "Temporary scoring directory creation failed before a cleanup capability "
+                "was established; any unbound residue was left untouched",
+            )
+            raise
+
+    def make_non_writable(self) -> None:
+        descriptor = self.descriptor
+        parent_descriptor = self.parent_descriptor
+        if descriptor is None or parent_descriptor is None:
+            raise DeliverableValidationError("Temporary scoring directory lease is closed")
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or (metadata.st_dev, metadata.st_ino) != self.identity
+            ):
+                raise DeliverableValidationError("Temporary scoring directory changed identity")
+            os.fchmod(descriptor, 0o500)
+            metadata = os.fstat(descriptor)
+            named_metadata = os.stat(
+                self.path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                stat.S_IMODE(metadata.st_mode) != 0o500
+                or (metadata.st_dev, metadata.st_ino) != self.identity
+                or (named_metadata.st_dev, named_metadata.st_ino) != self.identity
+            ):
+                raise DeliverableValidationError(
+                    "Temporary scoring directory could not be made non-writable"
+                )
+        except DeliverableValidationError:
+            raise
+        except OSError as exc:
+            raise DeliverableValidationError(
+                "Temporary scoring directory could not be protected"
+            ) from exc
+
+    def cleanup(
+        self,
+        *,
+        snapshot_name: str,
+        snapshot_identity: tuple[int, int] | None,
+    ) -> list[BaseException]:
+        """Remove only entries proven to belong to this held directory capability."""
+
+        descriptor = self.descriptor
+        parent_descriptor = self.parent_descriptor
+        self.descriptor = None
+        self.parent_descriptor = None
+        failures: list[BaseException] = []
+        try:
+            directory_valid = False
+            if descriptor is not None:
+                try:
+                    metadata = os.fstat(descriptor)
+                    directory_valid = bool(
+                        stat.S_ISDIR(metadata.st_mode)
+                        and (metadata.st_dev, metadata.st_ino) == self.identity
+                    )
+                    if not directory_valid:
+                        failures.append(
+                            DeliverableValidationError(
+                                "Held temporary scoring directory changed identity"
+                            )
+                        )
+                except BaseException as exc:
+                    failures.append(exc)
+                if directory_valid:
+                    try:
+                        os.fchmod(descriptor, 0o700)
+                    except BaseException as exc:
+                        failures.append(exc)
+                    if snapshot_identity is not None:
+                        try:
+                            snapshot_metadata = os.stat(
+                                snapshot_name,
+                                dir_fd=descriptor,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError:
+                            pass
+                        except BaseException as exc:
+                            failures.append(exc)
+                        else:
+                            if (
+                                not stat.S_ISREG(snapshot_metadata.st_mode)
+                                or (snapshot_metadata.st_dev, snapshot_metadata.st_ino)
+                                != snapshot_identity
+                            ):
+                                failures.append(
+                                    DeliverableValidationError(
+                                        "Temporary scoring snapshot name was replaced; "
+                                        "the replacement was left untouched"
+                                    )
+                                )
+                            else:
+                                try:
+                                    os.unlink(snapshot_name, dir_fd=descriptor)
+                                except BaseException as exc:
+                                    failures.append(exc)
+
+            parent_valid = False
+            if parent_descriptor is not None:
+                try:
+                    parent_metadata = os.fstat(parent_descriptor)
+                    parent_valid = bool(
+                        stat.S_ISDIR(parent_metadata.st_mode)
+                        and (parent_metadata.st_dev, parent_metadata.st_ino) == self.parent_identity
+                    )
+                    if not parent_valid:
+                        failures.append(
+                            DeliverableValidationError(
+                                "Held temporary scoring parent changed identity"
+                            )
+                        )
+                except BaseException as exc:
+                    failures.append(exc)
+            if directory_valid and parent_valid:
+                try:
+                    named_metadata = os.stat(
+                        self.path.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    try:
+                        if os.fstat(descriptor).st_nlink != 0:
+                            failures.append(
+                                DeliverableValidationError(
+                                    "Original temporary scoring directory was renamed; "
+                                    "the capability-bound empty residue was retained"
+                                )
+                            )
+                    except BaseException as exc:
+                        failures.append(exc)
+                except BaseException as exc:
+                    failures.append(exc)
+                else:
+                    if (
+                        not stat.S_ISDIR(named_metadata.st_mode)
+                        or (named_metadata.st_dev, named_metadata.st_ino) != self.identity
+                    ):
+                        failures.append(
+                            DeliverableValidationError(
+                                "Temporary scoring directory name was replaced; the "
+                                "replacement was left untouched and the original residue "
+                                "was retained"
+                            )
+                        )
+                    else:
+                        try:
+                            rebound_metadata = os.stat(
+                                self.path.name,
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                            if (
+                                not stat.S_ISDIR(rebound_metadata.st_mode)
+                                or (rebound_metadata.st_dev, rebound_metadata.st_ino)
+                                != self.identity
+                            ):
+                                raise DeliverableValidationError(
+                                    "Temporary scoring directory changed before removal"
+                                )
+                            os.rmdir(self.path.name, dir_fd=parent_descriptor)
+                        except BaseException as exc:
+                            failures.append(exc)
+        finally:
+            close_error = _close_all_descriptors(descriptor, parent_descriptor)
+            if close_error is not None:
+                failures.append(close_error)
+        return failures
+
+
+def _run_with_bound_scoring_input(
+    source: Path,
+    expected_sha256: str,
+    scorer: Callable[[Path], Any],
+) -> Any:
+    """Score a private snapshot while holding and rebinding the published source."""
+
+    if not _valid_sha256(expected_sha256):
+        raise DeliverableValidationError("Expected scoring SHA-256 is invalid")
+    suffix = source.suffix.casefold()
+    if suffix not in {".xlsx", ".xlsm"}:
+        raise DeliverableValidationError("Scoring input format is unsupported")
+
+    temporary = _BoundScoringInputDirectory.create()
+    snapshot = temporary.path / f"input{suffix}"
+    publication: _ScoringCopyPublication | None = None
+    try:
+        publication = _atomic_scoring_copy(source, snapshot)
+        if publication.workspace_identity != temporary.identity:
+            raise DeliverableValidationError(
+                "Scoring snapshot was published outside its held directory"
+            )
+        if publication.sha256 != expected_sha256:
+            raise DeliverableValidationError("Scoring copy changed before scoring")
+        if stat.S_IMODE(publication.source_identity[2]) & 0o222:
+            raise DeliverableValidationError(
+                "Scoring copy must be a read-only regular non-symbolic file before scoring"
+            )
+        publication.verify()
+
+        temporary.make_non_writable()
+        publication.verify()
+
+        scorer_error: BaseException | None = None
+        scorer_traceback = None
+        result: Any = None
+        try:
+            result = scorer(snapshot)
+        except BaseException as exc:
+            scorer_error = exc
+            scorer_traceback = exc.__traceback__
+        try:
+            _verify_rebound_scoring_input(publication)
+        except DeliverableValidationError as binding_error:
+            if scorer_error is not None:
+                _record_secondary_exception(
+                    scorer_error,
+                    "Scoring input verification also failed: "
+                    f"{type(binding_error).__name__}: {binding_error}",
+                )
+                raise scorer_error.with_traceback(scorer_traceback) from binding_error
+            raise DeliverableValidationError(
+                "Scoring input changed during scoring"
+            ) from binding_error
+        if scorer_error is not None:
+            raise scorer_error.with_traceback(scorer_traceback)
+        return result
+    finally:
+        active_error = sys.exc_info()[1]
+        try:
+            cleanup_failures = temporary.cleanup(
+                snapshot_name=snapshot.name,
+                snapshot_identity=publication.identity if publication is not None else None,
+            )
+        except BaseException as exc:
+            cleanup_failures = [exc]
+        if publication is not None:
+            try:
+                publication.close()
+            except BaseException as exc:
+                cleanup_failures.append(exc)
+        if cleanup_failures:
+            if active_error is not None:
+                for cleanup_error in cleanup_failures:
+                    _record_secondary_exception(
+                        active_error,
+                        "Bound scoring input cleanup also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}",
+                    )
+            else:
+                cleanup_error = DeliverableValidationError(
+                    "Failed to clean up the bound scoring input"
+                )
+                for secondary_error in cleanup_failures[1:]:
+                    _record_secondary_exception(
+                        cleanup_error,
+                        "Additional cleanup failure: "
+                        f"{type(secondary_error).__name__}: {secondary_error}",
+                    )
+                raise cleanup_error from cleanup_failures[0]
+
+
+def _verify_rebound_scoring_input(publication: _ScoringCopyPublication) -> None:
+    """Verify scoring bytes without treating a harmless source rename as mutation."""
+
+    (
+        source_descriptor,
+        source_parent_descriptor,
+        scoring_descriptor,
+        workspace_descriptor,
+    ) = publication._require_open()
+    try:
+        _validate_real_directory_path(
+            publication.source_path.parent,
+            expected_identity=publication.source_parent_identity,
+            label="scoring source parent",
+        )
+        _validate_real_directory_path(
+            publication.destination_path.parent,
+            expected_identity=publication.workspace_identity,
+            label="scoring workspace",
+        )
+
+        source_metadata = os.fstat(source_descriptor)
+        source_stable_identity = _stable_file_identity(source_metadata)
+        source_identity = (source_metadata.st_dev, source_metadata.st_ino)
+        expected_source_identity = publication.source_identity[:2]
+        source_name_metadata = os.stat(
+            publication.source_path.name,
+            dir_fd=source_parent_descriptor,
+            follow_symlinks=False,
+        )
+        source_path_metadata = publication.source_path.lstat()
+        if (
+            not stat.S_ISREG(source_metadata.st_mode)
+            or source_metadata.st_nlink != 1
+            or stat.S_IMODE(source_metadata.st_mode) & 0o222
+            or source_identity != expected_source_identity
+            or any(
+                _stable_file_identity(metadata) != source_stable_identity
+                for metadata in (source_name_metadata, source_path_metadata)
+            )
+            or source_metadata.st_size != publication.source_identity[4]
+            or _sha256_descriptor(
+                source_descriptor,
+                expected_size=source_metadata.st_size,
+            )
+            != publication.sha256
+        ):
+            raise DeliverableValidationError("Scoring source changed during scoring")
+
+        scoring_metadata = os.fstat(scoring_descriptor)
+        scoring_stable_identity = _stable_file_identity(scoring_metadata)
+        scoring_name_metadata = os.stat(
+            publication.destination_path.name,
+            dir_fd=workspace_descriptor,
+            follow_symlinks=False,
+        )
+        scoring_path_metadata = publication.destination_path.lstat()
+        if (
+            not stat.S_ISREG(scoring_metadata.st_mode)
+            or scoring_metadata.st_nlink != 1
+            or stat.S_IMODE(scoring_metadata.st_mode) != 0o400
+            or (scoring_metadata.st_dev, scoring_metadata.st_ino) != publication.identity
+            or any(
+                _stable_file_identity(metadata) != scoring_stable_identity
+                for metadata in (scoring_name_metadata, scoring_path_metadata)
+            )
+            or scoring_metadata.st_size != publication.source_identity[4]
+            or _sha256_descriptor(
+                scoring_descriptor,
+                expected_size=scoring_metadata.st_size,
+            )
+            != publication.sha256
+        ):
+            raise DeliverableValidationError("Private scoring snapshot changed during scoring")
+
+        # Rebind the names after hashing so a concurrent replacement cannot
+        # survive by racing only the first set of metadata checks.
+        if any(
+            _stable_file_identity(metadata) != expected_stable_identity
+            for metadata, expected_stable_identity in (
+                (os.fstat(source_descriptor), source_stable_identity),
+                (
+                    os.stat(
+                        publication.source_path.name,
+                        dir_fd=source_parent_descriptor,
+                        follow_symlinks=False,
+                    ),
+                    source_stable_identity,
+                ),
+                (publication.source_path.lstat(), source_stable_identity),
+                (os.fstat(scoring_descriptor), scoring_stable_identity),
+                (
+                    os.stat(
+                        publication.destination_path.name,
+                        dir_fd=workspace_descriptor,
+                        follow_symlinks=False,
+                    ),
+                    scoring_stable_identity,
+                ),
+                (publication.destination_path.lstat(), scoring_stable_identity),
+            )
+        ):
+            raise DeliverableValidationError("Scoring input changed while it was verified")
+    except DeliverableValidationError:
+        raise
+    except OSError as exc:
+        raise DeliverableValidationError("Failed to verify the bound scoring input") from exc
 
 
 def _transition_lineage(
@@ -1381,9 +2684,7 @@ def _target_grounding_commit_chain(
         try:
             mode = TargetGroundingMode(raw_mode)
         except ValueError as exc:
-            raise DeliverableValidationError(
-                "Target-grounding session mode is invalid"
-            ) from exc
+            raise DeliverableValidationError("Target-grounding session mode is invalid") from exc
     else:
         mode = (
             TargetGroundingMode.ENFORCE
@@ -1412,9 +2713,7 @@ def _target_grounding_commit_chain(
         )
 
     authorizations = session.committed_target_authorizations
-    advisory_assessments = tuple(
-        getattr(session, "committed_advisory_target_assessments", ())
-    )
+    advisory_assessments = tuple(getattr(session, "committed_advisory_target_assessments", ()))
     if mode is TargetGroundingMode.ADVISORY:
         if authorizations:
             raise DeliverableValidationError(
@@ -1429,20 +2728,14 @@ def _target_grounding_commit_chain(
         documents = [record.to_dict() for record in advisory_assessments]
         lifecycle_events = tuple(session.advisory_target_lifecycle_events)
         lifecycle_documents = [event.to_dict() for event in lifecycle_events]
-        lifecycle_genesis_sha256 = (
-            session.advisory_target_lifecycle_genesis_sha256
-        )
-        lifecycle_final_counters = (
-            session.advisory_target_lifecycle_final_counters
-        )
+        lifecycle_genesis_sha256 = session.advisory_target_lifecycle_genesis_sha256
+        lifecycle_final_counters = session.advisory_target_lifecycle_final_counters
         if (
             not _valid_sha256(lifecycle_genesis_sha256)
             or not isinstance(lifecycle_final_counters, dict)
             or lifecycle_final_counters.get("pending_preparation_count") != 0
         ):
-            raise DeliverableValidationError(
-                "Advisory target-grounding lifecycle is not finalized"
-            )
+            raise DeliverableValidationError("Advisory target-grounding lifecycle is not finalized")
         chain_head = (
             advisory_assessments[-1].canonical_sha256
             if advisory_assessments
@@ -1513,8 +2806,7 @@ def _audit_target_grounding_commit_chain(
 ) -> None:
     if (
         isinstance(value, Mapping)
-        and value.get("schema_version")
-        == ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION
+        and value.get("schema_version") == ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION
     ):
         expected_advisory_fields = {
             "schema_version",
@@ -1558,9 +2850,7 @@ def _audit_target_grounding_commit_chain(
             or not _valid_sha256(lifecycle_chain_head_sha256)
             or not isinstance(lifecycle_final_counters, Mapping)
         ):
-            raise DeliverableValidationError(
-                "Advisory target-grounding certificate is invalid"
-            )
+            raise DeliverableValidationError("Advisory target-grounding certificate is invalid")
         initial_artifact = _artifact_ref(
             value.get("initial_artifact"),
             label="advisory target-grounding initial artifact",
@@ -1585,14 +2875,10 @@ def _audit_target_grounding_commit_chain(
                 "Advisory target-grounding assessments do not replay"
             ) from exc
         expected_head = (
-            records[-1].canonical_sha256
-            if records
-            else _AUTHORIZATION_CHAIN_GENESIS_SHA256
+            records[-1].canonical_sha256 if records else _AUTHORIZATION_CHAIN_GENESIS_SHA256
         )
         if chain_head != expected_head:
-            raise DeliverableValidationError(
-                "Advisory target-grounding chain head does not match"
-            )
+            raise DeliverableValidationError("Advisory target-grounding chain head does not match")
         expected_lifecycle_head = (
             lifecycle_events[-1].get("event_sha256")
             if lifecycle_events
@@ -1689,6 +2975,11 @@ def finalize_deliverable(
         or effective_recalculation_timeout <= 0
     ):
         raise DeliverableValidationError("recalculation_timeout_seconds must be positive")
+    if recalculation_callback is not None:
+        raise DeliverableValidationError(
+            "Finalization recalculation callbacks are disabled; use the session-owned "
+            "transactional finalization backend"
+        )
     candidate = session.artifact_ref()
     candidate_outcome, certificate, submission = _candidate_outcome(
         agent_evidence,
@@ -1696,10 +2987,8 @@ def finalize_deliverable(
         candidate=candidate,
     )
     candidate_transition_count = len(session.artifact_transitions)
-    raw_recalculation = (
-        recalculation_callback()
-        if recalculation_callback is not None
-        else session.recalculate(timeout_seconds=float(effective_recalculation_timeout))
+    raw_recalculation = session.recalculate_for_finalization(
+        timeout_seconds=float(effective_recalculation_timeout)
     )
     final = session.artifact_ref()
     recalculation = _sanitize_recalculation(
@@ -1729,7 +3018,32 @@ def finalize_deliverable(
                 "Postprocess transition is not a session recalculation"
             )
 
-    final_witness = _scan_final_revision(session.workbook_path, final)
+    no_formula_attestation = _no_formula_attestation(
+        recalculation,
+        artifact=final,
+    )
+    from .ooxml_formula_scan import OOXMLFormulaScanError, OOXMLFormulaScanLease
+
+    try:
+        with OOXMLFormulaScanLease.open(session.workbook_path) as final_scan_lease:
+            if (
+                final_scan_lease.scan.package_sha256 != final.sha256
+                or final_scan_lease.scan.has_formulas
+                or final_scan_lease.scan.to_dict() != recalculation.get("formula_scan")
+            ):
+                raise DeliverableValidationError(
+                    "Final workbook does not reproduce its no-formula scan"
+                )
+            final_witness = _scan_final_revision_snapshot(
+                final_scan_lease.snapshot_bytes,
+                final,
+                workbook_format=final_scan_lease.scan.workbook_format,
+            )
+            final_scan_lease.verify_binding(checkpoint="deliverable_finalization")
+    except OOXMLFormulaScanError as exc:
+        raise DeliverableValidationError(
+            "Final workbook could not be held for descriptor-bound inspection"
+        ) from exc
     visual_was_required = bool(
         certificate is not None and _candidate_has_visual_evidence(certificate)
     )
@@ -1748,15 +3062,6 @@ def finalize_deliverable(
         Path(SCORING_COPY_RELATIVE_PATH),
         label="scoring copy",
     )
-    transition_count_before_copy = len(session.artifact_transitions)
-    scoring_sha256 = _atomic_scoring_copy(session.workbook_path, scoring_copy)
-    if len(session.artifact_transitions) != transition_count_before_copy:
-        raise DeliverableValidationError(
-            "Creating the scoring replica must not publish an artifact transition"
-        )
-    if scoring_sha256 != final.sha256:
-        raise DeliverableValidationError("Scoring copy SHA-256 differs from final artifact")
-
     evidence_policy = {
         "accepted_candidate_evidence": candidate_outcome == _ACCEPTED_CANDIDATE,
         "candidate_evidence_carried_forward": (
@@ -1789,6 +3094,7 @@ def finalize_deliverable(
             "timeout_seconds": float(effective_recalculation_timeout),
             "recalculation": recalculation,
         },
+        "recalculation_attestation": no_formula_attestation,
         "evidence_policy": evidence_policy,
         "final_artifact": final.to_dict(),
         "final_revision_witness": final_witness,
@@ -1798,7 +3104,7 @@ def finalize_deliverable(
             "source_artifact": final.to_dict(),
             "artifact_role": "same_revision_replica",
             "creates_artifact_transition": False,
-            "sha256": scoring_sha256,
+            "sha256": final.sha256,
             "byte_identical": True,
             "read_only": True,
         },
@@ -1808,78 +3114,110 @@ def finalize_deliverable(
         **payload,
         "certificate_sha256": _canonical_sha256(payload, label="deliverable certificate"),
     }
-    recorder = getattr(session, "recorder", None)
-    if recorder is not None and callable(getattr(recorder, "record", None)):
-        accepted_deliverable = candidate_outcome == _ACCEPTED_CANDIDATE
-        recorder.record(
-            "observer.finalization_recorded",
-            {
-                "schema_version": DELIVERABLE_CERTIFICATE_SCHEMA_VERSION,
-                "candidate_outcome": candidate_outcome,
-                "accepted_deliverable": accepted_deliverable,
-                "candidate_artifact": candidate.to_dict(),
-                "final_artifact": final.to_dict(),
-                "scoring_copy_relative_path": SCORING_COPY_RELATIVE_PATH,
-                "certificate_sha256": deliverable_certificate["certificate_sha256"],
-            },
-        )
-    return DeliverableBundle(
+    bundle = DeliverableBundle(
         candidate_artifact=candidate,
         final_artifact=final,
         scoring_copy=scoring_copy,
         recalculation=recalculation,
         certificate=deliverable_certificate,
     )
+    recorder = getattr(session, "recorder", None)
+    transition_count_before_copy = len(session.artifact_transitions)
+    publication: _ScoringCopyPublication | None = None
+    trajectory_durable = False
+    transaction_handle: Any = None
+
+    def publish_scoring_copy(*, recover_existing: bool = False) -> None:
+        nonlocal publication
+        publication = (
+            _existing_scoring_copy(session.workbook_path, scoring_copy)
+            if recover_existing
+            else _atomic_scoring_copy(session.workbook_path, scoring_copy)
+        )
+        if len(session.artifact_transitions) != transition_count_before_copy:
+            raise DeliverableValidationError(
+                "Creating the scoring replica must not publish an artifact transition"
+            )
+        if publication.sha256 != final.sha256:
+            raise DeliverableValidationError("Scoring copy SHA-256 differs from final artifact")
+        publication.verify()
+
+    finalization_event = {
+        "schema_version": DELIVERABLE_CERTIFICATE_SCHEMA_VERSION,
+        "candidate_outcome": candidate_outcome,
+        # The append-only trajectory observes finalization but cannot atomically
+        # authorize a separate filesystem publication. Authorization is derived
+        # only by a fresh descriptor-bound audit of both records.
+        "accepted_deliverable": False,
+        "record_role": "observer_only_fresh_audit_required",
+        "candidate_artifact": candidate.to_dict(),
+        "final_artifact": final.to_dict(),
+        "scoring_copy_relative_path": SCORING_COPY_RELATIVE_PATH,
+        "certificate_sha256": deliverable_certificate["certificate_sha256"],
+    }
+    try:
+        if recorder is not None and callable(getattr(recorder, "record", None)):
+            transaction_factory = getattr(recorder, "transaction", None)
+            if not callable(transaction_factory):
+                raise DeliverableValidationError(
+                    "Finalization recorder does not support transactional publication"
+                )
+            with transaction_factory() as transaction:
+                transaction_handle = transaction
+                event_count, matching_event_count = transaction.event_counts(
+                    "observer.finalization_recorded",
+                    finalization_event,
+                )
+                scoring_copy_exists = scoring_copy.exists() or scoring_copy.is_symlink()
+                if event_count == 1 and matching_event_count == 1:
+                    publish_scoring_copy(recover_existing=True)
+                    assert publication is not None
+                    publication.verify()
+                    transaction.commit_read_only()
+                elif event_count == 0 and matching_event_count == 0:
+                    publish_scoring_copy(recover_existing=scoring_copy_exists)
+                    assert publication is not None
+                    transaction.record("observer.finalization_recorded", finalization_event)
+                    publication.verify()
+                    transaction.commit()
+                else:
+                    raise DeliverableValidationError(
+                        "Trajectory contains a conflicting finalization record"
+                    )
+            trajectory_durable = True
+            assert publication is not None
+            publication.commit()
+        else:
+            publish_scoring_copy()
+            assert publication is not None
+            publication.commit()
+        return bundle
+    except BaseException as exc:
+        trajectory_durable = trajectory_durable or bool(
+            getattr(transaction_handle, "durable", False)
+        )
+        if publication is not None:
+            try:
+                if trajectory_durable:
+                    publication.close()
+                else:
+                    publication.rollback()
+            except DeliverableValidationError as cleanup_error:
+                raise cleanup_error from exc
+        raise
 
 
 def score_read_only(
     bundle: DeliverableBundle,
     scorer: Callable[[Path], Any],
 ) -> Any:
-    """Run a scorer against only the immutable copy and prove it made no writes."""
+    """Score immutable bytes while the published name remains descriptor-bound."""
 
-    expected = bundle.final_artifact.sha256
-
-    def validate_copy(*, phase: str) -> str:
-        try:
-            metadata = bundle.scoring_copy.lstat()
-            digest = _sha256(bundle.scoring_copy)
-        except OSError as exc:
-            raise DeliverableValidationError(
-                f"Scoring copy is unavailable {phase} scoring"
-            ) from exc
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_mode & 0o222
-        ):
-            raise DeliverableValidationError(
-                f"Scoring copy must be a read-only regular non-symbolic file {phase} scoring"
-            )
-        if digest != expected:
-            raise DeliverableValidationError(f"Scoring copy changed {phase} scoring")
-        return digest
-
-    validate_copy(phase="before")
-    scorer_error: BaseException | None = None
-    scorer_traceback = None
-    result: Any = None
-    try:
-        try:
-            result = scorer(bundle.scoring_copy)
-        except BaseException as exc:
-            scorer_error = exc
-            scorer_traceback = exc.__traceback__
-    finally:
-        try:
-            validate_copy(phase="during")
-        except DeliverableValidationError as mutation_error:
-            if scorer_error is not None:
-                raise mutation_error from scorer_error
-            raise
-    if scorer_error is not None:
-        raise scorer_error.with_traceback(scorer_traceback)
-    return result
+    return _run_with_bound_scoring_input(
+        bundle.scoring_copy,
+        bundle.final_artifact.sha256,
+        scorer,
+    )
 
 
 def _transition_from_dict(value: Any) -> ArtifactTransition:
@@ -2080,6 +3418,7 @@ def _audit_deliverable_certificate(
     if not isinstance(certificate, Mapping):
         raise DeliverableValidationError("Deliverable certificate is missing")
     document = json.loads(json.dumps(certificate))
+    schema_version = document.get("schema_version")
     expected = {
         "schema_version",
         "candidate",
@@ -2093,10 +3432,11 @@ def _audit_deliverable_certificate(
         "scoring_copy",
         "certificate_sha256",
     }
-    if (
-        set(document) != expected
-        or document.get("schema_version") != DELIVERABLE_CERTIFICATE_SCHEMA_VERSION
-    ):
+    if schema_version == DELIVERABLE_CERTIFICATE_SCHEMA_VERSION:
+        expected.add("recalculation_attestation")
+    elif schema_version != LEGACY_DELIVERABLE_CERTIFICATE_SCHEMA_VERSION:
+        raise DeliverableValidationError("Deliverable certificate schema is unsupported")
+    if set(document) != expected:
         raise DeliverableValidationError("Deliverable certificate schema or fields are invalid")
     payload = {key: document[key] for key in document if key != "certificate_sha256"}
     _reject_absolute_certificate_paths(payload, label="deliverable certificate")
@@ -2186,6 +3526,24 @@ def _audit_deliverable_certificate(
     )
     if recalculation != postprocess.get("recalculation"):
         raise DeliverableValidationError("Deliverable recalculation contains untrusted fields")
+    from .ooxml_formula_scan import OOXML_NO_FORMULA_BACKEND
+
+    if (
+        schema_version == LEGACY_DELIVERABLE_CERTIFICATE_SCHEMA_VERSION
+        and recalculation.get("backend") == OOXML_NO_FORMULA_BACKEND
+    ):
+        raise DeliverableValidationError(
+            "Verified no-formula certificates cannot be downgraded to the legacy schema"
+        )
+    if schema_version == DELIVERABLE_CERTIFICATE_SCHEMA_VERSION:
+        expected_attestation = _no_formula_attestation(
+            recalculation,
+            artifact=final,
+        )
+        if document.get("recalculation_attestation") != expected_attestation:
+            raise DeliverableValidationError(
+                "Deliverable no-formula finalization witness is invalid"
+            )
     postprocess_count = len(transitions) - candidate_transition_count
     if postprocess_count not in {0, 1}:
         raise DeliverableValidationError("Deliverable postprocess transition count is invalid")
@@ -2202,11 +3560,30 @@ def _audit_deliverable_certificate(
     elif candidate != final:
         raise DeliverableValidationError("Changed deliverable is missing recalculation transition")
 
-    if not output_workbook.is_file() or output_workbook.is_symlink():
-        raise DeliverableValidationError("Final output workbook is missing or symbolic")
-    if _sha256(output_workbook) != final.sha256:
-        raise DeliverableValidationError("Final output workbook SHA-256 does not match")
-    expected_witness = _scan_final_revision(output_workbook, final)
+    from .ooxml_formula_scan import OOXMLFormulaScanError, OOXMLFormulaScanLease
+
+    try:
+        with OOXMLFormulaScanLease.open(output_workbook) as audit_scan_lease:
+            independent_scan = audit_scan_lease.scan
+            if independent_scan.package_sha256 != final.sha256:
+                raise DeliverableValidationError("Final output workbook SHA-256 does not match")
+            if schema_version == DELIVERABLE_CERTIFICATE_SCHEMA_VERSION and (
+                independent_scan.has_formulas
+                or independent_scan.to_dict() != recalculation.get("formula_scan")
+            ):
+                raise DeliverableValidationError(
+                    "Final output does not reproduce the no-formula attestation"
+                )
+            expected_witness = _scan_final_revision_snapshot(
+                audit_scan_lease.snapshot_bytes,
+                final,
+                workbook_format=independent_scan.workbook_format,
+            )
+            audit_scan_lease.verify_binding(checkpoint="certificate_audit")
+    except OOXMLFormulaScanError as exc:
+        raise DeliverableValidationError(
+            "Final output does not reproduce the no-formula attestation"
+        ) from exc
     if document.get("final_revision_witness") != expected_witness:
         raise DeliverableValidationError("Final revision witness does not reproduce")
 
@@ -2252,6 +3629,8 @@ def _audit_deliverable_certificate(
     }:
         raise DeliverableValidationError("Scoring copy certificate fields are invalid")
     relative = _relative_certificate_path(scoring.get("relative_path"), label="scoring copy")
+    if relative != Path(SCORING_COPY_RELATIVE_PATH):
+        raise DeliverableValidationError("Scoring copy path is not the fixed publication name")
     scoring_path = _path_inside(run_root, relative, label="scoring copy")
     try:
         metadata = scoring_path.lstat()
@@ -2311,6 +3690,8 @@ __all__ = [
     "ADVISORY_TARGET_GROUNDING_CERTIFICATE_SCHEMA_VERSION",
     "COMPARISON_RESULT_SCHEMA_VERSION",
     "DELIVERABLE_CERTIFICATE_SCHEMA_VERSION",
+    "LEGACY_DELIVERABLE_CERTIFICATE_SCHEMA_VERSION",
+    "NO_FORMULA_ATTESTATION_SCHEMA_VERSION",
     "DeliverableAudit",
     "DeliverableBundle",
     "DeliverableValidationError",
