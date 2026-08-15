@@ -1496,6 +1496,39 @@ def test_audit_rejects_tampered_recalculation_failure_evidence(
     assert summary["rows"][0]["reasons"]
 
 
+@pytest.mark.parametrize(
+    ("tamper", "value"),
+    [
+        ("missing", None),
+        ("wrong_arm", ["bare"]),
+        ("wrong_type", "ours"),
+    ],
+)
+def test_audit_rejects_formula_runtime_gate_arm_policy_tampering(
+    tmp_path: Path,
+    tamper: str,
+    value: object,
+) -> None:
+    results, task, row = _fixture(tmp_path, arm="ours")
+    path = results / "comparison-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if tamper == "missing":
+        manifest["configuration"].pop("formula_runtime_gate_arms")
+    else:
+        manifest["configuration"]["formula_runtime_gate_arms"] = value
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(path)
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "comparison_manifest_policy_mismatch" in summary["reasons"]
+
+
 def test_live_v23_pilot_audit_has_no_version_drift_false_positives() -> None:
     results = Path(
         "benchmarks/results/qwen36-local-pilot16-v2-bare-ours-v23-seed41"
@@ -3014,6 +3047,10 @@ def test_v27_audit_accepts_historical_source_fingerprint(tmp_path: Path) -> None
     manifest["schema_version"] = V27_COMPARISON_MANIFEST_SCHEMA_VERSION
     manifest["comparison_protocol_version"] = V27_COMPARISON_PROTOCOL_VERSION
     manifest["configuration"].update(V27_COMPARISON_CONFIGURATION_POLICIES)
+    for field in set(COMPARISON_CONFIGURATION_POLICIES) - set(
+        V27_COMPARISON_CONFIGURATION_POLICIES
+    ):
+        manifest["configuration"].pop(field, None)
     manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
         manifest["stage_turn_caps"],
         protocol_version=V27_COMPARISON_PROTOCOL_VERSION,

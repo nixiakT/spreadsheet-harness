@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +14,9 @@ import spreadsheet_harness.comparison as comparison_module
 import spreadsheet_harness.render as render_module
 from spreadsheet_harness import benchmark as benchmark_module
 from spreadsheet_harness import cli as cli_module
-from spreadsheet_harness.agent import AgentResult
+from spreadsheet_harness.agent import AgentResult, ResponseTurn
 from spreadsheet_harness.arms import PaperStageValidationError
+from spreadsheet_harness.audit import audit_comparison
 from spreadsheet_harness.benchmark import SpreadsheetTask, compare_workbooks
 from spreadsheet_harness.comparison import (
     AVAILABLE_COMPARISON_ARMS,
@@ -185,12 +187,14 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["formula_runtime_gate"] == (
         "raw-ooxml-dirty-formula-scope-complete-clean-calc-v1"
     )
+    assert manifest["configuration"]["formula_runtime_gate_arms"] == ["ours"]
     assert manifest["configuration"]["formula_runtime_validation_scope"] == (
         "range-or-single-recalc-sparse-pending-formulas-v1"
     )
     assert "artifact_reopen_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert "scoring_compatibility_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert "formula_runtime_gate" not in V27_COMPARISON_CONFIGURATION_POLICIES
+    assert "formula_runtime_gate_arms" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert (
         "formula_runtime_validation_scope"
         not in V27_COMPARISON_CONFIGURATION_POLICIES
@@ -2478,6 +2482,239 @@ def test_comparison_persists_agent_tool_recalculation_failure_without_scoring(
     assert not_evaluated[0]["payload"]["infrastructure_failure_tool"] == (
         "recalculate_and_read"
     )
+
+
+def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    code_calls = 0
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.code_interpreter.ensure_strict_code_isolation",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def fake_code_run(
+        interpreter: Any,
+        code: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        nonlocal code_calls
+        del code, timeout_seconds
+        code_calls += 1
+        before = hashlib.sha256(interpreter.workbook.read_bytes()).hexdigest()
+        if code_calls == 1:
+            workbook = load_workbook(interpreter.workbook)
+            try:
+                workbook.active["B1"] = "=1+1"
+                workbook.save(interpreter.workbook)
+            finally:
+                workbook.close()
+        after = hashlib.sha256(interpreter.workbook.read_bytes()).hexdigest()
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "truncated": False,
+            "sandbox": "test-isolation",
+            "workbook_sha256_before": before,
+            "workbook_sha256_after": after,
+            "workbook_changed": before != after,
+            "managed_mutation_attempted": code_calls == 1,
+        }
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.code_interpreter.LocalCodeInterpreter.run",
+        fake_code_run,
+    )
+
+    steps = [
+        ("code_interpreter", {"code": "write_formula"}),
+        ("code_interpreter", {"code": "verify_formula"}),
+        (
+            "recalculate_and_read",
+            {"validation_scope": "pending_formula_changes"},
+        ),
+    ]
+    requests: list[dict[str, Any]] = []
+
+    class SequenceClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> SequenceClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **_kwargs: Any) -> ResponseTurn:
+            requests.append(deepcopy(payload))
+            name, arguments = steps[self.turn]
+            self.turn += 1
+            return ResponseTurn(
+                response_id=f"response-{self.turn}",
+                output=[
+                    {
+                        "type": "function_call",
+                        "id": f"fc-{self.turn}",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                text="",
+                usage={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                attempt_history=[
+                    {"api_protocol": "responses", "endpoint": "/responses"}
+                ],
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient",
+        SequenceClient,
+    )
+    monkeypatch.setattr(render_module, "find_libreoffice", lambda explicit=None: "/fake/soffice")
+    monkeypatch.setattr(
+        render_module,
+        "libreoffice_version",
+        lambda binary: "LibreOffice test",
+    )
+
+    def fake_convert(
+        source_copy: Path,
+        output_dir: Path,
+        **kwargs: object,
+    ) -> Path:
+        del kwargs
+        output_dir.mkdir(parents=True)
+        converted = output_dir / source_copy.name
+        shutil.copy2(source_copy, converted)
+        workbook = load_workbook(converted)
+        try:
+            workbook.active.title = "Changed"
+            workbook.save(converted)
+        finally:
+            workbook.close()
+        return converted
+
+    def must_not_score(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("agent-tool recalculation drift must stop before scoring")
+
+    monkeypatch.setattr(render_module, "_convert_with_libreoffice", fake_convert)
+    monkeypatch.setattr(
+        comparison_module,
+        "compare_workbooks_chartsheet_safe",
+        must_not_score,
+    )
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "pending-formula-recalculation-drift",
+        skill_registry=SkillRegistry([]),
+        arms=("ours",),
+        max_model_calls=4,
+        max_turns_per_arm=4,
+        max_total_tokens=1_000,
+        max_output_tokens=64,
+        task_timeout_seconds=30,
+        recalculate=True,
+    )
+    runner._prepare_manifest([task])
+    manifest_sha256 = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
+
+    row = runner._run_one(
+        task,
+        "ours",
+        comparison_manifest_sha256=manifest_sha256,
+    )
+
+    assert row["status"] == "error"
+    assert row["outcome_kind"] == "infrastructure_failure"
+    assert row["score_available"] is False
+    assert row["error_category"] == "recalculation_infrastructure"
+    assert row["infrastructure_failure_stage"] == "agent_tool_recalculation"
+    assert row["agent_failure_stage"] == "solve"
+    assert row["infrastructure_failure_tool"] == "recalculate_and_read"
+    assert "comparison" not in row
+    assert "artifact_score_passed" not in row
+    stage = row["agent"]["stages"][-1]
+    expected_failure = {
+        "name": "recalculate_and_read",
+        "ok": False,
+        "error_type": "RecalculationIntegrityError",
+        "failure_category": "recalculation_infrastructure",
+    }
+    assert stage["tool_trace"][-1] == expected_failure
+    assert stage["observed_terminal_tool"] is None
+    assert stage["agent"]["observed_terminal_tool"] is None
+    assert stage["agent"]["terminal_submissions"] == 0
+    assert row["agent"]["observed_terminal_tool"] is None
+    assert row["agent"]["terminal_submissions"] == 0
+    assert requests[2]["tool_choice"] == {
+        "type": "function",
+        "name": "recalculate_and_read",
+    }
+    assert [tool["name"] for tool in requests[2]["tools"]] == [
+        "recalculate_and_read"
+    ]
+
+    trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
+    formula_changes = [
+        item for item in trajectory if item["event"] == "agent.formula_state_changed"
+    ]
+    assert formula_changes[0]["payload"]["pending"]["coordinate_count"] == 1
+    sparse_calls = [
+        item
+        for item in trajectory
+        if item["event"] == "tool.called"
+        and item["payload"]["name"] == "recalculate_and_read"
+    ]
+    assert sparse_calls[-1]["payload"]["arguments"] == {
+        "validation_scope": "pending_formula_changes"
+    }
+    assert any(item["event"] == "agent.infrastructure_failed" for item in trajectory)
+    assert not any(item["event"] == "benchmark.evaluated" for item in trajectory)
+
+    runner.results_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    summary = audit_comparison(runner.output_dir, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["rows"][0]["audit_valid"] is True
+    assert summary["known_recalculation_infrastructure_failure_rows"] == 1
+
+    tampered_row = deepcopy(row)
+    tampered_stage = tampered_row["agent"]["stages"][-1]
+    terminal_response = {
+        "status": "accepted",
+        "response_id": tampered_stage["agent"]["response_id"],
+        "acknowledgement": {},
+    }
+    tampered_stage["observed_terminal_tool"] = "submit_result"
+    tampered_stage["agent"]["observed_terminal_tool"] = "submit_result"
+    tampered_stage["agent"]["terminal_submissions"] = 1
+    tampered_stage["agent"]["function_calls_total"] = 4
+    tampered_stage["agent"]["terminal_response"] = terminal_response
+    tampered_row["agent"]["observed_terminal_tool"] = "submit_result"
+    tampered_row["agent"]["terminal_submissions"] = 1
+    tampered_row["agent"]["function_calls_total"] = 4
+    tampered_row["agent"]["terminal_response"] = terminal_response
+    runner.results_path.write_text(
+        json.dumps(tampered_row) + "\n",
+        encoding="utf-8",
+    )
+
+    tampered = audit_comparison(runner.output_dir, [task])
+
+    assert tampered["audit_valid"] is False
+    assert tampered["rows"][0]["audit_valid"] is False
+    assert "agent_observed_terminal_invalid:solve" in tampered["rows"][0]["reasons"]
+    assert "accepted_terminal_response_evidence_invalid" in tampered["rows"][0][
+        "reasons"
+    ]
 
 
 def test_comparison_classifies_unsupported_scorer_as_infrastructure_no_score(

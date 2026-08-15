@@ -221,6 +221,7 @@ COMPARISON_CONFIGURATION_POLICIES = {
     "formula_runtime_gate": (
         "raw-ooxml-dirty-formula-scope-complete-clean-calc-v1"
     ),
+    "formula_runtime_gate_arms": ["ours"],
     "formula_runtime_validation_scope": (
         "range-or-single-recalc-sparse-pending-formulas-v1"
     ),
