@@ -25,3 +25,14 @@ def sample_workbook(tmp_path: Path) -> Path:
     second.append(["tax", 0.1])
     workbook.save(path)
     return path
+
+
+@pytest.fixture
+def empty_chartsheet_workbook(tmp_path: Path) -> Path:
+    path = tmp_path / "empty-chartsheet.xlsx"
+    workbook = Workbook()
+    workbook.active.title = "Data"
+    workbook.create_chartsheet("Chart").sheet_state = "hidden"
+    workbook.save(path)
+    workbook.close()
+    return path

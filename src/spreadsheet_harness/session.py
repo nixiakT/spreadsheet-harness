@@ -16,7 +16,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
 from openpyxl.styles import Border, PatternFill, Side
 from openpyxl.styles.cell_style import StyleArray
@@ -26,6 +25,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from .code_interpreter import validate_formula_transaction
 from .errors import RecalculationIntegrityError, ToolInputError, WorkbookValidationError
+from .openpyxl_compat import load_workbook
 from .trajectory import TrajectoryRecorder
 
 SUPPORTED_EDIT_FORMATS = {".xlsx", ".xlsm"}

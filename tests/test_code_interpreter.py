@@ -16,6 +16,8 @@ from spreadsheet_harness.agent import ResponseTurn, SpreadsheetAgent
 from spreadsheet_harness.code_interpreter import LocalCodeInterpreter
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import CodeIsolationError, ToolInputError
+from spreadsheet_harness.openpyxl_compat import load_workbook as compat_load_workbook
+from spreadsheet_harness.render import sheet_inventory_identity
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry
 
@@ -233,6 +235,53 @@ wb.close()
     assert result["workbook_changed"] is True
     assert result["helper_module"] == "sheet_harness.py"
     assert "Sales" in result["stdout"]
+
+
+def test_code_interpreter_helper_preserves_empty_chartsheet_across_reopens(
+    empty_chartsheet_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    expected_sheets = sheet_inventory_identity(empty_chartsheet_workbook)["sheets"]
+    session = WorkbookSession.create(
+        empty_chartsheet_workbook,
+        tmp_path / "chartsheet-helper-run",
+    )
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+wb = sheet_harness.load_workbook()
+assert wb.sheetnames == ["Data", "Chart"]
+assert wb["Chart"].sheet_state == "hidden"
+wb["Data"]["A1"] = "first helper edit"
+sheet_harness.save_workbook(wb)
+wb.close()
+
+reopened = sheet_harness.load_workbook()
+assert reopened["Chart"].sheet_state == "hidden"
+reopened["Data"]["A2"] = "second helper edit"
+sheet_harness.save_workbook(reopened)
+reopened.close()
+
+verified = sheet_harness.load_workbook(data_only=False)
+assert verified["Chart"].sheet_state == "hidden"
+assert verified["Data"]["A2"].value == "second helper edit"
+verified.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert result["workbook_changed"] is True
+    assert sheet_inventory_identity(session.workbook_path)["sheets"] == expected_sheets
+    workbook = compat_load_workbook(session.workbook_path)
+    assert workbook["Data"]["A1"].value == "first helper edit"
+    assert workbook["Data"]["A2"].value == "second helper edit"
+    assert workbook["Chart"].sheet_state == "hidden"
+    workbook.close()
 
 
 def test_code_interpreter_openpyxl_compat_shim_exposes_read_only_formula_and_merge_aliases(

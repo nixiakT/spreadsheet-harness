@@ -8,6 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from spreadsheet_harness.errors import ToolInputError
+from spreadsheet_harness.openpyxl_compat import load_workbook as compat_load_workbook
+from spreadsheet_harness.render import sheet_inventory_identity
 from spreadsheet_harness.session import WorkbookSession
 
 
@@ -48,6 +50,25 @@ def test_failed_mutation_keeps_workbook_valid(sample_workbook: Path, tmp_path: P
         session.manage_sheet("delete", "missing")
     assert session.workbook_path.read_bytes() == original
     assert session.list_sheets()["sheets"][0]["name"] == "Sales"
+
+
+def test_session_create_and_mutations_preserve_empty_chartsheet(
+    empty_chartsheet_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    expected_sheets = sheet_inventory_identity(empty_chartsheet_workbook)["sheets"]
+    session = WorkbookSession.create(empty_chartsheet_workbook, tmp_path / "chartsheet-run")
+
+    session.write_range("Data", "A1", [["first edit"]])
+    session.write_range("Data", "A2", [["second edit"]])
+
+    assert sheet_inventory_identity(session.workbook_path)["sheets"] == expected_sheets
+    workbook = compat_load_workbook(session.workbook_path)
+    assert workbook.sheetnames == ["Data", "Chart"]
+    assert workbook["Chart"].sheet_state == "hidden"
+    assert workbook["Data"]["A1"].value == "first edit"
+    assert workbook["Data"]["A2"].value == "second edit"
+    workbook.close()
 
 
 def test_range_limits(sample_workbook: Path, tmp_path: Path) -> None:

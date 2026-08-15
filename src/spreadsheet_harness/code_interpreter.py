@@ -23,11 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openpyxl import load_workbook
 from openpyxl.formula import Tokenizer
 from openpyxl.utils import FORMULAE, column_index_from_string, coordinate_to_tuple
 
 from .errors import CodeIsolationError, ToolInputError, redact_sensitive_text
+from .openpyxl_compat import load_workbook
 
 STRICT_ISOLATION_POLICY = "bubblewrap-strict-workspace-v1"
 _PROBE_SENTINEL = "SHEET_STRICT_ISOLATION_OK"
@@ -85,6 +85,67 @@ class _FormulaTextCandidate:
 
 
 _OPENPYXL_COMPAT_SHIM = r"""
+from openpyxl.chartsheet import Chartsheet as _SheetHarnessChartsheet
+from openpyxl.drawing.spreadsheet_drawing import (
+    SpreadsheetDrawing as _SheetHarnessSpreadsheetDrawing,
+)
+from openpyxl.packaging.relationship import (
+    RelationshipList as _SheetHarnessRelationshipList,
+    get_rels_path as _sheet_harness_get_rels_path,
+)
+from openpyxl.reader.drawings import find_images as _sheet_harness_find_images
+from openpyxl.reader.excel import ExcelReader as _SheetHarnessExcelReader
+from openpyxl.xml.functions import fromstring as _sheet_harness_fromstring
+
+
+class _SheetHarnessChartsheetCompatibleReader(_SheetHarnessExcelReader):
+    def read_chartsheet(self, sheet, rel):
+        sheet_path = rel.target
+        rels_path = _sheet_harness_get_rels_path(sheet_path)
+        if rels_path in self.valid_files:
+            super().read_chartsheet(sheet, rel)
+            self.wb._sheets[-1].sheet_state = sheet.state
+            return
+
+        # openpyxl 3.1.5 uses a plain list here, then calls ``find`` on it.
+        rels = _SheetHarnessRelationshipList()
+        with self.archive.open(sheet_path, "r") as source:
+            node = _sheet_harness_fromstring(source.read())
+        chartsheet = _SheetHarnessChartsheet.from_tree(node)
+        chartsheet._parent = self.wb
+        chartsheet.title = sheet.name
+        chartsheet.sheet_state = sheet.state
+        self.wb._add_sheet(chartsheet)
+
+        for drawing_rel in rels.find(_SheetHarnessSpreadsheetDrawing._rel_type):
+            charts, _images = _sheet_harness_find_images(
+                self.archive,
+                drawing_rel.target,
+            )
+            for chart in charts:
+                chartsheet.add_chart(chart)
+
+
+def _sheet_harness_load_workbook(
+    filename,
+    read_only=False,
+    keep_vba=False,
+    data_only=False,
+    keep_links=True,
+    rich_text=False,
+):
+    reader = _SheetHarnessChartsheetCompatibleReader(
+        filename,
+        read_only,
+        keep_vba,
+        data_only,
+        keep_links,
+        rich_text,
+    )
+    reader.read()
+    return reader.wb
+
+
 def _sheet_harness_install_openpyxl_compat():
     try:
         from openpyxl.workbook.defined_name import DefinedNameDict
@@ -157,7 +218,6 @@ from copy import copy
 from pathlib import Path
 from typing import Any
 
-from openpyxl import load_workbook as _openpyxl_load_workbook
 from openpyxl.formula.translate import Translator
 from openpyxl.utils import get_column_letter, range_boundaries
 
@@ -195,7 +255,7 @@ def load_workbook(path: str | Path | None = None, *, data_only: bool = False, **
     target = Path(path) if path is not None else workbook_path()
     kwargs.setdefault("keep_vba", target.suffix.lower() == ".xlsm")
     kwargs.setdefault("keep_links", True)
-    return _openpyxl_load_workbook(target, data_only=data_only, **kwargs)
+    return _sheet_harness_load_workbook(target, data_only=data_only, **kwargs)
 
 
 def table_map(worksheet: Any) -> dict[str, Any]:
@@ -462,7 +522,7 @@ def save_workbook(workbook: Any, path: str | Path | None = None) -> Path:
         calculation.forceFullCalc = True
         calculation.calcMode = "auto"
     workbook.save(target)
-    validator = _openpyxl_load_workbook(
+    validator = _sheet_harness_load_workbook(
         target,
         read_only=True,
         data_only=False,
