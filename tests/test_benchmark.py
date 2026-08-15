@@ -27,7 +27,11 @@ from spreadsheet_harness.benchmark import (
     verify_trace2skill_heldout_manifest,
 )
 from spreadsheet_harness.config import ProviderConfig
-from spreadsheet_harness.errors import HarnessError, ProviderError
+from spreadsheet_harness.errors import (
+    HarnessError,
+    ProviderError,
+    RecalculationIntegrityError,
+)
 from spreadsheet_harness.trajectory import read_trajectory
 
 
@@ -1722,6 +1726,77 @@ def test_benchmark_recalculation_sheet_drift_is_infrastructure_error(
         "accuracy": None,
         "primary": False,
     }
+
+
+def test_benchmark_preserves_agent_tool_recalculation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = tmp_path / "initial.xlsx"
+    golden = tmp_path / "golden.xlsx"
+    _book(initial, {"Sheet": [[1]]})
+    _book(golden, {"Sheet": [[1]]})
+    partial = AgentResult(
+        final_text="Agent interrupted by recalculation infrastructure failure.",
+        turns=1,
+        tool_calls=1,
+        usage={"input_tokens": 7, "output_tokens": 2, "total_tokens": 9},
+        response_id="response-infrastructure-failure",
+        tool_trace=[
+            {
+                "name": "recalculate_and_read",
+                "ok": False,
+                "error_type": "RecalculationIntegrityError",
+                "failure_category": "recalculation_infrastructure",
+            }
+        ],
+    )
+    failure = RecalculationIntegrityError(
+        "Recalculation changed sheet identity",
+        evidence={
+            "backend": "libreoffice-headless",
+            "sheet_inventory_integrity": {"matched": False},
+        },
+    )
+    failure.agent_result = partial
+    failure.agent_stage = "solve"
+    failure.failed_tool = "recalculate_and_read"
+
+    class ToolFailureAgent:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def run(self, _: str) -> AgentResult:
+            raise failure
+
+    def must_not_score(*_: object, **__: object) -> object:
+        raise AssertionError("agent-tool integrity failure must stop before scoring")
+
+    monkeypatch.setattr(benchmark_module, "SpreadsheetAgent", ToolFailureAgent)
+    monkeypatch.setattr(
+        benchmark_module,
+        "compare_workbooks_chartsheet_safe",
+        must_not_score,
+    )
+    task = SpreadsheetTask("1", "noop", initial, golden, "Cell-Level", "A1", "Sheet")
+    runner = VerifiedBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "tool-failure-results",
+        enable_code=False,
+        recalculate=True,
+    )
+
+    row = runner._run_task(task, 1)
+
+    assert row["status"] == "error"
+    assert row["outcome_kind"] == "infrastructure_failure"
+    assert row["score_available"] is False
+    assert row["error_category"] == "recalculation_infrastructure"
+    assert row["infrastructure_failure_stage"] == "agent_tool_recalculation"
+    assert row["agent_failure_stage"] == "solve"
+    assert row["infrastructure_failure_tool"] == "recalculate_and_read"
+    assert row["agent"] == partial.to_dict()
+    assert "comparison" not in row
 
 
 def test_benchmark_passes_provider_key_to_registry_redaction(

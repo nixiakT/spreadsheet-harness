@@ -14,7 +14,7 @@ from spreadsheet_harness import arms
 from spreadsheet_harness.agent import AgentResult, ResponseTurn
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
-from spreadsheet_harness.errors import AgentBudgetError
+from spreadsheet_harness.errors import AgentBudgetError, RecalculationIntegrityError
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import ToolOutcome
 from spreadsheet_harness.trajectory import read_trajectory
@@ -941,6 +941,90 @@ def test_arm_does_not_reclassify_elapsed_budget_as_model_failure(
         )
 
     assert caught.value.reason == "max_elapsed_seconds"
+
+
+def test_arm_aggregates_partial_recalculation_infrastructure_evidence(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    failure = RecalculationIntegrityError(
+        "Recalculation changed sheet identity",
+        evidence={"sheet_inventory_integrity": {"matched": False}},
+    )
+
+    class InfrastructureFailureAgent:
+        def __init__(self, *_: Any, **kwargs: Any) -> None:
+            self.stage = str(kwargs["stage"])
+            self.forced_tool_prefix = list(kwargs["forced_tool_prefix"])
+
+        def run(self, _: str) -> AgentResult:
+            failure.agent_stage = self.stage
+            failure.failed_tool = "recalculate_and_read"
+            failure.agent_result = AgentResult(
+                final_text="Agent interrupted by recalculation infrastructure failure.",
+                turns=3,
+                tool_calls=3,
+                usage={
+                    "input_tokens": 30,
+                    "output_tokens": 3,
+                    "total_tokens": 33,
+                },
+                response_id="response-infrastructure-failure",
+                request_timings=[{"turn": turn} for turn in range(1, 4)],
+                budget={
+                    "limit": {},
+                    "used": {"model_calls": 3, "total_tokens": 33},
+                    "termination": None,
+                },
+                stage=self.stage,
+                tool_trace=[
+                    {"name": "code_interpreter", "ok": True},
+                    {"name": "code_interpreter", "ok": True},
+                    {
+                        "name": "recalculate_and_read",
+                        "ok": False,
+                        "error_type": "RecalculationIntegrityError",
+                        "failure_category": "recalculation_infrastructure",
+                    },
+                ],
+                first_tool_choice=self.forced_tool_prefix[0],
+                observed_first_tool=self.forced_tool_prefix[0],
+                forced_tool_prefix=self.forced_tool_prefix,
+                observed_forced_tool_prefix=self.forced_tool_prefix,
+                post_prefix_tool_choice="auto",
+                terminal_tool="submit_result",
+                observed_terminal_tool=None,
+            )
+            raise failure
+
+    monkeypatch.setattr(arms, "SpreadsheetAgent", InfrastructureFailureAgent)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "arm-integrity")
+
+    with pytest.raises(RecalculationIntegrityError) as caught:
+        arms.run_arm(
+            "ours",
+            _config(),
+            session,
+            None,
+            "validate formulas",
+            4_000,
+            300,
+            RunBudget(max_model_calls=8, max_total_tokens=120_000),
+        )
+
+    assert caught.value is failure
+    result = caught.value.agent_result
+    assert result is not None
+    serialized = result.to_dict()
+    assert serialized["arm"] == "ours"
+    assert serialized["observed_terminal_tool"] is None
+    assert serialized["terminal_submissions"] == 0
+    assert serialized["stages"][0]["name"] == "solve"
+    assert serialized["stages"][0]["observed_terminal_tool"] is None
+    assert serialized["stages"][0]["agent"]["tool_trace"][-1][
+        "failure_category"
+    ] == "recalculation_infrastructure"
 
 
 def test_comparison_turn_caps_scale_to_trace2skill_ceiling() -> None:

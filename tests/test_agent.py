@@ -29,6 +29,7 @@ from spreadsheet_harness.errors import (
     HarnessError,
     ProviderError,
     ProviderOutputLimitError,
+    RecalculationIntegrityError,
 )
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
@@ -1608,6 +1609,106 @@ def test_agent_fails_closed_after_invalid_calculation_without_later_repair(
     )
     assert events[-1]["event"] == "agent.execution_failed"
     assert events[-1]["payload"]["reason"] == "edit_recovery_exhausted"
+
+
+def test_agent_attaches_partial_evidence_to_recalculation_integrity_failure(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    evidence = {
+        "backend": "libreoffice-headless",
+        "sheet_inventory_integrity": {"matched": False},
+    }
+    failure = RecalculationIntegrityError(
+        "Recalculation changed sheet identity",
+        evidence=evidence,
+    )
+
+    class IntegrityFailureTools:
+        schemas = [
+            {
+                "type": "function",
+                "name": "recalculate_and_read",
+                "description": "recalculate and validate",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            assert name == "recalculate_and_read"
+            assert arguments == {"sheet": "Sales", "range_ref": "A1"}
+            raise failure
+
+    class IntegrityFailureClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> IntegrityFailureClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, _: dict[str, Any], **__: Any) -> ResponseTurn:
+            return ResponseTurn(
+                "response-integrity-failure",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-integrity-failure",
+                        "name": "recalculate_and_read",
+                        "arguments": json.dumps(
+                            {"sheet": "Sales", "range_ref": "A1"}
+                        ),
+                    }
+                ],
+                "",
+                {"input_tokens": 7, "output_tokens": 2, "total_tokens": 9},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", IntegrityFailureClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "agent-integrity")
+
+    with pytest.raises(RecalculationIntegrityError) as caught:
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            IntegrityFailureTools(session),  # type: ignore[arg-type]
+            stage="solve",
+            required_tool_termination=True,
+            max_turns=2,
+        ).run("Validate formulas")
+
+    error = caught.value
+    assert error is failure
+    assert error.agent_stage == "solve"
+    assert error.failed_tool == "recalculate_and_read"
+    result = error.agent_result
+    assert result is not None
+    assert result.turns == 1
+    assert result.tool_calls == 1
+    assert result.usage == {
+        "input_tokens": 7,
+        "output_tokens": 2,
+        "total_tokens": 9,
+    }
+    assert result.terminal_tool == "submit_result"
+    assert result.observed_terminal_tool is None
+    assert result.terminal_submissions == 0
+    assert result.tool_trace == [
+        {
+            "name": "recalculate_and_read",
+            "ok": False,
+            "error_type": "RecalculationIntegrityError",
+            "failure_category": "recalculation_infrastructure",
+        }
+    ]
+    trajectory = _calculation_trajectory(session)
+    assert trajectory[-1]["event"] == "agent.infrastructure_failed"
+    assert trajectory[-1]["payload"]["agent"] == result.to_dict()
 
 
 _CALCULATION_TEST_SCHEMAS = [

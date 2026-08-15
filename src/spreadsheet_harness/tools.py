@@ -14,7 +14,12 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
 from .code_interpreter import LocalCodeInterpreter
-from .errors import CodeIsolationError, HarnessError, ToolInputError
+from .errors import (
+    CodeIsolationError,
+    HarnessError,
+    RecalculationIntegrityError,
+    ToolInputError,
+)
 from .session import WorkbookSession
 
 _INSPECT_MAX_CELLS = 500
@@ -594,6 +599,19 @@ class SpreadsheetToolRegistry:
         self.session.recorder.record("tool.called", {"name": name, "arguments": arguments})
         try:
             outcome = handler(arguments)
+        except RecalculationIntegrityError as exc:
+            # Sheet-identity drift is a no-score infrastructure condition. It
+            # must reach the runner rather than becoming model-visible output.
+            self.session.recorder.record(
+                "tool.failed",
+                {
+                    "name": name,
+                    "error_type": type(exc).__name__,
+                    "failure_category": "recalculation_infrastructure",
+                    "recalculation": exc.evidence,
+                },
+            )
+            raise
         except CodeIsolationError:
             # Required comparison isolation is a harness invariant, not a
             # recoverable model tool error. Never let the agent continue.

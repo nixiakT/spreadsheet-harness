@@ -32,6 +32,7 @@ from .errors import (
     HarnessError,
     ProviderError,
     ProviderOutputLimitError,
+    RecalculationIntegrityError,
     redact_sensitive_text,
 )
 from .pacing import RelayPacer
@@ -4078,7 +4079,42 @@ class SpreadsheetAgent:
                         summary_arguments: Any = raw_arguments
                     else:
                         parsed_arguments = arguments
-                        outcome = self.tools.invoke(name, arguments)
+                        try:
+                            outcome = self.tools.invoke(name, arguments)
+                        except RecalculationIntegrityError as exc:
+                            tool_trace.append(
+                                {
+                                    "name": name,
+                                    "ok": False,
+                                    "error_type": type(exc).__name__,
+                                    "failure_category": "recalculation_infrastructure",
+                                }
+                            )
+                            result = partial_result(
+                                final_text=(
+                                    "Agent interrupted by recalculation "
+                                    "infrastructure failure."
+                                ),
+                                turns=turn_number,
+                                observed_terminal_tool=None,
+                            )
+                            exc.agent_result = result
+                            exc.agent_stage = self.stage
+                            exc.failed_tool = name
+                            session.recorder.record(
+                                "agent.infrastructure_failed",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "tool": name,
+                                    "error_type": type(exc).__name__,
+                                    "failure_category": (
+                                        "recalculation_infrastructure"
+                                    ),
+                                    "agent": result.to_dict(),
+                                },
+                            )
+                            raise
                         outcome_data = outcome.data
                         summary_arguments = arguments
                     if _failed_tool_requires_edit_recovery(

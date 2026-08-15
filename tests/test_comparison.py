@@ -55,6 +55,7 @@ from spreadsheet_harness.errors import (
     CodeIsolationError,
     HarnessError,
     ProviderError,
+    RecalculationIntegrityError,
     ScoringInfrastructureError,
 )
 from spreadsheet_harness.skills import SkillRegistry
@@ -171,6 +172,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     )
     assert manifest["configuration"]["recalculation_failure_policy"] == (
         "audited-infrastructure-error-no-score-v1"
+    )
+    assert manifest["configuration"]["recalculation_failure_stage_policy"] == (
+        "postprocess-or-agent-tool-recalculation-v1"
     )
     assert manifest["configuration"]["artifact_reopen_policy"] == (
         "ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"
@@ -2379,6 +2383,90 @@ def test_comparison_recalculation_sheet_drift_is_persisted_without_scoring(
         "recalculation_infrastructure"
     )
     assert not_evaluated[0]["payload"]["recalculation"] == row["recalculation"]
+
+
+def test_comparison_persists_agent_tool_recalculation_failure_without_scoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    partial = AgentResult(
+        final_text="Agent interrupted by recalculation infrastructure failure.",
+        turns=3,
+        tool_calls=3,
+        usage={"input_tokens": 30, "output_tokens": 3, "total_tokens": 33},
+        response_id="response-infrastructure-failure",
+        tool_trace=[
+            {"name": "code_interpreter", "ok": True},
+            {"name": "code_interpreter", "ok": True},
+            {
+                "name": "recalculate_and_read",
+                "ok": False,
+                "error_type": "RecalculationIntegrityError",
+                "failure_category": "recalculation_infrastructure",
+            },
+        ],
+        terminal_tool="submit_result",
+        observed_terminal_tool=None,
+    )
+    partial.arm = "ours"  # type: ignore[attr-defined]
+    partial.stages = []  # type: ignore[attr-defined]
+    failure = RecalculationIntegrityError(
+        "Recalculation changed sheet identity",
+        evidence={
+            "backend": "libreoffice-headless",
+            "sheet_inventory_integrity": {"matched": False},
+        },
+    )
+    failure.agent_result = partial
+    failure.agent_stage = "solve"
+    failure.failed_tool = "recalculate_and_read"
+
+    def fail_arm(**_: object) -> AgentResult:
+        raise failure
+
+    def must_not_score(*_: object, **__: object) -> object:
+        raise AssertionError("agent-tool integrity failure must stop before scoring")
+
+    monkeypatch.setattr(comparison_module, "run_arm", fail_arm)
+    monkeypatch.setattr(
+        comparison_module,
+        "compare_workbooks_chartsheet_safe",
+        must_not_score,
+    )
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "tool-recalculation-drift",
+        skill_registry=SkillRegistry([]),
+        arms=("ours",),
+        max_model_calls=10,
+        max_turns_per_arm=10,
+        recalculate=True,
+    )
+
+    row = runner._run_one(task, "ours", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "error"
+    assert row["outcome_kind"] == "infrastructure_failure"
+    assert row["score_available"] is False
+    assert row["error_category"] == "recalculation_infrastructure"
+    assert row["infrastructure_failure_stage"] == "agent_tool_recalculation"
+    assert row["agent_failure_stage"] == "solve"
+    assert row["infrastructure_failure_tool"] == "recalculate_and_read"
+    assert row["agent"] == partial.to_dict()
+    assert "comparison" not in row
+    assert "artifact_score_passed" not in row
+    trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
+    not_evaluated = [
+        item for item in trajectory if item["event"] == "benchmark.not_evaluated"
+    ]
+    assert not_evaluated[0]["payload"]["infrastructure_failure_stage"] == (
+        "agent_tool_recalculation"
+    )
+    assert not_evaluated[0]["payload"]["agent_failure_stage"] == "solve"
+    assert not_evaluated[0]["payload"]["infrastructure_failure_tool"] == (
+        "recalculate_and_read"
+    )
 
 
 def test_comparison_classifies_unsupported_scorer_as_infrastructure_no_score(

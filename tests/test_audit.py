@@ -85,7 +85,9 @@ def _scoring_metadata_sha256(task: SpreadsheetTask) -> str:
     return _text_sha256(encoded)
 
 
-def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
+def _fixture(
+    tmp_path: Path, *, arm: str = "bare"
+) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
     dataset = tmp_path / "dataset"
     initial = dataset / "initial.xlsx"
     golden = dataset / "golden.xlsx"
@@ -111,7 +113,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         ),
         results,
         skill_registry=SkillRegistry([]),
-        arms=("bare",),
+        arms=(arm,),
         max_model_calls=3,
         max_turns_per_arm=3,
         max_total_tokens=100,
@@ -122,7 +124,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
     runner._prepare_manifest([task])
     manifest = json.loads(runner.manifest_path.read_text(encoding="utf-8"))
     manifest_sha256 = _sha256(runner.manifest_path)
-    run_dir = results / "runs" / task.task_id / "bare"
+    run_dir = results / "runs" / task.task_id / arm
     output = run_dir / "artifacts" / "output.xlsx"
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(task.golden_path, output)
@@ -186,7 +188,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
     stage = {
         "name": "solve",
         "max_turns": 3,
-        "allowed_tools": ["code_interpreter"],
+        "allowed_tools": manifest["stage_allowed_tools"][arm]["solve"],
         "first_tool_choice": "code_interpreter",
         "observed_first_tool": "code_interpreter",
         "forced_tool_prefix": ["code_interpreter", "code_interpreter"],
@@ -200,7 +202,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
     }
     row = {
         "task_id": task.task_id,
-        "arm": "bare",
+        "arm": arm,
         "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
         "comparison_manifest_sha256": manifest_sha256,
         "instruction_type": task.instruction_type,
@@ -221,7 +223,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
         "artifact_score_passed": comparison.passed,
         "comparison": comparison.to_dict(),
         "agent": {
-            "arm": "bare",
+            "arm": arm,
             "final_text": "Spreadsheet task completed.",
             "response_id": "response-final",
             "turns": 3,
@@ -276,6 +278,73 @@ def _set_recalculation_manifest(
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
     row["comparison_manifest_sha256"] = _sha256(manifest_path)
     row["calculation_backend"] = "libreoffice"
+
+
+def _set_agent_tool_recalculation_failure(
+    row: dict[str, Any],
+    recalculation: dict[str, Any],
+) -> None:
+    failure_call = {
+        "name": "recalculate_and_read",
+        "ok": False,
+        "error_type": "RecalculationIntegrityError",
+        "failure_category": "recalculation_infrastructure",
+    }
+    stage = row["agent"]["stages"][-1]
+    stage_agent = stage["agent"]
+    stage_trace = [*stage["tool_trace"], failure_call]
+    stage.update(
+        {
+            "observed_terminal_tool": None,
+            "tool_name_trace": [item["name"] for item in stage_trace],
+            "tool_trace": stage_trace,
+        }
+    )
+    stage_agent.update(
+        {
+            "final_text": (
+                "Agent interrupted by recalculation infrastructure failure."
+            ),
+            "tool_calls": 3,
+            "tool_trace": json.loads(json.dumps(stage_trace)),
+            "terminal_submissions": 0,
+            "function_calls_total": 3,
+            "observed_terminal_tool": None,
+        }
+    )
+    stage_agent.pop("terminal_response")
+    row["agent"].update(
+        {
+            "final_text": stage_agent["final_text"],
+            "tool_calls": 3,
+            "tool_trace": [
+                {"stage": "solve", **item} for item in stage_trace
+            ],
+            "terminal_submissions": 0,
+            "function_calls_total": 3,
+            "observed_terminal_tool": None,
+        }
+    )
+    row["agent"].pop("terminal_response")
+    row.update(
+        {
+            "status": "error",
+            "outcome_kind": "infrastructure_failure",
+            "passed": False,
+            "score_available": False,
+            "error": "Recalculation changed sheet identity",
+            "error_type": "RecalculationIntegrityError",
+            "error_retryable": False,
+            "error_category": "recalculation_infrastructure",
+            "infrastructure_failure_stage": "agent_tool_recalculation",
+            "agent_failure_stage": "solve",
+            "infrastructure_failure_tool": "recalculate_and_read",
+            "recalculation_failure_reason": "sheet_inventory_changed",
+            "recalculation": recalculation,
+        }
+    )
+    row.pop("comparison")
+    row.pop("artifact_score_passed")
 
 
 def _mock_recalculation(
@@ -1290,6 +1359,91 @@ def test_audit_accepts_recalculation_identity_failure_but_invalidates_inference(
     assert summary["known_recalculation_infrastructure_failure_rows"] == 1
     assert summary["rows"][0]["score_available"] is False
     assert "outcome_passed" not in summary["rows"][0]
+
+
+def test_audit_accepts_agent_tool_recalculation_failure_without_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, row = _fixture(tmp_path, arm="ours")
+    output = Path(row["output_workbook"])
+    recalculation = _mock_recalculation(
+        output,
+        monkeypatch,
+        change_sheet_identity=True,
+    )
+    _set_recalculation_manifest(results, row)
+    _set_agent_tool_recalculation_failure(row, recalculation)
+    row["output_sha256"] = _sha256(output)
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8"
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["journal_integrity_valid"] is True
+    assert summary["study_complete"] is False
+    assert summary["inference_valid"] is False
+    assert summary["inference_invalid_reasons"] == [
+        "recalculation_infrastructure_failure"
+    ]
+    assert summary["known_recalculation_infrastructure_failure_rows"] == 1
+    audited = summary["rows"][0]
+    assert audited["audit_valid"] is True
+    assert audited["infrastructure_failure_stage"] == (
+        "agent_tool_recalculation"
+    )
+    assert audited["agent_failure_stage"] == "solve"
+    assert audited["infrastructure_failure_tool"] == "recalculate_and_read"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "missing_agent_stage",
+        "forged_terminal",
+        "aggregate_terminal_submission",
+        "missing_failure_trace",
+    ],
+)
+def test_audit_rejects_invalid_agent_tool_recalculation_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    results, task, row = _fixture(tmp_path, arm="ours")
+    output = Path(row["output_workbook"])
+    recalculation = _mock_recalculation(
+        output,
+        monkeypatch,
+        change_sheet_identity=True,
+    )
+    _set_recalculation_manifest(results, row)
+    _set_agent_tool_recalculation_failure(row, recalculation)
+    row["output_sha256"] = _sha256(output)
+    stage = row["agent"]["stages"][-1]
+    if tamper == "missing_agent_stage":
+        row.pop("agent_failure_stage")
+    elif tamper == "forged_terminal":
+        stage["observed_terminal_tool"] = "submit_result"
+        stage["agent"]["observed_terminal_tool"] = "submit_result"
+        row["agent"]["observed_terminal_tool"] = "submit_result"
+    elif tamper == "aggregate_terminal_submission":
+        row["agent"]["terminal_submissions"] = 1
+    else:
+        stage["tool_trace"].pop()
+        stage["agent"]["tool_trace"].pop()
+        row["agent"]["tool_trace"].pop()
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8"
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert summary["rows"][0]["audit_valid"] is False
+    assert summary["rows"][0]["reasons"]
 
 
 @pytest.mark.parametrize("tamper", ["pre_digest", "match_claim", "post_hash", "score"])

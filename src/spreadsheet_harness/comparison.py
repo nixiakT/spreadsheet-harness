@@ -68,7 +68,10 @@ from .code_interpreter import STRICT_ISOLATION_POLICY, ensure_strict_code_isolat
 from .config import ProviderConfig
 from .errors import (
     AGENT_EXECUTION_FAILURE_REASONS,
+    AGENT_TOOL_RECALCULATION_FAILURE_STAGE,
     LEGACY_AGENT_EXECUTION_FAILURE_REASONS,
+    POSTPROCESS_RECALCULATION_FAILURE_STAGE,
+    RECALCULATION_VALIDATION_TOOL,
     AgentBudgetError,
     AgentExecutionFailure,
     AgentRoutingError,
@@ -206,6 +209,9 @@ COMPARISON_CONFIGURATION_POLICIES = {
     **V27_COMPARISON_CONFIGURATION_POLICIES,
     "recalculation_integrity_policy": RECALCULATION_SHEET_INTEGRITY_POLICY,
     "recalculation_failure_policy": "audited-infrastructure-error-no-score-v1",
+    "recalculation_failure_stage_policy": (
+        "postprocess-or-agent-tool-recalculation-v1"
+    ),
     "artifact_reopen_policy": (
         "ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"
     ),
@@ -2575,17 +2581,32 @@ class ComparisonBenchmarkRunner:
             elif isinstance(effective_exc, AgentRoutingError):
                 row["error_category"] = "routing_protocol"
             elif isinstance(effective_exc, RecalculationIntegrityError):
-                agent_evidence = result.to_dict() if result is not None else None
+                exception_result = effective_exc.agent_result
+                evidence_result = result if result is not None else exception_result
+                agent_evidence = (
+                    evidence_result.to_dict()
+                    if callable(getattr(evidence_result, "to_dict", None))
+                    else None
+                )
                 if not isinstance(agent_evidence, dict) or session is None:
                     raise HarnessError(
                         "Recalculation integrity failure omitted auditable run evidence"
                     ) from effective_exc
+                agent_tool_failure = bool(
+                    effective_exc.failed_tool == RECALCULATION_VALIDATION_TOOL
+                    and isinstance(effective_exc.agent_stage, str)
+                    and effective_exc.agent_stage
+                )
                 row.update(
                     {
                         "outcome_kind": "infrastructure_failure",
                         "score_available": False,
                         "error_category": "recalculation_infrastructure",
-                        "infrastructure_failure_stage": "recalculation",
+                        "infrastructure_failure_stage": (
+                            AGENT_TOOL_RECALCULATION_FAILURE_STAGE
+                            if agent_tool_failure
+                            else POSTPROCESS_RECALCULATION_FAILURE_STAGE
+                        ),
                         "recalculation_failure_reason": "sheet_inventory_changed",
                         "agent": agent_evidence,
                         "recalculation": effective_exc.evidence,
@@ -2593,6 +2614,15 @@ class ComparisonBenchmarkRunner:
                         "output_sha256": _sha256(session.workbook_path),
                     }
                 )
+                if agent_tool_failure:
+                    row.update(
+                        {
+                            "agent_failure_stage": effective_exc.agent_stage,
+                            "infrastructure_failure_tool": (
+                                effective_exc.failed_tool
+                            ),
+                        }
+                    )
                 if execution_failure is not None:
                     row["prior_model_execution_failure"] = {
                         "error": str(execution_failure).replace(
@@ -2668,6 +2698,12 @@ class ComparisonBenchmarkRunner:
                                 ),
                                 "recalculation_failure_reason": row.get(
                                     "recalculation_failure_reason"
+                                ),
+                                "agent_failure_stage": row.get(
+                                    "agent_failure_stage"
+                                ),
+                                "infrastructure_failure_tool": row.get(
+                                    "infrastructure_failure_tool"
                                 ),
                                 "scoring_failure_reason": row.get(
                                     "scoring_failure_reason"

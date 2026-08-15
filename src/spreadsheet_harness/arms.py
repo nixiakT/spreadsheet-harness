@@ -36,6 +36,7 @@ from .errors import (
     AgentExecutionFailure,
     AgentTimeoutError,
     HarnessError,
+    RecalculationIntegrityError,
     WorkbookValidationError,
 )
 from .pacing import RelayPacer
@@ -765,6 +766,25 @@ def _run_stage(
     workbook_after: str | None = None
     try:
         result = agent.run(prompt)
+    except RecalculationIntegrityError as exc:
+        result = exc.agent_result
+        if not isinstance(result, AgentResult):
+            raise HarnessError(
+                "Recalculation integrity failure omitted partial agent evidence"
+            ) from exc
+        exc.failed_stage = _failed_stage(
+            name=name,
+            result=result,
+            elapsed_seconds=time.monotonic() - stage_started,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            task_included=task_included,
+            preview_included=preview_included,
+            prompt=prompt,
+            user_task=user_task,
+            preview=preview,
+        )
+        raise
     except (AgentBudgetError, AgentExecutionFailure) as exc:
         failure = exc
         if isinstance(exc, AgentBudgetError):
@@ -1279,7 +1299,7 @@ def run_arm(
     def run_stage(**kwargs: Any) -> _CompletedStage:
         try:
             return _run_stage(**kwargs)
-        except AgentExecutionFailure as exc:
+        except (AgentExecutionFailure, RecalculationIntegrityError) as exc:
             failed_stage = getattr(exc, "failed_stage", None)
             if isinstance(failed_stage, _CompletedStage):
                 exc.agent_result = _aggregate(arm, [*stages, failed_stage])

@@ -8,6 +8,7 @@ import pytest
 from openpyxl import load_workbook
 from PIL import Image
 
+from spreadsheet_harness.errors import RecalculationIntegrityError
 from spreadsheet_harness.render import find_libreoffice
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry
@@ -168,6 +169,49 @@ def test_recalculate_and_read_rejects_oversized_target_before_recalculation(
     assert "no recalculation was performed" in result["error"]
     assert recalculate_calls == 0
     assert after_sha256 == before_sha256
+
+
+def test_registry_propagates_recalculation_integrity_failure(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "integrity-run")
+    evidence = {
+        "backend": "libreoffice-headless",
+        "sheet_inventory_integrity": {"matched": False},
+    }
+    failure = RecalculationIntegrityError(
+        "Recalculation changed sheet identity",
+        evidence=evidence,
+    )
+
+    def fail_recalculation() -> dict[str, Any]:
+        raise failure
+
+    monkeypatch.setattr(session, "recalculate", fail_recalculation)
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+
+    with pytest.raises(RecalculationIntegrityError) as caught:
+        tools.invoke(
+            "recalculate_and_read",
+            {"sheet": "Sales", "range_ref": "A1"},
+        )
+
+    assert caught.value is failure
+    trajectory = read_trajectory(session.paths.trajectory)
+    assert trajectory[-1]["event"] == "tool.failed"
+    assert trajectory[-1]["payload"] == {
+        "name": "recalculate_and_read",
+        "error_type": "RecalculationIntegrityError",
+        "failure_category": "recalculation_infrastructure",
+        "recalculation": evidence,
+    }
+    assert not any(
+        event["event"] == "tool.returned"
+        and event["payload"]["name"] == "recalculate_and_read"
+        for event in trajectory
+    )
 
 
 @pytest.mark.skipif(find_libreoffice() is None, reason="LibreOffice is not installed")

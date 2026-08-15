@@ -32,6 +32,9 @@ from openpyxl.utils.cell import range_boundaries
 from .agent import CONTEXT_POLICY, SpreadsheetAgent
 from .config import ProviderConfig
 from .errors import (
+    AGENT_TOOL_RECALCULATION_FAILURE_STAGE,
+    POSTPROCESS_RECALCULATION_FAILURE_STAGE,
+    RECALCULATION_VALIDATION_TOOL,
     AgentTimeoutError,
     HarnessError,
     ProviderError,
@@ -2625,6 +2628,7 @@ class VerifiedBenchmarkRunner:
                 max_turns=self.max_turns,
                 max_output_tokens=self.max_output_tokens,
                 max_elapsed_seconds=self.task_timeout_seconds,
+                stage="solve",
                 pacer=pacer,
             )
             agent_result = agent.run(task.instruction)
@@ -2701,19 +2705,46 @@ class VerifiedBenchmarkRunner:
             elif isinstance(exc, AgentTimeoutError):
                 row["error_category"] = "task_timeout"
             elif isinstance(exc, RecalculationIntegrityError):
+                exception_result = exc.agent_result
+                evidence_result = (
+                    agent_result if agent_result is not None else exception_result
+                )
+                if (
+                    not callable(getattr(evidence_result, "to_dict", None))
+                    or session is None
+                ):
+                    raise HarnessError(
+                        "Recalculation integrity failure omitted auditable run evidence"
+                    ) from exc
+                agent_tool_failure = bool(
+                    exc.failed_tool == RECALCULATION_VALIDATION_TOOL
+                    and isinstance(exc.agent_stage, str)
+                    and exc.agent_stage
+                )
                 row.update(
                     {
                         "outcome_kind": "infrastructure_failure",
                         "score_available": False,
                         "error_category": "recalculation_infrastructure",
-                        "infrastructure_failure_stage": "recalculation",
+                        "infrastructure_failure_stage": (
+                            AGENT_TOOL_RECALCULATION_FAILURE_STAGE
+                            if agent_tool_failure
+                            else POSTPROCESS_RECALCULATION_FAILURE_STAGE
+                        ),
                         "recalculation_failure_reason": "sheet_inventory_changed",
-                        "agent": agent_result.to_dict(),
+                        "agent": evidence_result.to_dict(),
                         "recalculation": exc.evidence,
                         "output_workbook": str(session.workbook_path),
                         "output_sha256": _sha256(session.workbook_path),
                     }
                 )
+                if agent_tool_failure:
+                    row.update(
+                        {
+                            "agent_failure_stage": exc.agent_stage,
+                            "infrastructure_failure_tool": exc.failed_tool,
+                        }
+                    )
             elif isinstance(exc, ScoringInfrastructureError):
                 if agent_result is None or session is None:
                     raise HarnessError(
@@ -2754,6 +2785,12 @@ class VerifiedBenchmarkRunner:
                                 ),
                                 "recalculation_failure_reason": row.get(
                                     "recalculation_failure_reason"
+                                ),
+                                "agent_failure_stage": row.get(
+                                    "agent_failure_stage"
+                                ),
+                                "infrastructure_failure_tool": row.get(
+                                    "infrastructure_failure_tool"
                                 ),
                                 "scoring_failure_reason": row.get(
                                     "scoring_failure_reason"

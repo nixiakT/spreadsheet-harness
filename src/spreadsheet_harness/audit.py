@@ -59,7 +59,14 @@ from .comparison import (
     verify_pilot_run_spec_contract,
     verify_pilot_run_spec_provenance,
 )
-from .errors import HarnessError, RenderError, ScoringInfrastructureError
+from .errors import (
+    AGENT_TOOL_RECALCULATION_FAILURE_STAGE,
+    POSTPROCESS_RECALCULATION_FAILURE_STAGE,
+    RECALCULATION_VALIDATION_TOOL,
+    HarnessError,
+    RenderError,
+    ScoringInfrastructureError,
+)
 from .render import (
     RECALCULATION_SHEET_INTEGRITY_POLICY,
     openpyxl_worksheet_view,
@@ -835,6 +842,88 @@ def _v26_success_terminal_evidence_valid(
     )
 
 
+def _agent_tool_recalculation_failure_stage(row: dict[str, Any]) -> str | None:
+    stage = row.get("agent_failure_stage")
+    if (
+        row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("error_category") == "recalculation_infrastructure"
+        and row.get("infrastructure_failure_stage")
+        == AGENT_TOOL_RECALCULATION_FAILURE_STAGE
+        and row.get("infrastructure_failure_tool")
+        == RECALCULATION_VALIDATION_TOOL
+        and isinstance(stage, str)
+        and stage
+    ):
+        return stage
+    return None
+
+
+def _agent_tool_recalculation_terminal_evidence_valid(
+    row: dict[str, Any],
+    agent: dict[str, Any],
+    stages: list[dict[str, Any]],
+    *,
+    arm: str,
+) -> bool:
+    """Validate a tool-stage interruption without inventing a terminal call."""
+
+    failure_stage = _agent_tool_recalculation_failure_stage(row)
+    if failure_stage is None or not stages:
+        return False
+    final_stage = stages[-1]
+    final_agent = final_stage.get("agent")
+    wrapper_trace = final_stage.get("tool_trace")
+    nested_trace = final_agent.get("tool_trace") if isinstance(final_agent, dict) else None
+    aggregate_trace = agent.get("tool_trace")
+    if not (
+        final_stage.get("name") == failure_stage
+        and isinstance(final_agent, dict)
+        and isinstance(wrapper_trace, list)
+        and wrapper_trace
+        and nested_trace == wrapper_trace
+        and isinstance(aggregate_trace, list)
+        and aggregate_trace
+    ):
+        return False
+    failed_call = wrapper_trace[-1]
+    aggregate_failed_call = aggregate_trace[-1]
+    expected_failure = {
+        "name": RECALCULATION_VALIDATION_TOOL,
+        "ok": False,
+        "error_type": "RecalculationIntegrityError",
+        "failure_category": "recalculation_infrastructure",
+    }
+    if not (
+        isinstance(failed_call, dict)
+        and all(failed_call.get(key) == value for key, value in expected_failure.items())
+        and isinstance(aggregate_failed_call, dict)
+        and aggregate_failed_call.get("stage") == failure_stage
+        and all(
+            aggregate_failed_call.get(key) == value
+            for key, value in expected_failure.items()
+        )
+    ):
+        return False
+    return bool(
+        all(
+            _v26_completed_stage_terminal_response_valid(stage, arm=arm)
+            for stage in stages[:-1]
+        )
+        and final_stage.get("terminal_tool") == "submit_result"
+        and final_stage.get("observed_terminal_tool") is None
+        and final_agent.get("terminal_tool") == "submit_result"
+        and final_agent.get("observed_terminal_tool") is None
+        and final_agent.get("terminal_submissions") == 0
+        and final_agent.get("terminal_response") is None
+        and agent.get("terminal_tool") == "submit_result"
+        and agent.get("observed_terminal_tool") is None
+        and agent.get("terminal_submissions") == 0
+        and agent.get("terminal_response") is None
+        and agent.get("final_text") == final_agent.get("final_text")
+        and agent.get("response_id") == final_agent.get("response_id")
+    )
+
+
 def _text_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -1592,6 +1681,7 @@ def _audit_completed_agent(
     expected_tools = (manifest.get("stage_allowed_tools") or {}).get(arm)
     allowed_terminals = (manifest.get("allowed_observed_terminals") or {}).get(arm)
     budget_exhaustion, budget_termination = _v25_budget_exhaustion(row, contract)
+    agent_tool_failure_stage = _agent_tool_recalculation_failure_stage(row)
     exact_evidence = bool(contract and contract.require_exact_agent_evidence)
     if not isinstance(stages, list) or not isinstance(expected_caps, dict):
         _add_reason(reasons, "agent_stages_invalid")
@@ -1607,12 +1697,20 @@ def _audit_completed_agent(
         and observed_names == expected_names[: len(observed_names)]
         and observed_names[-1] == (budget_termination or {}).get("stage")
     )
+    infrastructure_truncated_stages = bool(
+        agent_tool_failure_stage
+        and observed_names
+        and observed_names == expected_names[: len(observed_names)]
+        and observed_names[-1] == agent_tool_failure_stage
+    )
     if budget_exhaustion and (
         not observed_names
         or observed_names[-1] != (budget_termination or {}).get("stage")
     ):
         _add_reason(reasons, "agent_budget_termination_stage_mismatch")
-    if observed_names != expected_names and not budget_truncated_paper_stages:
+    if observed_names != expected_names and not (
+        budget_truncated_paper_stages or infrastructure_truncated_stages
+    ):
         _add_reason(reasons, "agent_stage_order_mismatch")
         return
     timing_count = 0
@@ -1631,6 +1729,11 @@ def _audit_completed_agent(
             budget_exhaustion
             and stage is stages[-1]
             and name == (budget_termination or {}).get("stage")
+        )
+        infrastructure_failure_stage = bool(
+            agent_tool_failure_stage
+            and stage is stages[-1]
+            and name == agent_tool_failure_stage
         )
         if stage.get("max_turns") != expected_caps.get(name):
             _add_reason(reasons, f"agent_stage_turn_cap_mismatch:{name}")
@@ -1670,7 +1773,9 @@ def _audit_completed_agent(
         budget_reconcile_terminal = bool(
             budget_failure_stage and arm == "paper" and name == "reconcile"
         )
-        if budget_failure_stage:
+        if infrastructure_failure_stage:
+            terminal_valid = stage.get("observed_terminal_tool") is None
+        elif budget_failure_stage:
             terminal_valid = stage.get("observed_terminal_tool") == "budget_exhausted"
         else:
             observed_terminal = stage.get("observed_terminal_tool")
@@ -1978,12 +2083,22 @@ def _audit_completed_agent(
                 row, agent, stages, arm=arm
             )
         elif outcome_kind == "infrastructure_failure":
-            terminal_evidence_valid = _v26_success_terminal_evidence_valid(
-                {**row, "status": "completed", "outcome_kind": "scored"},
-                agent,
-                stages,
-                arm=arm,
-            )
+            if agent_tool_failure_stage:
+                terminal_evidence_valid = (
+                    _agent_tool_recalculation_terminal_evidence_valid(
+                        row,
+                        agent,
+                        stages,
+                        arm=arm,
+                    )
+                )
+            else:
+                terminal_evidence_valid = _v26_success_terminal_evidence_valid(
+                    {**row, "status": "completed", "outcome_kind": "scored"},
+                    agent,
+                    stages,
+                    arm=arm,
+                )
         elif outcome_kind == "model_execution_failure":
             terminal_evidence_valid = _v26_model_failure_terminal_response_valid(
                 agent, stages, arm=arm
@@ -2156,10 +2271,17 @@ def _audit_recalculation_infrastructure_row(
             "error_type": row.get("error_type"),
             "error": row.get("error"),
             "infrastructure_failure_stage": row.get("infrastructure_failure_stage"),
+            "agent_failure_stage": row.get("agent_failure_stage"),
+            "infrastructure_failure_tool": row.get(
+                "infrastructure_failure_tool"
+            ),
             "recalculation_failure_reason": row.get("recalculation_failure_reason"),
             "score_available": row.get("score_available"),
         }
     )
+    failure_stage = row.get("infrastructure_failure_stage")
+    agent_tool_failure = failure_stage == AGENT_TOOL_RECALCULATION_FAILURE_STAGE
+    postprocess_failure = failure_stage == POSTPROCESS_RECALCULATION_FAILURE_STAGE
     if (
         contract is None
         or not contract.require_recalculation_integrity
@@ -2168,7 +2290,7 @@ def _audit_recalculation_infrastructure_row(
         or row.get("passed") is not False
         or row.get("score_available") is not False
         or row.get("error_category") != "recalculation_infrastructure"
-        or row.get("infrastructure_failure_stage") != "recalculation"
+        or not (agent_tool_failure or postprocess_failure)
         or row.get("recalculation_failure_reason") != "sheet_inventory_changed"
         or row.get("error_type") != "RecalculationIntegrityError"
         or row.get("error_retryable") is not False
@@ -2176,6 +2298,21 @@ def _audit_recalculation_infrastructure_row(
         or not row["error"]
     ):
         _add_reason(reasons, "recalculation_infrastructure_taxonomy_invalid")
+    if agent_tool_failure:
+        expected_stages = (manifest.get("stage_turn_caps") or {}).get(arm)
+        if (
+            row.get("infrastructure_failure_tool")
+            != RECALCULATION_VALIDATION_TOOL
+            or not isinstance(row.get("agent_failure_stage"), str)
+            or row.get("agent_failure_stage") not in (expected_stages or {})
+            or row.get("prior_model_execution_failure") is not None
+        ):
+            _add_reason(reasons, "recalculation_agent_tool_taxonomy_invalid")
+    elif any(
+        field in row
+        for field in ("agent_failure_stage", "infrastructure_failure_tool")
+    ):
+        _add_reason(reasons, "recalculation_postprocess_taxonomy_invalid")
     if any(field in row for field in ("comparison", "artifact_score_passed")):
         _add_reason(reasons, "recalculation_failure_has_score_evidence")
 

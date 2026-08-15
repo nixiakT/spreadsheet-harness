@@ -14,6 +14,9 @@ AGENT_EXECUTION_FAILURE_REASONS = LEGACY_AGENT_EXECUTION_FAILURE_REASONS | {
 MODEL_EXECUTION_BUDGET_TERMINATIONS = frozenset(
     {"max_model_calls", "max_total_tokens"}
 )
+AGENT_TOOL_RECALCULATION_FAILURE_STAGE = "agent_tool_recalculation"
+POSTPROCESS_RECALCULATION_FAILURE_STAGE = "recalculation"
+RECALCULATION_VALIDATION_TOOL = "recalculate_and_read"
 
 _SECRET_VALUE = re.compile(
     r"\b(?:cr|sk)[-_][A-Za-z0-9_-]{12,}\b"
@@ -57,6 +60,11 @@ class RecalculationIntegrityError(RenderError):
     def __init__(self, message: str, *, evidence: dict[str, Any]) -> None:
         super().__init__(message)
         self.evidence = evidence
+        # The agent boundary fills these fields when the failing recalculation
+        # originated from a model tool call rather than runner postprocessing.
+        self.agent_result: Any | None = None
+        self.agent_stage: str | None = None
+        self.failed_tool: str | None = None
 
 
 class ScoringInfrastructureError(HarnessError):
