@@ -1,5 +1,16 @@
 # Qwen service-alias local v27 exhaustive fresh-reserve evaluation
 
+> **Completed and retired.** The v27 run produced its frozen 158-row journal
+> before review found that v27 did not verify recalculation-induced sheet-kind
+> changes and could mis-summarize no-score infrastructure failures. The v27
+> files remain governed by their historical v27/schema-16 contract and are not
+> retroactively reclassified using v28 evidence requirements. Its recorded
+> incomplete/error outcome does not support the preregistered primary
+> inference, and the run spec is permanently read-only. The launch commands
+> below are retained only as historical protocol text and are rejected by the
+> current runner. Corrected future execution requires v28/schema 17; v27 must
+> not be re-anchored, resumed, or reinterpreted.
+
 This protocol freezes a one-shot, 79-task SpreadsheetBench-Verified comparison
 of the literal LiteLLM service alias `qwen36-35b-a3b` under two
 resource-matched configurations, producing 158 expected arm-task rows:
@@ -81,8 +92,8 @@ Integrity bindings:
 The code-owned run spec is
 `qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json`. It binds v27/schema
 16, the exact split/output identity, provider and decoding settings, budgets,
-arms, source contract, and skill hashes. It is launchable only as a fresh run
-and rejects resume.
+arms, source contract, and skill hashes. It is historical and non-launchable;
+both launch and resume are rejected.
 
 ## Frozen v26 method retained unchanged
 
@@ -203,7 +214,8 @@ decoding, or budget and do not issue a selected-task request.
 
 ## One-shot launch
 
-Require the frozen output path to be absent and launch exactly once without
+Historical launch procedure (now disabled): require the frozen output path to
+be absent and launch exactly once without
 `--resume`. Run it under `nohup` so a controlling-shell disconnect cannot send
 `SIGHUP`; redirect stdout and stderr outside the output directory, record only
 the wrapper PID and its eventual exit status, and do not start a second wrapper.
@@ -268,9 +280,7 @@ SpreadsheetBench-Verified figure. This is not an inferential paper-beating
 claim because the model endpoint, exact split, tools, seed, serving recipe,
 LibreOffice backend, and execution protocol differ.
 
-V27 exhausts the locally fresh reserve. Once any outcome is inspected, all 79
-IDs enter development quarantine. Regardless of success, failure, or audit
-validity, never rerun or resume this cohort and never pad it with an exposed
-task. After reporting, make the v27 anchor non-launchable, pin its historical
-source contract, re-audit the immutable result, then commit and push that
-closure so another checkout cannot relaunch the study.
+V27 exhausted the locally fresh reserve and all 79 IDs are now in development
+quarantine. Its anchor is non-launchable and its historical source contract is
+pinned. Never reinterpret a future v28 result as v27 or change the frozen v27
+identity to make it launchable.

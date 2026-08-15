@@ -51,6 +51,18 @@ class RenderError(HarnessError):
     """Raised when LibreOffice or PDF rasterization fails."""
 
 
+class RecalculationIntegrityError(RenderError):
+    """Raised when recalculation changes the workbook's sheet identity."""
+
+    def __init__(self, message: str, *, evidence: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.evidence = evidence
+
+
+class ScoringInfrastructureError(HarnessError):
+    """Raised when a valid workbook shape cannot be consumed by the scorer."""
+
+
 class ProviderError(HarnessError):
     """Provider failure with separate transience and safe-replay decisions.
 

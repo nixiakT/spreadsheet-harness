@@ -21,6 +21,7 @@ from .benchmark import (
     SpreadsheetTask,
     _source_fingerprint,
     compare_workbooks,
+    compare_workbooks_chartsheet_safe,
     verify_trace2skill_split_provenance,
 )
 from .comparison import (
@@ -45,6 +46,9 @@ from .comparison import (
     V26_COMPARISON_CONFIGURATION_POLICIES,
     V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V26_COMPARISON_PROTOCOL_VERSION,
+    V27_COMPARISON_CONFIGURATION_POLICIES,
+    V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V27_COMPARISON_PROTOCOL_VERSION,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
@@ -55,7 +59,12 @@ from .comparison import (
     verify_pilot_run_spec_contract,
     verify_pilot_run_spec_provenance,
 )
-from .errors import HarnessError
+from .errors import HarnessError, RenderError, ScoringInfrastructureError
+from .render import (
+    RECALCULATION_SHEET_INTEGRITY_POLICY,
+    openpyxl_worksheet_view,
+    sheet_inventory_identity,
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,7 @@ class _AuditProtocolContract:
     require_exact_agent_evidence: bool = False
     require_truncated_terminal_evidence: bool = False
     require_accepted_terminal_evidence: bool = False
+    require_recalculation_integrity: bool = False
 
 
 _V23_AUDIT_CONTRACT = _AuditProtocolContract(
@@ -131,10 +141,23 @@ _V26_AUDIT_CONTRACT = _AuditProtocolContract(
     require_accepted_terminal_evidence=True,
 )
 _V27_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=V27_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V27_COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=_V26_AUDIT_CONTRACT.allowed_model_failure_reasons,
+    require_v24_outcome_fields=True,
+    strict_current_source=False,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
+    require_truncated_terminal_evidence=True,
+    require_accepted_terminal_evidence=True,
+)
+_V28_AUDIT_CONTRACT = _AuditProtocolContract(
     protocol_version=COMPARISON_PROTOCOL_VERSION,
     manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
     configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
-    allowed_model_failure_reasons=_V26_AUDIT_CONTRACT.allowed_model_failure_reasons,
+    allowed_model_failure_reasons=_V27_AUDIT_CONTRACT.allowed_model_failure_reasons,
     require_v24_outcome_fields=True,
     strict_current_source=True,
     allow_budget_exhaustion_evidence=True,
@@ -142,6 +165,7 @@ _V27_AUDIT_CONTRACT = _AuditProtocolContract(
     require_exact_agent_evidence=True,
     require_truncated_terminal_evidence=True,
     require_accepted_terminal_evidence=True,
+    require_recalculation_integrity=True,
 )
 
 
@@ -154,6 +178,11 @@ def _select_audit_contract(
         manifest.get("comparison_protocol_version"),
         manifest.get("schema_version"),
     )
+    if identity == (
+        _V28_AUDIT_CONTRACT.protocol_version,
+        _V28_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V28_AUDIT_CONTRACT
     if identity == (
         _V27_AUDIT_CONTRACT.protocol_version,
         _V27_AUDIT_CONTRACT.manifest_schema_version,
@@ -188,6 +217,7 @@ def _select_audit_contract(
         _V25_AUDIT_CONTRACT.manifest_schema_version,
         _V26_AUDIT_CONTRACT.manifest_schema_version,
         _V27_AUDIT_CONTRACT.manifest_schema_version,
+        _V28_AUDIT_CONTRACT.manifest_schema_version,
     }:
         _add_reason(reasons, "comparison_manifest_schema_mismatch")
     if manifest.get("comparison_protocol_version") not in {
@@ -196,6 +226,7 @@ def _select_audit_contract(
         _V25_AUDIT_CONTRACT.protocol_version,
         _V26_AUDIT_CONTRACT.protocol_version,
         _V27_AUDIT_CONTRACT.protocol_version,
+        _V28_AUDIT_CONTRACT.protocol_version,
     }:
         _add_reason(reasons, "comparison_manifest_protocol_mismatch")
     return None
@@ -300,6 +331,53 @@ def _valid_sha256(value: Any) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _valid_sheet_inventory_identity(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "workbook_sha256",
+        "inventory_sha256",
+        "sheets",
+    }:
+        return False
+    sheets = value.get("sheets")
+    if (
+        value.get("schema_version") != 2
+        or not _valid_sha256(value.get("workbook_sha256"))
+        or not _valid_sha256(value.get("inventory_sha256"))
+        or not isinstance(sheets, list)
+        or not sheets
+    ):
+        return False
+    normalized_names: set[str] = set()
+    visible_sheet = False
+    for index, sheet in enumerate(sheets):
+        if (
+            not isinstance(sheet, dict)
+            or set(sheet) != {"index", "kind", "name", "visibility"}
+            or sheet.get("index") != index
+            or sheet.get("kind")
+            not in {"worksheet", "chartsheet", "dialogsheet", "macrosheet", "intlMacrosheet"}
+            or not isinstance(sheet.get("name"), str)
+            or not sheet["name"]
+            or sheet.get("visibility") not in {"visible", "hidden", "veryHidden"}
+        ):
+            return False
+        normalized_name = sheet["name"].casefold()
+        if normalized_name in normalized_names:
+            return False
+        normalized_names.add(normalized_name)
+        visible_sheet = visible_sheet or sheet["visibility"] == "visible"
+    if not visible_sheet:
+        return False
+    encoded = json.dumps(
+        sheets,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return value["inventory_sha256"] == hashlib.sha256(encoded).hexdigest()
 
 
 def _v26_output_limit_attempt_observed(stages: list[dict[str, Any]]) -> bool:
@@ -1892,12 +1970,19 @@ def _audit_completed_agent(
     if (
         contract is not None
         and contract.require_accepted_terminal_evidence
-        and row.get("status") == "completed"
+        and row.get("status") in {"completed", "error"}
     ):
         outcome_kind = row.get("outcome_kind")
         if outcome_kind == "scored":
             terminal_evidence_valid = _v26_success_terminal_evidence_valid(
                 row, agent, stages, arm=arm
+            )
+        elif outcome_kind == "infrastructure_failure":
+            terminal_evidence_valid = _v26_success_terminal_evidence_valid(
+                {**row, "status": "completed", "outcome_kind": "scored"},
+                agent,
+                stages,
+                arm=arm,
             )
         elif outcome_kind == "model_execution_failure":
             terminal_evidence_valid = _v26_model_failure_terminal_response_valid(
@@ -1907,6 +1992,372 @@ def _audit_completed_agent(
             terminal_evidence_valid = True
         if not terminal_evidence_valid:
             _add_reason(reasons, "accepted_terminal_response_evidence_invalid")
+
+
+def _audit_recalculation_integrity_evidence(
+    reasons: list[str],
+    row: dict[str, Any],
+    output: Path,
+    *,
+    failure: bool,
+) -> None:
+    recalculation = row.get("recalculation")
+    if not isinstance(recalculation, dict):
+        _add_reason(reasons, "recalculation_evidence_missing")
+        return
+    integrity = recalculation.get("sheet_inventory_integrity")
+    if (
+        recalculation.get("backend") != "libreoffice-headless"
+        or recalculation.get("profile") != "isolated-per-invocation"
+        or recalculation.get("source_path") != str(output)
+        or recalculation.get("destination_path") != str(output)
+        or recalculation.get("format") != output.suffix.lower().lstrip(".")
+        or not isinstance(recalculation.get("version"), str)
+        or not recalculation["version"]
+        or not isinstance(integrity, dict)
+        or set(integrity)
+        != {"schema_version", "policy", "enforced", "matched", "pre", "post"}
+        or integrity.get("schema_version") != 2
+        or integrity.get("policy") != RECALCULATION_SHEET_INTEGRITY_POLICY
+        or integrity.get("enforced") is not True
+    ):
+        _add_reason(reasons, "recalculation_evidence_invalid")
+        return
+
+    pre = integrity.get("pre")
+    post = integrity.get("post")
+    pre_valid = _valid_sheet_inventory_identity(pre)
+    post_valid = _valid_sheet_inventory_identity(post)
+    if not pre_valid:
+        _add_reason(reasons, "recalculation_pre_identity_invalid")
+    if not post_valid:
+        _add_reason(reasons, "recalculation_post_identity_invalid")
+    if not pre_valid or not post_valid or not isinstance(pre, dict) or not isinstance(post, dict):
+        return
+    if (
+        recalculation.get("source_sha256") != pre["workbook_sha256"]
+        or recalculation.get("output_sha256") != post["workbook_sha256"]
+    ):
+        _add_reason(reasons, "recalculation_identity_hash_binding_mismatch")
+
+    expected_match = pre["sheets"] == post["sheets"]
+    if integrity.get("matched") is not expected_match:
+        _add_reason(reasons, "recalculation_inventory_match_claim_invalid")
+    if failure:
+        if (
+            expected_match
+            or recalculation.get("atomic_replace") is not False
+            or recalculation.get("published") is not False
+        ):
+            _add_reason(reasons, "recalculation_failure_evidence_invalid")
+    elif (
+        not expected_match
+        or recalculation.get("atomic_replace") is not True
+        or recalculation.get("published") is not True
+    ):
+        _add_reason(reasons, "recalculation_success_evidence_invalid")
+
+    try:
+        actual_identity = sheet_inventory_identity(output)
+    except Exception:
+        _add_reason(reasons, "recalculation_output_identity_unreadable")
+        return
+    expected_output_identity = pre if failure else post
+    if actual_identity != expected_output_identity:
+        _add_reason(reasons, "recalculation_output_identity_mismatch")
+    if row.get("output_sha256") != actual_identity["workbook_sha256"]:
+        _add_reason(reasons, "recalculation_row_output_hash_mismatch")
+
+    if not failure:
+        return
+    failure_path = _absolute_path(recalculation.get("failure_artifact_path"), base=output.parent)
+    failure_sha256 = recalculation.get("failure_artifact_sha256")
+    expected_failure_path = output.with_name(
+        f"{output.stem}.recalculation-integrity-failure-"
+        f"{post['workbook_sha256']}{output.suffix}"
+    )
+    if (
+        failure_path is None
+        or failure_path != expected_failure_path
+        or failure_sha256 != post["workbook_sha256"]
+    ):
+        _add_reason(reasons, "recalculation_failure_artifact_binding_invalid")
+        return
+    try:
+        failure_metadata = failure_path.lstat()
+        if not stat.S_ISREG(failure_metadata.st_mode):
+            raise OSError("not a regular file")
+        if _file_sha256(failure_path) != failure_sha256:
+            _add_reason(reasons, "recalculation_failure_artifact_hash_mismatch")
+            return
+        failure_identity = sheet_inventory_identity(failure_path)
+    except OSError:
+        _add_reason(reasons, "recalculation_failure_artifact_unreadable")
+        return
+    except Exception:
+        _add_reason(reasons, "recalculation_failure_artifact_identity_unreadable")
+        return
+    if failure_identity != post:
+        _add_reason(reasons, "recalculation_failure_artifact_identity_mismatch")
+
+
+def _infrastructure_agent_audit_row(
+    record: dict[str, Any],
+    row: dict[str, Any],
+    contract: _AuditProtocolContract | None,
+) -> dict[str, Any]:
+    reasons: list[str] = record["reasons"]
+    prior_failure = row.get("prior_model_execution_failure")
+    agent_audit_row = row
+    if prior_failure is not None:
+        record["prior_model_execution_failure"] = prior_failure
+        if (
+            not isinstance(prior_failure, dict)
+            or set(prior_failure)
+            != {"error", "error_type", "model_failure_reason"}
+            or not isinstance(prior_failure.get("error"), str)
+            or not prior_failure["error"]
+            or prior_failure.get("error_type") != "AgentExecutionFailure"
+            or contract is None
+            or prior_failure.get("model_failure_reason")
+            not in contract.allowed_model_failure_reasons
+        ):
+            _add_reason(reasons, "prior_model_execution_failure_invalid")
+        else:
+            # The recalculation failure remains the row's primary taxonomy, while
+            # the terminal evidence must be interpreted as the earlier model failure.
+            agent_audit_row = {
+                **row,
+                "status": "completed",
+                "outcome_kind": "model_execution_failure",
+                "error": prior_failure["error"],
+                "error_type": prior_failure["error_type"],
+                "error_retryable": False,
+                "error_category": "model_execution_failure",
+                "model_failure_reason": prior_failure["model_failure_reason"],
+            }
+    return agent_audit_row
+
+
+def _audit_recalculation_infrastructure_row(
+    record: dict[str, Any],
+    row: dict[str, Any],
+    task: SpreadsheetTask,
+    arm: str,
+    root: Path,
+    manifest: dict[str, Any],
+    contract: _AuditProtocolContract | None,
+) -> None:
+    reasons: list[str] = record["reasons"]
+    record.update(
+        {
+            "outcome_kind": row.get("outcome_kind"),
+            "error_category": row.get("error_category"),
+            "error_type": row.get("error_type"),
+            "error": row.get("error"),
+            "infrastructure_failure_stage": row.get("infrastructure_failure_stage"),
+            "recalculation_failure_reason": row.get("recalculation_failure_reason"),
+            "score_available": row.get("score_available"),
+        }
+    )
+    if (
+        contract is None
+        or not contract.require_recalculation_integrity
+        or row.get("status") != "error"
+        or row.get("outcome_kind") != "infrastructure_failure"
+        or row.get("passed") is not False
+        or row.get("score_available") is not False
+        or row.get("error_category") != "recalculation_infrastructure"
+        or row.get("infrastructure_failure_stage") != "recalculation"
+        or row.get("recalculation_failure_reason") != "sheet_inventory_changed"
+        or row.get("error_type") != "RecalculationIntegrityError"
+        or row.get("error_retryable") is not False
+        or not isinstance(row.get("error"), str)
+        or not row["error"]
+    ):
+        _add_reason(reasons, "recalculation_infrastructure_taxonomy_invalid")
+    if any(field in row for field in ("comparison", "artifact_score_passed")):
+        _add_reason(reasons, "recalculation_failure_has_score_evidence")
+
+    agent_audit_row = _infrastructure_agent_audit_row(
+        record,
+        row,
+        contract,
+    )
+    _audit_completed_agent(record, agent_audit_row, arm, manifest, contract)
+    run_dir = _absolute_path(row.get("run_dir"), base=root)
+    output = _absolute_path(row.get("output_workbook"), base=root)
+    record["run_dir"] = str(run_dir) if run_dir is not None else None
+    record["output_workbook"] = str(output) if output is not None else None
+    if run_dir is None:
+        _add_reason(reasons, "run_dir_missing")
+    if output is None:
+        _add_reason(reasons, "output_path_missing")
+    if run_dir is None or output is None:
+        return
+
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        _add_reason(reasons, "results_dir_unreadable")
+        return
+    expected_parent = resolved_root / "runs" / task.task_id
+    resolved_run = run_dir.resolve(strict=False)
+    resolved_output = output.resolve(strict=False)
+    if resolved_run.parent != expected_parent or not (
+        resolved_run.name == arm or resolved_run.name.startswith(f"{arm}-")
+    ):
+        _add_reason(reasons, "run_dir_outside_expected_arm")
+    if resolved_output != resolved_run / "artifacts" / "output.xlsx":
+        _add_reason(reasons, "output_path_not_managed_artifact")
+    if _has_symlink(root, run_dir) or _has_symlink(root, output):
+        _add_reason(reasons, "artifact_path_contains_symlink")
+    try:
+        metadata = output.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("not a regular file")
+        output_sha256 = _file_sha256(output)
+    except OSError:
+        _add_reason(reasons, "artifact_unreadable")
+        return
+    record["output_sha256"] = output_sha256
+    if not _valid_sha256(row.get("output_sha256")) or row.get("output_sha256") != output_sha256:
+        _add_reason(reasons, "artifact_hash_mismatch")
+    _audit_recalculation_integrity_evidence(reasons, row, output, failure=True)
+    try:
+        if _file_sha256(output) != output_sha256:
+            _add_reason(reasons, "artifact_changed_during_audit")
+    except OSError:
+        _add_reason(reasons, "artifact_unreadable_after_audit")
+
+
+def _audit_scoring_infrastructure_row(
+    record: dict[str, Any],
+    row: dict[str, Any],
+    task: SpreadsheetTask,
+    arm: str,
+    root: Path,
+    manifest: dict[str, Any],
+    contract: _AuditProtocolContract | None,
+) -> None:
+    reasons: list[str] = record["reasons"]
+    record.update(
+        {
+            "outcome_kind": row.get("outcome_kind"),
+            "error_category": row.get("error_category"),
+            "error_type": row.get("error_type"),
+            "error": row.get("error"),
+            "infrastructure_failure_stage": row.get("infrastructure_failure_stage"),
+            "scoring_failure_reason": row.get("scoring_failure_reason"),
+            "score_available": row.get("score_available"),
+        }
+    )
+    if (
+        contract is None
+        or not contract.require_recalculation_integrity
+        or row.get("status") != "error"
+        or row.get("outcome_kind") != "infrastructure_failure"
+        or row.get("passed") is not False
+        or row.get("score_available") is not False
+        or row.get("error_category") != "scoring_infrastructure"
+        or row.get("infrastructure_failure_stage") != "scoring"
+        or row.get("scoring_failure_reason") != "worksheet_scorer_unsupported"
+        or row.get("error_type") != "ScoringInfrastructureError"
+        or row.get("error_retryable") is not False
+        or not isinstance(row.get("error"), str)
+        or not row["error"]
+    ):
+        _add_reason(reasons, "scoring_infrastructure_taxonomy_invalid")
+    if any(field in row for field in ("comparison", "artifact_score_passed")):
+        _add_reason(reasons, "scoring_infrastructure_has_score_evidence")
+
+    agent_audit_row = _infrastructure_agent_audit_row(record, row, contract)
+    _audit_completed_agent(record, agent_audit_row, arm, manifest, contract)
+    run_dir = _absolute_path(row.get("run_dir"), base=root)
+    output = _absolute_path(row.get("output_workbook"), base=root)
+    record["run_dir"] = str(run_dir) if run_dir is not None else None
+    record["output_workbook"] = str(output) if output is not None else None
+    if run_dir is None:
+        _add_reason(reasons, "run_dir_missing")
+    if output is None:
+        _add_reason(reasons, "output_path_missing")
+    if run_dir is None or output is None:
+        return
+
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        _add_reason(reasons, "results_dir_unreadable")
+        return
+    expected_parent = resolved_root / "runs" / task.task_id
+    resolved_run = run_dir.resolve(strict=False)
+    resolved_output = output.resolve(strict=False)
+    if resolved_run.parent != expected_parent or not (
+        resolved_run.name == arm or resolved_run.name.startswith(f"{arm}-")
+    ):
+        _add_reason(reasons, "run_dir_outside_expected_arm")
+    if resolved_output != resolved_run / "artifacts" / "output.xlsx":
+        _add_reason(reasons, "output_path_not_managed_artifact")
+    if _has_symlink(root, run_dir) or _has_symlink(root, output):
+        _add_reason(reasons, "artifact_path_contains_symlink")
+
+    try:
+        metadata = output.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("not a regular file")
+        output_sha256 = _file_sha256(output)
+    except OSError:
+        _add_reason(reasons, "artifact_unreadable")
+        return
+    record["output_sha256"] = output_sha256
+    if (
+        not _valid_sha256(row.get("output_sha256"))
+        or row.get("output_sha256") != output_sha256
+    ):
+        _add_reason(reasons, "artifact_hash_mismatch")
+
+    try:
+        identity = sheet_inventory_identity(output)
+    except Exception as exc:
+        record["reopen_error_type"] = type(exc).__name__
+        _add_reason(reasons, "artifact_reopen_failed")
+        return
+    record["artifact_validation_method"] = "ooxml-sheet-inventory-v2"
+    record["sheet_inventory"] = identity
+    record["sheet_names"] = [sheet["name"] for sheet in identity["sheets"]]
+
+    configuration = manifest.get("configuration")
+    recalculated = (
+        isinstance(configuration, dict)
+        and configuration.get("recalculate") is True
+    )
+    if recalculated:
+        _audit_recalculation_integrity_evidence(reasons, row, output, failure=False)
+    elif row.get("recalculation") is not None:
+        _add_reason(reasons, "unexpected_recalculation_evidence")
+
+    try:
+        compare_workbooks_chartsheet_safe(
+            task.golden_path,
+            output,
+            task.answer_position,
+            answer_sheet=task.answer_sheet,
+        )
+    except ScoringInfrastructureError as exc:
+        record["scorer_infrastructure_reproduced"] = True
+        record["fresh_score_error_type"] = type(exc).__name__
+    except Exception as exc:
+        record["fresh_score_error_type"] = type(exc).__name__
+        _add_reason(reasons, "scoring_infrastructure_evidence_invalid")
+    else:
+        record["scorer_infrastructure_reproduced"] = False
+        _add_reason(reasons, "scoring_infrastructure_not_reproduced")
+
+    try:
+        if _file_sha256(output) != output_sha256:
+            _add_reason(reasons, "artifact_changed_during_audit")
+    except OSError:
+        _add_reason(reasons, "artifact_unreadable_after_audit")
 
 
 def _audit_completed_row(
@@ -1929,6 +2380,35 @@ def _audit_completed_row(
         manifest_sha256,
         contract,
     )
+    infrastructure_claim = bool(
+        row.get("outcome_kind") == "infrastructure_failure"
+        or row.get("error_category")
+        in {"recalculation_infrastructure", "scoring_infrastructure"}
+    )
+    if infrastructure_claim:
+        if row.get("error_category") == "scoring_infrastructure":
+            _audit_scoring_infrastructure_row(
+                record,
+                row,
+                task,
+                arm,
+                root,
+                manifest,
+                contract,
+            )
+        elif row.get("error_category") == "recalculation_infrastructure":
+            _audit_recalculation_infrastructure_row(
+                record,
+                row,
+                task,
+                arm,
+                root,
+                manifest,
+                contract,
+            )
+        else:
+            _add_reason(reasons, "infrastructure_failure_category_invalid")
+        return
     if row.get("status") != "completed":
         _add_reason(reasons, "status_not_completed")
         return
@@ -2030,27 +2510,94 @@ def _audit_completed_row(
     elif output_sha256_before != expected_sha256:
         _add_reason(reasons, "artifact_hash_mismatch")
 
-    try:
-        workbook = load_workbook(output, read_only=True, data_only=False)
+    v28_artifact_policy = bool(
+        contract is not None and contract.require_recalculation_integrity
+    )
+    if v28_artifact_policy:
         try:
-            record["sheet_names"] = list(workbook.sheetnames)
-        finally:
-            workbook.close()
-    except Exception as exc:
-        record["reopen_error_type"] = type(exc).__name__
-        _add_reason(reasons, "artifact_reopen_failed")
-        return
+            with openpyxl_worksheet_view(output) as (worksheet_view, identity):
+                record["artifact_validation_method"] = (
+                    "ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"
+                )
+                record["sheet_inventory"] = identity
+                record["sheet_names"] = [sheet["name"] for sheet in identity["sheets"]]
+                expected_worksheet_names = [
+                    sheet["name"]
+                    for sheet in identity["sheets"]
+                    if sheet["kind"] == "worksheet"
+                ]
+                workbook = load_workbook(
+                    worksheet_view,
+                    read_only=True,
+                    data_only=False,
+                )
+                try:
+                    record["worksheet_names"] = list(workbook.sheetnames)
+                finally:
+                    workbook.close()
+                if record["worksheet_names"] != expected_worksheet_names:
+                    raise ScoringInfrastructureError(
+                        "The worksheet-only scorer view did not preserve worksheet names"
+                    )
+        except RenderError as exc:
+            record["reopen_error_type"] = type(exc).__name__
+            _add_reason(reasons, "artifact_reopen_failed")
+            return
+        except Exception as exc:
+            record.update(
+                {
+                    "score_available": False,
+                    "scorer_infrastructure_stage": "artifact_reopen",
+                    "scorer_infrastructure_error_type": type(exc).__name__,
+                }
+            )
+            _add_reason(reasons, "scorer_infrastructure_no_score")
+            return
+    else:
+        try:
+            workbook = load_workbook(output, read_only=True, data_only=False)
+            try:
+                record["sheet_names"] = list(workbook.sheetnames)
+            finally:
+                workbook.close()
+        except Exception as exc:
+            record["reopen_error_type"] = type(exc).__name__
+            _add_reason(reasons, "artifact_reopen_failed")
+            return
+
+    if contract is not None and contract.require_recalculation_integrity:
+        configuration = manifest.get("configuration")
+        recalculated = isinstance(configuration, dict) and configuration.get("recalculate") is True
+        if recalculated:
+            _audit_recalculation_integrity_evidence(reasons, row, output, failure=False)
+        elif row.get("recalculation") is not None:
+            _add_reason(reasons, "unexpected_recalculation_evidence")
 
     try:
-        fresh = compare_workbooks(
+        scorer = (
+            compare_workbooks_chartsheet_safe
+            if v28_artifact_policy
+            else compare_workbooks
+        )
+        fresh = scorer(
             task.golden_path,
             output,
             task.answer_position,
             answer_sheet=task.answer_sheet,
         )
     except Exception as exc:
-        record["fresh_score_error_type"] = type(exc).__name__
-        _add_reason(reasons, "fresh_score_failed")
+        if v28_artifact_policy:
+            record.update(
+                {
+                    "score_available": False,
+                    "scorer_infrastructure_stage": "fresh_score",
+                    "scorer_infrastructure_error_type": type(exc).__name__,
+                }
+            )
+            _add_reason(reasons, "scorer_infrastructure_no_score")
+        else:
+            record["fresh_score_error_type"] = type(exc).__name__
+            _add_reason(reasons, "fresh_score_failed")
         return
     fresh_dict = fresh.to_dict()
     record["fresh_comparison"] = fresh_dict
@@ -2085,9 +2632,9 @@ def audit_comparison(
     """Audit a comparison directory without modifying its journal or artifacts.
 
     Integrity is deliberately fail-closed. A selected task/arm must have either
-    one freshly verified completed row or one exact non-replay interruption seal.
-    A valid seal can preserve journal integrity, but never study completeness or
-    inferential validity because its outcome is unknown.
+    one freshly verified scored row, one audited recalculation infrastructure
+    failure, or one exact non-replay interruption seal. Infrastructure failures
+    and valid seals preserve journal integrity but invalidate score inference.
     """
 
     root = Path(os.path.abspath(Path(results_dir).expanduser()))
@@ -2280,7 +2827,34 @@ def audit_comparison(
     ) and not any(
         not reason.startswith("interrupted_unknown_outcome:") for reason in reasons
     )
-    study_complete = journal_integrity_valid and not interrupted_seals
+    recalculation_infrastructure_rows = sum(
+        row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("error_category") == "recalculation_infrastructure"
+        for row in audited_rows
+        if row.get("outcome_observed") is True
+    )
+    scoring_infrastructure_rows = sum(
+        row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("error_category") == "scoring_infrastructure"
+        for row in audited_rows
+        if row.get("outcome_observed") is True
+    )
+    study_complete = bool(
+        journal_integrity_valid
+        and not interrupted_seals
+        and not recalculation_infrastructure_rows
+        and not scoring_infrastructure_rows
+    )
+    inference_invalid_reasons: list[str] = []
+    if not journal_integrity_valid:
+        inference_invalid_reasons.append("comparison_audit_failed")
+    else:
+        if interrupted_seals:
+            inference_invalid_reasons.append("interrupted_unknown_outcome")
+        if recalculation_infrastructure_rows:
+            inference_invalid_reasons.append("recalculation_infrastructure_failure")
+        if scoring_infrastructure_rows:
+            inference_invalid_reasons.append("scoring_infrastructure_failure")
     known_passed_rows = sum(
         row.get("outcome_passed") is True
         for row in audited_rows
@@ -2297,11 +2871,7 @@ def audit_comparison(
         "journal_integrity_valid": journal_integrity_valid,
         "study_complete": study_complete,
         "inference_valid": study_complete,
-        "inference_invalid_reasons": (
-            [] if study_complete else ["interrupted_unknown_outcome"]
-            if journal_integrity_valid and interrupted_seals
-            else ["comparison_audit_failed"]
-        ),
+        "inference_invalid_reasons": inference_invalid_reasons,
         "reasons": reasons,
         "results_dir": str(root),
         "manifest_sha256": manifest_sha256,
@@ -2325,6 +2895,10 @@ def audit_comparison(
             for row in audited_rows
             if row.get("outcome_observed") is True
         ),
+        "known_recalculation_infrastructure_failure_rows": (
+            recalculation_infrastructure_rows
+        ),
+        "known_scoring_infrastructure_failure_rows": scoring_infrastructure_rows,
         "rows": audited_rows,
     }
     if not study_complete:

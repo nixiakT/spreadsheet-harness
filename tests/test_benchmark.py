@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
+import spreadsheet_harness.render as render_module
 from spreadsheet_harness import benchmark as benchmark_module
 from spreadsheet_harness.agent import AgentResult
 from spreadsheet_harness.benchmark import (
@@ -1534,6 +1535,36 @@ def test_summarize_results_writes_summary_for_single_arm_directory(
     assert json.loads((tmp_path / "summary.json").read_text(encoding="utf-8")) == summary
 
 
+def test_summarize_results_labels_scoring_infrastructure_without_recalc_alias(
+    tmp_path: Path,
+) -> None:
+    results = tmp_path / "results.jsonl"
+    results.write_text(
+        json.dumps(
+            {
+                "task_id": "1",
+                "status": "error",
+                "passed": False,
+                "outcome_kind": "infrastructure_failure",
+                "score_available": False,
+                "error_category": "scoring_infrastructure",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = summarize_results(results)
+
+    assert summary["inference_valid"] is False
+    assert summary["inference_invalid_reasons"] == [
+        "scoring_infrastructure_failures"
+    ]
+    assert summary["scoring_infrastructure_failures"] == 1
+    assert summary["recalculation_infrastructure_failures"] == 0
+    assert summary["verified_accuracy"] is None
+
+
 def test_benchmark_passes_max_output_tokens_to_agent(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -1591,6 +1622,106 @@ def test_benchmark_passes_max_output_tokens_to_agent(
         "scoring_metadata_sha256": payload["scoring_metadata_sha256"],
     }
     assert len(payload["scoring_metadata_sha256"]) == 64
+
+
+def test_benchmark_recalculation_sheet_drift_is_infrastructure_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = tmp_path / "initial.xlsx"
+    golden = tmp_path / "golden.xlsx"
+    _book(initial, {"Sheet": [[1]]})
+    _book(golden, {"Sheet": [[1]]})
+
+    class OfflineAgent:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def run(self, _: str) -> AgentResult:
+            return AgentResult("done", 1, 0, {}, "response")
+
+    monkeypatch.setattr(benchmark_module, "SpreadsheetAgent", OfflineAgent)
+    monkeypatch.setattr(render_module, "find_libreoffice", lambda explicit=None: "/fake/soffice")
+    monkeypatch.setattr(render_module, "libreoffice_version", lambda binary: "LibreOffice test")
+
+    def fake_convert(
+        source_copy: Path,
+        output_dir: Path,
+        **kwargs: object,
+    ) -> Path:
+        output_dir.mkdir(parents=True)
+        converted = output_dir / source_copy.name
+        shutil.copy2(source_copy, converted)
+        workbook = load_workbook(converted)
+        try:
+            workbook.active.title = "Changed"
+            workbook.save(converted)
+        finally:
+            workbook.close()
+        return converted
+
+    def must_not_score(*_: object, **__: object) -> object:
+        raise AssertionError("sheet identity drift must stop before scoring")
+
+    monkeypatch.setattr(render_module, "_convert_with_libreoffice", fake_convert)
+    monkeypatch.setattr(
+        benchmark_module,
+        "compare_workbooks_chartsheet_safe",
+        must_not_score,
+    )
+    task = SpreadsheetTask("1", "noop", initial, golden, "Cell-Level", "A1", "Sheet")
+    runner = VerifiedBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "results",
+        enable_code=False,
+        recalculate=True,
+    )
+
+    row = runner._run_task(task, 1)
+
+    assert row["status"] == "error"
+    assert row["passed"] is False
+    assert row["outcome_kind"] == "infrastructure_failure"
+    assert row["score_available"] is False
+    assert row["error_category"] == "recalculation_infrastructure"
+    assert row["recalculation_failure_reason"] == "sheet_inventory_changed"
+    assert row["recalculation"]["sheet_inventory_integrity"]["matched"] is False
+    assert "comparison" not in row
+    run_manifest = json.loads(
+        (Path(row["run_dir"]) / "run.json").read_text(encoding="utf-8")
+    )
+    assert run_manifest["result"]["recalculation"] == row["recalculation"]
+    trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
+    assert not any(item["event"] == "benchmark.evaluated" for item in trajectory)
+    not_evaluated = [
+        item for item in trajectory if item["event"] == "benchmark.not_evaluated"
+    ]
+    assert not_evaluated[0]["payload"]["error_category"] == (
+        "recalculation_infrastructure"
+    )
+    runner.results_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = summarize_results(
+        runner.results_path,
+        expected_task_ids=[task.task_id],
+        write_summary=False,
+    )
+
+    assert summary["inference_valid"] is False
+    assert summary["inference_invalid_reasons"] == [
+        "recalculation_infrastructure_failures"
+    ]
+    assert summary["verified_accuracy"] is None
+    assert summary["completed_accuracy"] is None
+    assert summary["soft"] is None
+    assert summary["hard"] is None
+    assert summary["no_score_infrastructure_failures"] == 1
+    assert summary["known_scored_descriptive"] == {
+        "tasks": 0,
+        "passed": 0,
+        "accuracy": None,
+        "primary": False,
+    }
 
 
 def test_benchmark_passes_provider_key_to_registry_redaction(

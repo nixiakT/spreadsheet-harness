@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
+import spreadsheet_harness.comparison as comparison_module
+import spreadsheet_harness.render as render_module
 from spreadsheet_harness import benchmark as benchmark_module
 from spreadsheet_harness import cli as cli_module
 from spreadsheet_harness.agent import AgentResult
@@ -28,13 +31,16 @@ from spreadsheet_harness.comparison import (
     V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V26_COMPARISON_PROTOCOL_VERSION,
     V26_RUN_SPEC_SOURCE_CONTRACT,
+    V27_COMPARISON_CONFIGURATION_POLICIES,
+    V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V27_COMPARISON_PROTOCOL_VERSION,
+    V27_RUN_SPEC_SOURCE_CONTRACT,
     ComparisonBenchmarkRunner,
     RunSpecAnchor,
     _allowed_observed_terminals_policy,
     _arm_order,
     _balanced_arm_orders,
     _stage_allowed_tools_policy,
-    comparison_execution_contract,
     comparison_summary,
     load_pilot_run_spec,
     manifest_execution_contract,
@@ -49,6 +55,7 @@ from spreadsheet_harness.errors import (
     CodeIsolationError,
     HarnessError,
     ProviderError,
+    ScoringInfrastructureError,
 )
 from spreadsheet_harness.skills import SkillRegistry
 from spreadsheet_harness.trajectory import read_trajectory
@@ -128,9 +135,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 16
-    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 16
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v27"
+    assert manifest["schema_version"] == 17
+    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 17
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v28"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -159,6 +166,20 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["formula_verification_skill_policy"] == (
         "trajectory-local-transfer-gate-v1"
     )
+    assert manifest["configuration"]["recalculation_integrity_policy"] == (
+        "exact-ordered-sheet-kind-name-visibility-v2"
+    )
+    assert manifest["configuration"]["recalculation_failure_policy"] == (
+        "audited-infrastructure-error-no-score-v1"
+    )
+    assert manifest["configuration"]["artifact_reopen_policy"] == (
+        "ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"
+    )
+    assert manifest["configuration"]["scoring_compatibility_policy"] == (
+        "worksheet-only-ooxml-view-scorer-infrastructure-no-score-v1"
+    )
+    assert "artifact_reopen_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
+    assert "scoring_compatibility_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
         "bare": "bare",
@@ -259,7 +280,8 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "routing_protocol",
     ]
     assert manifest["configuration"]["circuit_breaker_immediate_categories"] == [
-        "provider_fatal"
+        "provider_fatal",
+        "recalculation_infrastructure",
     ]
     assert manifest["configuration"]["overload_retry_min_seconds"] == 15.0
     assert manifest["configuration"]["connect_retry_min_seconds"] == 30.0
@@ -349,9 +371,13 @@ def test_historical_terminal_policies_retain_tool_stage_text_fallback(
 
 @pytest.mark.parametrize(
     "protocol_version",
-    [V26_COMPARISON_PROTOCOL_VERSION, COMPARISON_PROTOCOL_VERSION],
+    [
+        V26_COMPARISON_PROTOCOL_VERSION,
+        V27_COMPARISON_PROTOCOL_VERSION,
+        COMPARISON_PROTOCOL_VERSION,
+    ],
 )
-def test_v26_and_v27_terminal_policy_require_submit_for_tool_stages(
+def test_v26_and_later_terminal_policy_require_submit_for_tool_stages(
     protocol_version: str,
 ) -> None:
     policy = _allowed_observed_terminals_policy(
@@ -955,13 +981,20 @@ def test_v26_source_contract_remains_pinned_to_historical_source() -> None:
     )
 
 
-def test_v27_reserve79_run_spec_anchor_is_current_fresh_only() -> None:
+def test_v27_reserve79_run_spec_anchor_is_historical_and_read_only() -> None:
     path = Path(
         "benchmarks/protocols/"
         "qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json"
     )
     document, provenance, _ = load_pilot_run_spec(path)
-    anchor = require_launchable_run_spec(provenance)
+    with pytest.raises(HarnessError, match="read-only"):
+        require_launchable_run_spec(provenance)
+
+    anchor = next(
+        candidate
+        for candidate in RUN_SPEC_ANCHORS
+        if candidate.run_spec_id == document["run_spec_id"]
+    )
 
     assert anchor == RunSpecAnchor(
         run_spec_id="qwen36-local-v27-reserve79-eval-v1-bare-ours-seed41",
@@ -970,59 +1003,35 @@ def test_v27_reserve79_run_spec_anchor_is_current_fresh_only() -> None:
         schema_version=document["schema_version"],
         phase="v27_reserve79_evaluation",
         split_manifest_id="qwen35-trace2skill-local-v27-reserve79-v1",
-        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
-        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
-        launchable=True,
+        comparison_protocol_version=V27_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
     )
-    assert document["execution"]["source_contract"] == (
-        benchmark_module._run_spec_source_fingerprint()
-    )
-    with pytest.raises(HarnessError, match="fresh-only"):
+    assert document["execution"]["source_contract"] == V27_RUN_SPEC_SOURCE_CONTRACT
+    with pytest.raises(HarnessError, match="read-only"):
         require_launchable_run_spec(provenance, resume=True)
 
 
-def test_v27_reserve79_run_spec_matches_resolved_execution_contract() -> None:
+def test_v27_source_contract_remains_pinned_to_historical_source() -> None:
     document, _, _ = load_pilot_run_spec(
         Path(
             "benchmarks/protocols/"
             "qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json"
         )
     )
-    execution = document["execution"]
-    provider = execution["provider"]
-    generation = provider["generation"]
-    resources = execution["resources"]
-    config = ProviderConfig(
-        provider["base_url"],
-        "not-a-real-key",
-        provider["model"],
-        reasoning_effort=provider["reasoning_effort"],
-        requested_reasoning_effort=provider["requested_reasoning_effort"],
-        timeout_seconds=provider["request_timeout_seconds"],
-        max_retries=provider["request_retries"],
-        store_responses=provider["store_responses"],
-        request_interval_seconds=provider["request_interval_seconds"],
-        litellm_timeout_seconds=provider["litellm_timeout_seconds"],
-        api_protocol=provider["api_protocol"],
-        **generation,
-    )
+    historical_manifest = {
+        "schema_version": V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "comparison_protocol_version": V27_COMPARISON_PROTOCOL_VERSION,
+        "configuration": {},
+    }
 
-    actual = comparison_execution_contract(
-        config,
-        arms=tuple(execution["arms"]),
-        max_model_calls=resources["max_model_calls"],
-        max_turns_per_arm=resources["max_turns_per_arm"],
-        max_total_tokens=resources["max_total_tokens"],
-        max_output_tokens=resources["max_output_tokens_per_call"],
-        task_timeout_seconds=resources["task_timeout_seconds"],
-        recalculate=resources["recalculate"],
-        arm_order_seed=resources["arm_order_seed"],
-        circuit_breaker_threshold=resources["circuit_breaker_threshold"],
-        split_provenance=execution["split_provenance"],
-        skills=SkillRegistry([Path("skills")]).freeze(),
+    assert document["execution"]["source_contract"] == V27_RUN_SPEC_SOURCE_CONTRACT
+    assert manifest_execution_contract(historical_manifest)["source_contract"] == (
+        V27_RUN_SPEC_SOURCE_CONTRACT
     )
-
-    assert actual == execution
+    assert V27_RUN_SPEC_SOURCE_CONTRACT != (
+        benchmark_module._run_spec_source_fingerprint()
+    )
 
 
 def test_v25_preflight_rejects_historical_run_before_isolation(
@@ -1521,6 +1530,162 @@ def test_comparison_summary_counts_known_model_failure_as_complete_nonbreaker(
         "edit_recovery_exhausted": 1
     }
     assert summary["pairwise"]["bare_vs_ours"]["inference_valid"] is True
+
+
+def test_comparison_summary_does_not_count_recalculation_failure_as_scored_false(
+    tmp_path: Path,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    rows = [
+        {
+            "task_id": task.task_id,
+            "arm": arm,
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "status": "error" if arm == "bare" else "completed",
+            "outcome_kind": "infrastructure_failure" if arm == "bare" else "scored",
+            "score_available": False if arm == "bare" else True,
+            "passed": arm == "ours",
+            "error_category": (
+                "recalculation_infrastructure" if arm == "bare" else None
+            ),
+            "recalculation_failure_reason": (
+                "sheet_inventory_changed" if arm == "bare" else None
+            ),
+            "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
+            "agent": {
+                "usage": {"total_tokens": 1},
+                "request_timings": [
+                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
+                ],
+            },
+        }
+        for arm in ("bare", "ours")
+    ]
+    results = tmp_path / "recalculation-infrastructure-summary.jsonl"
+    results.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    summary = comparison_summary(results, [task], arms=("bare", "ours"))
+
+    assert summary["inference_valid"] is False
+    assert "recalculation_infrastructure_failures" in summary[
+        "inference_invalid_reasons"
+    ]
+    assert summary["known_infrastructure_failure_arm_tasks"] == 1
+    assert summary["arms"]["bare"]["end_to_end_accuracy"] is None
+    assert summary["arms"]["bare"]["wilson_95"] is None
+    assert summary["arms"]["bare"]["score_unavailable"] is True
+    assert summary["arms"]["bare"]["known_outcome_descriptive"]["tasks"] == 0
+    pairwise = summary["pairwise"]["bare_vs_ours"]
+    assert pairwise["accuracy_delta_right_minus_left"] is None
+    assert pairwise["known_outcome_descriptive"]["pairs"] == 0
+    assert "collection_integrity:recalculation_infrastructure_failures" in pairwise[
+        "inference_invalid_reasons"
+    ]
+
+
+def test_comparison_summary_keeps_post_breaker_missing_rows_out_of_descriptive_scores(
+    tmp_path: Path,
+) -> None:
+    tasks = _tasks(tmp_path)
+    first = tasks[0]
+    results = tmp_path / "immediate-recalculation-breaker.jsonl"
+    results.write_text(
+        json.dumps(
+            {
+                "task_id": first.task_id,
+                "arm": "bare",
+                "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+                "status": "error",
+                "outcome_kind": "infrastructure_failure",
+                "score_available": False,
+                "passed": False,
+                "error_category": "recalculation_infrastructure",
+                "recalculation_failure_reason": "sheet_inventory_changed",
+                "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
+                "agent": {
+                    "usage": {"total_tokens": 1},
+                    "request_timings": [
+                        {"turn": 1, "attempts": 1, "attempt_history": [{}]}
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = comparison_summary(results, tasks, arms=("bare", "ours"))
+
+    assert summary["inference_valid"] is False
+    assert summary["missing_arm_tasks"] == 3
+    assert summary["arms"]["bare"]["end_to_end_accuracy"] is None
+    assert summary["arms"]["ours"]["end_to_end_accuracy"] is None
+    assert summary["arms"]["bare"]["known_outcome_descriptive"]["tasks"] == 0
+    assert summary["arms"]["ours"]["known_outcome_descriptive"]["tasks"] == 0
+    pair = summary["pairwise"]["bare_vs_ours"]
+    assert pair["accuracy_delta_right_minus_left"] is None
+    assert pair["known_outcome_descriptive"]["pairs"] == 0
+
+
+def test_comparison_summary_keeps_scoring_infrastructure_separate_from_recalculation(
+    tmp_path: Path,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    rows = [
+        {
+            "task_id": task.task_id,
+            "arm": arm,
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "status": "error" if arm == "bare" else "completed",
+            "outcome_kind": "infrastructure_failure" if arm == "bare" else "scored",
+            "score_available": False if arm == "bare" else True,
+            "passed": arm == "ours",
+            "error_category": "scoring_infrastructure" if arm == "bare" else None,
+            "scoring_failure_reason": (
+                "worksheet_scorer_unsupported" if arm == "bare" else None
+            ),
+            "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
+            "agent": {
+                "usage": {"total_tokens": 1},
+                "request_timings": [
+                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
+                ],
+            },
+        }
+        for arm in ("bare", "ours")
+    ]
+    results = tmp_path / "scoring-infrastructure-summary.jsonl"
+    results.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    summary = comparison_summary(results, [task], arms=("bare", "ours"))
+
+    assert summary["inference_valid"] is False
+    assert "scoring_infrastructure_failures" in summary["inference_invalid_reasons"]
+    assert "recalculation_infrastructure_failures" not in summary[
+        "inference_invalid_reasons"
+    ]
+    assert summary["known_scoring_infrastructure_failure_arm_tasks"] == 1
+    assert summary["known_recalculation_infrastructure_failure_arm_tasks"] == 0
+    bare = summary["arms"]["bare"]
+    assert bare["scoring_infrastructure_failures"] == 1
+    assert bare["recalculation_infrastructure_failures"] == 0
+    assert bare["infrastructure_failure_reasons"] == {
+        "worksheet_scorer_unsupported": 1
+    }
+    assert bare["cell_level"]["scoring_infrastructure_failures"] == 1
+    assert bare["cell_level"]["recalculation_infrastructure_failures"] == 0
+    pair = summary["pairwise"]["bare_vs_ours"]
+    assert "collection_integrity:scoring_infrastructure_failures" in pair[
+        "inference_invalid_reasons"
+    ]
+    assert "collection_integrity:recalculation_infrastructure_failures" not in pair[
+        "inference_invalid_reasons"
+    ]
 
 
 def test_comparison_summary_treats_sealed_unknown_as_nonprimary_not_missing(
@@ -2139,6 +2304,122 @@ def test_comparison_runner_calls_arm_without_answer_metadata(
     }
 
 
+def test_comparison_recalculation_sheet_drift_is_persisted_without_scoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = _tasks(tmp_path)[0]
+
+    monkeypatch.setattr(
+        comparison_module,
+        "run_arm",
+        lambda **_: AgentResult("done", 1, 0, {}, "response"),
+    )
+    monkeypatch.setattr(render_module, "find_libreoffice", lambda explicit=None: "/fake/soffice")
+    monkeypatch.setattr(render_module, "libreoffice_version", lambda binary: "LibreOffice test")
+
+    def fake_convert(
+        source_copy: Path,
+        output_dir: Path,
+        **kwargs: object,
+    ) -> Path:
+        output_dir.mkdir(parents=True)
+        converted = output_dir / source_copy.name
+        shutil.copy2(source_copy, converted)
+        workbook = load_workbook(converted)
+        try:
+            workbook.active.title = "Changed"
+            workbook.save(converted)
+        finally:
+            workbook.close()
+        return converted
+
+    def must_not_score(*_: object, **__: object) -> object:
+        raise AssertionError("sheet identity drift must stop before scoring")
+
+    monkeypatch.setattr(render_module, "_convert_with_libreoffice", fake_convert)
+    monkeypatch.setattr(
+        comparison_module,
+        "compare_workbooks_chartsheet_safe",
+        must_not_score,
+    )
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "recalculation-drift",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=10,
+        max_turns_per_arm=10,
+        recalculate=True,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "error"
+    assert row["passed"] is False
+    assert row["outcome_kind"] == "infrastructure_failure"
+    assert row["score_available"] is False
+    assert row["error_category"] == "recalculation_infrastructure"
+    assert row["infrastructure_failure_stage"] == "recalculation"
+    assert row["recalculation_failure_reason"] == "sheet_inventory_changed"
+    assert row["recalculation"]["sheet_inventory_integrity"]["matched"] is False
+    assert "comparison" not in row
+    assert "artifact_score_passed" not in row
+    assert Path(row["recalculation"]["failure_artifact_path"]).is_file()
+    run_manifest = json.loads(
+        (Path(row["run_dir"]) / "run.json").read_text(encoding="utf-8")
+    )
+    assert run_manifest["result"]["recalculation"] == row["recalculation"]
+    trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
+    assert not any(item["event"] == "benchmark.evaluated" for item in trajectory)
+    not_evaluated = [
+        item for item in trajectory if item["event"] == "benchmark.not_evaluated"
+    ]
+    assert not_evaluated[0]["payload"]["error_category"] == (
+        "recalculation_infrastructure"
+    )
+    assert not_evaluated[0]["payload"]["recalculation"] == row["recalculation"]
+
+
+def test_comparison_classifies_unsupported_scorer_as_infrastructure_no_score(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = _tasks(tmp_path)[0]
+    monkeypatch.setattr(
+        comparison_module,
+        "run_arm",
+        lambda **_: AgentResult("done", 1, 0, {}, "response"),
+    )
+
+    def unsupported(*_: object, **__: object) -> object:
+        raise ScoringInfrastructureError("worksheet scorer unsupported")
+
+    monkeypatch.setattr(
+        comparison_module,
+        "compare_workbooks_chartsheet_safe",
+        unsupported,
+    )
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "scoring-infrastructure",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        recalculate=False,
+    )
+
+    row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
+
+    assert row["status"] == "error"
+    assert row["outcome_kind"] == "infrastructure_failure"
+    assert row["score_available"] is False
+    assert row["error_category"] == "scoring_infrastructure"
+    assert row["infrastructure_failure_stage"] == "scoring"
+    assert row["scoring_failure_reason"] == "worksheet_scorer_unsupported"
+    assert "comparison" not in row
+    assert "artifact_score_passed" not in row
+
+
 def test_comparison_run_binds_result_row_to_exact_manifest(
     tmp_path: Path,
     monkeypatch: Any,
@@ -2644,6 +2925,60 @@ def test_known_model_execution_failure_row_passes_full_audit(
     assert report["known_failed_rows"] == 1
     assert report["known_model_execution_failure_rows"] == 1
 
+    monkeypatch.setattr(
+        render_module, "find_libreoffice", lambda explicit=None: "/fake/soffice"
+    )
+    monkeypatch.setattr(
+        render_module, "libreoffice_version", lambda binary: "LibreOffice test"
+    )
+
+    def fake_convert(source_copy: Path, output_dir: Path, **_: object) -> Path:
+        output_dir.mkdir(parents=True)
+        converted = output_dir / source_copy.name
+        shutil.copy2(source_copy, converted)
+        workbook = load_workbook(converted)
+        try:
+            workbook.active.title = "Changed"
+            workbook.save(converted)
+        finally:
+            workbook.close()
+        return converted
+
+    monkeypatch.setattr(render_module, "_convert_with_libreoffice", fake_convert)
+    drift_runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "audited-known-failure-then-drift",
+        skill_registry=SkillRegistry([]),
+        arms=("bare",),
+        max_model_calls=3,
+        max_turns_per_arm=3,
+        max_total_tokens=100,
+        recalculate=True,
+    )
+    drift_runner._prepare_manifest([task])
+    drift_manifest_sha256 = hashlib.sha256(
+        drift_runner.manifest_path.read_bytes()
+    ).hexdigest()
+    drift_row = drift_runner._run_one(
+        task, "bare", comparison_manifest_sha256=drift_manifest_sha256
+    )
+    drift_runner._append(drift_row)
+
+    drift_report = audit_comparison(
+        drift_runner.output_dir, [task], arms=("bare",)
+    )
+
+    assert drift_row["outcome_kind"] == "infrastructure_failure"
+    assert drift_row["score_available"] is False
+    assert drift_row["prior_model_execution_failure"] == {
+        "error": "final recovery code did not produce a saved edit",
+        "error_type": "AgentExecutionFailure",
+        "model_failure_reason": "edit_recovery_exhausted",
+    }
+    assert drift_report["audit_valid"] is True
+    assert drift_report["study_complete"] is False
+    assert drift_report["known_recalculation_infrastructure_failure_rows"] == 1
+
 
 def test_comparison_counts_ambiguous_delivery_as_transient_but_not_retryable(
     tmp_path: Path, monkeypatch: Any
@@ -2740,7 +3075,10 @@ def test_end_to_end_deadline_covers_scoring(
         now[0] = 102.0
         return type("Comparison", (), {"passed": True, "to_dict": lambda self: {}})()
 
-    monkeypatch.setattr("spreadsheet_harness.comparison.compare_workbooks", slow_score)
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison.compare_workbooks_chartsheet_safe",
+        slow_score,
+    )
     runner = ComparisonBenchmarkRunner(
         ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
         tmp_path / "deadline",

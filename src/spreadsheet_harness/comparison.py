@@ -58,7 +58,7 @@ from .benchmark import (
     _sha256,
     _source_fingerprint,
     _text_sha256,
-    compare_workbooks,
+    compare_workbooks_chartsheet_safe,
     comparison_evidence,
     require_evaluation_task_authorization,
     verify_trace2skill_split_provenance,
@@ -76,6 +76,8 @@ from .errors import (
     CodeIsolationError,
     HarnessError,
     ProviderError,
+    RecalculationIntegrityError,
+    ScoringInfrastructureError,
 )
 from .pacing import PACING_POLICY, RelayPacer
 from .preprocess import (
@@ -83,6 +85,7 @@ from .preprocess import (
     DETERMINISTIC_PROFILE_SCHEMA_VERSION,
     build_deterministic_profile,
 )
+from .render import RECALCULATION_SHEET_INTEGRITY_POLICY
 from .session import WorkbookSession
 from .skills import SkillRegistry
 
@@ -117,10 +120,22 @@ V26_RUN_SPEC_SOURCE_CONTRACT = {
     "sha256": "10ead91dc5e40b5f065b09e2c0b132342350cc7afa6edd3d8d38d2edc6f4a1d3",
     "file_count": 21,
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v27"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 16
+V27_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v27"
+V27_COMPARISON_MANIFEST_SCHEMA_VERSION = 16
+V27_RUN_SPEC_SOURCE_CONTRACT = {
+    "schema_version": 1,
+    "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
+    "sha256": "ab359f5c45ab797ec1b88ae1cfa54e50c9aba7fd44d6fddeb28e0a5df1448328",
+    "file_count": 21,
+}
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v28"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 17
 _V26_RUNTIME_PROTOCOL_VERSIONS = frozenset(
-    {V26_COMPARISON_PROTOCOL_VERSION, COMPARISON_PROTOCOL_VERSION}
+    {
+        V26_COMPARISON_PROTOCOL_VERSION,
+        V27_COMPARISON_PROTOCOL_VERSION,
+        COMPARISON_PROTOCOL_VERSION,
+    }
 )
 PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
 PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
@@ -185,8 +200,19 @@ V26_COMPARISON_CONFIGURATION_POLICIES = {
     "deterministic_profile_policy": "representative-evidence-12k-v1",
     "formula_verification_skill_policy": "trajectory-local-transfer-gate-v1",
 }
-# v27 changes experiment identity only; its runtime policies remain frozen to v26.
-COMPARISON_CONFIGURATION_POLICIES = dict(V26_COMPARISON_CONFIGURATION_POLICIES)
+V27_COMPARISON_CONFIGURATION_POLICIES = dict(V26_COMPARISON_CONFIGURATION_POLICIES)
+# v28 also fails closed if the recalculation engine changes sheet identity.
+COMPARISON_CONFIGURATION_POLICIES = {
+    **V27_COMPARISON_CONFIGURATION_POLICIES,
+    "recalculation_integrity_policy": RECALCULATION_SHEET_INTEGRITY_POLICY,
+    "recalculation_failure_policy": "audited-infrastructure-error-no-score-v1",
+    "artifact_reopen_policy": (
+        "ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"
+    ),
+    "scoring_compatibility_policy": (
+        "worksheet-only-ooxml-view-scorer-infrastructure-no-score-v1"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -265,9 +291,9 @@ RUN_SPEC_ANCHORS = (
         schema_version=PILOT_RUN_SPEC_SCHEMA_VERSION,
         phase="v27_reserve79_evaluation",
         split_manifest_id="qwen35-trace2skill-local-v27-reserve79-v1",
-        comparison_protocol_version=COMPARISON_PROTOCOL_VERSION,
-        comparison_manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
-        launchable=True,
+        comparison_protocol_version=V27_COMPARISON_PROTOCOL_VERSION,
+        comparison_manifest_schema_version=V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        launchable=False,
     ),
 )
 
@@ -653,6 +679,8 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
         contract["source_contract"] = dict(V25_RUN_SPEC_SOURCE_CONTRACT)
     elif protocol_version == V26_COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = dict(V26_RUN_SPEC_SOURCE_CONTRACT)
+    elif protocol_version == V27_COMPARISON_PROTOCOL_VERSION:
+        contract["source_contract"] = dict(V27_RUN_SPEC_SOURCE_CONTRACT)
     elif protocol_version == COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = _run_spec_source_fingerprint()
     return contract
@@ -786,8 +814,17 @@ def _request_attempt_audit(row: dict[str, Any]) -> dict[str, int | bool]:
     )
     if failed_attempts is None:
         failed_attempts = 0
-    exact = bool(
+    request_history_complete = bool(
         row.get("status") == "completed"
+        or (
+            row.get("status") == "error"
+            and row.get("outcome_kind") == "infrastructure_failure"
+            and row.get("error_category")
+            in {"recalculation_infrastructure", "scoring_infrastructure"}
+        )
+    )
+    exact = bool(
+        request_history_complete
         and budget_calls is not None
         and valid_timings
         and len(attempts) == budget_calls
@@ -970,6 +1007,16 @@ def _task_stratum(task: SpreadsheetTask) -> str:
     return "other"
 
 
+def _row_has_available_score(row: dict[str, Any] | None) -> bool:
+    return bool(
+        isinstance(row, dict)
+        and row.get("status") == "completed"
+        and isinstance(row.get("passed"), bool)
+        and row.get("score_available") is not False
+        and row.get("outcome_kind") != "infrastructure_failure"
+    )
+
+
 def _arm_subset_summary(
     tasks: list[SpreadsheetTask],
     arm: str,
@@ -1000,6 +1047,16 @@ def _arm_subset_summary(
         for row in arm_rows
         if row.get("outcome_kind") == "model_execution_failure"
     )
+    infrastructure_failures = Counter(
+        str(
+            row.get("recalculation_failure_reason")
+            or row.get("scoring_failure_reason")
+            or "unspecified"
+        )
+        for row in arm_rows
+        if row.get("outcome_kind") == "infrastructure_failure"
+    )
+    score_unavailable = bool(infrastructure_failures)
     terminations = Counter(
         str(termination.get("reason") or "unspecified")
         for row in arm_rows
@@ -1018,8 +1075,10 @@ def _arm_subset_summary(
         "errors": len(arm_rows) - len(completed),
         "missing": len(tasks) - len(arm_rows),
         "passed": passed,
-        "end_to_end_accuracy": passed / len(tasks) if tasks else 0.0,
-        "wilson_95": _wilson(passed, len(tasks)),
+        "end_to_end_accuracy": (
+            None if score_unavailable else passed / len(tasks) if tasks else 0.0
+        ),
+        "wilson_95": None if score_unavailable else _wilson(passed, len(tasks)),
         "completed_only_accuracy": passed / len(completed) if completed else None,
         "completion_rate": len(completed) / len(tasks) if tasks else 0.0,
         "error_categories": dict(sorted(errors.items())),
@@ -1027,6 +1086,9 @@ def _arm_subset_summary(
         "model_execution_failure_reasons": dict(
             sorted(model_execution_failures.items())
         ),
+        "known_infrastructure_failures": sum(infrastructure_failures.values()),
+        "infrastructure_failure_reasons": dict(sorted(infrastructure_failures.items())),
+        "score_unavailable": score_unavailable,
         "budget_termination_reasons": dict(sorted(terminations.items())),
         "input_tokens": _distribution([item["input_tokens"] for item in usage]),
         "output_tokens": _distribution([item["output_tokens"] for item in usage]),
@@ -1098,8 +1160,8 @@ def _pairwise_result(
             - sum(passes[left_arm][task.task_id] for task in tasks)
         )
         / len(tasks)
-        if tasks
-        else 0.0,
+        if inference_valid
+        else None,
         "stratified_bootstrap_95": (
             _stratified_bootstrap_delta(
                 tasks,
@@ -1204,6 +1266,23 @@ def comparison_summary(
         for row in rows
         if row.get("task_id") is not None and row.get("arm") in arms
     }
+    infrastructure_failure_keys = {
+        key
+        for key, row in latest.items()
+        if row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("score_available") is False
+    }
+    recalculation_infrastructure_keys = {
+        key
+        for key in infrastructure_failure_keys
+        if latest[key].get("error_category") == "recalculation_infrastructure"
+    }
+    scoring_infrastructure_keys = {
+        key
+        for key in infrastructure_failure_keys
+        if latest[key].get("error_category") == "scoring_infrastructure"
+    }
+    score_unavailable_keys = interrupted_keys | infrastructure_failure_keys
     expected_keys = [_run_key(task.task_id, arm) for task in tasks for arm in arms]
     unknown_interrupted_keys = sorted(interrupted_keys - set(expected_keys))
     if unknown_interrupted_keys:
@@ -1222,15 +1301,39 @@ def comparison_summary(
         arm_interrupted = sorted(
             key for key in interrupted_keys if key.endswith(f"::{arm}")
         )
+        arm_recalculation_infrastructure_failures = sorted(
+            key
+            for key in recalculation_infrastructure_keys
+            if key.endswith(f"::{arm}")
+        )
+        arm_scoring_infrastructure_failures = sorted(
+            key
+            for key in scoring_infrastructure_keys
+            if key.endswith(f"::{arm}")
+        )
         known_tasks = [
-            task for task in tasks if _run_key(task.task_id, arm) not in interrupted_keys
+            task
+            for task in tasks
+            if _row_has_available_score(latest.get(_run_key(task.task_id, arm)))
         ]
         known_passed = sum(passes[arm][task.task_id] for task in known_tasks)
-        if arm_interrupted:
+        if score_unavailable_keys:
             arm_summary["end_to_end_accuracy"] = None
             arm_summary["wilson_95"] = None
         arm_summary["interrupted_unknown_outcomes"] = len(arm_interrupted)
         arm_summary["interrupted_unknown_keys"] = arm_interrupted
+        arm_summary["recalculation_infrastructure_failures"] = len(
+            arm_recalculation_infrastructure_failures
+        )
+        arm_summary["recalculation_infrastructure_failure_keys"] = (
+            arm_recalculation_infrastructure_failures
+        )
+        arm_summary["scoring_infrastructure_failures"] = len(
+            arm_scoring_infrastructure_failures
+        )
+        arm_summary["scoring_infrastructure_failure_keys"] = (
+            arm_scoring_infrastructure_failures
+        )
         arm_summary["known_outcome_descriptive"] = {
             "tasks": len(known_tasks),
             "passed": known_passed,
@@ -1256,12 +1359,44 @@ def comparison_summary(
                 for task in stratum_tasks
                 if _run_key(task.task_id, arm) in interrupted_keys
             ]
-            stratum_known = [task for task in stratum_tasks if task not in stratum_interrupted]
+            stratum_recalculation_infrastructure_failures = [
+                task
+                for task in stratum_tasks
+                if _run_key(task.task_id, arm)
+                in recalculation_infrastructure_keys
+            ]
+            stratum_scoring_infrastructure_failures = [
+                task
+                for task in stratum_tasks
+                if _run_key(task.task_id, arm) in scoring_infrastructure_keys
+            ]
+            stratum_unknown = {
+                task.task_id
+                for task in [
+                    *stratum_interrupted,
+                    *stratum_recalculation_infrastructure_failures,
+                    *stratum_scoring_infrastructure_failures,
+                ]
+            }
+            stratum_known = [
+                task
+                for task in stratum_tasks
+                if task.task_id not in stratum_unknown
+                and _row_has_available_score(
+                    latest.get(_run_key(task.task_id, arm))
+                )
+            ]
             stratum_passed = sum(passes[arm][task.task_id] for task in stratum_known)
-            if stratum_interrupted:
+            if stratum_unknown:
                 stratum_summary["end_to_end_accuracy"] = None
                 stratum_summary["wilson_95"] = None
             stratum_summary["interrupted_unknown_outcomes"] = len(stratum_interrupted)
+            stratum_summary["recalculation_infrastructure_failures"] = len(
+                stratum_recalculation_infrastructure_failures
+            )
+            stratum_summary["scoring_infrastructure_failures"] = len(
+                stratum_scoring_infrastructure_failures
+            )
             stratum_summary["known_outcome_descriptive"] = {
                 "tasks": len(stratum_known),
                 "passed": stratum_passed,
@@ -1314,28 +1449,40 @@ def comparison_summary(
         pairwise[name]["holm_adjusted_p"] = value
     for name in pairwise:
         pairwise[name].setdefault("holm_adjusted_p", None)
-        if interrupted_keys:
-            left_arm, right_arm = name.split("_vs_", 1)
-            known_pairs = [
-                task
-                for task in tasks
-                if _run_key(task.task_id, left_arm) not in interrupted_keys
-                and _run_key(task.task_id, right_arm) not in interrupted_keys
-            ]
-            pairwise[name]["known_outcome_descriptive"] = {
-                "pairs": len(known_pairs),
-                "accuracy_delta_right_minus_left": (
-                    sum(passes[right_arm][task.task_id] for task in known_pairs)
-                    - sum(passes[left_arm][task.task_id] for task in known_pairs)
-                )
-                / len(known_pairs)
-                if known_pairs
-                else None,
-                "primary": False,
-            }
+        left_arm, right_arm = name.split("_vs_", 1)
+        known_pairs = [
+            task
+            for task in tasks
+            if _row_has_available_score(
+                latest.get(_run_key(task.task_id, left_arm))
+            )
+            and _row_has_available_score(
+                latest.get(_run_key(task.task_id, right_arm))
+            )
+        ]
+        pairwise[name]["known_outcome_descriptive"] = {
+            "pairs": len(known_pairs),
+            "accuracy_delta_right_minus_left": (
+                sum(passes[right_arm][task.task_id] for task in known_pairs)
+                - sum(passes[left_arm][task.task_id] for task in known_pairs)
+            )
+            / len(known_pairs)
+            if known_pairs
+            else None,
+            "primary": False,
+        }
+        if not pairwise[name]["inference_valid"]:
             pairwise[name]["accuracy_delta_right_minus_left"] = None
+        if score_unavailable_keys:
+            unavailable_reasons: list[str] = []
+            if interrupted_keys:
+                unavailable_reasons.append("interrupted_unknown_outcomes")
+            if recalculation_infrastructure_keys:
+                unavailable_reasons.append("recalculation_infrastructure_failures")
+            if scoring_infrastructure_keys:
+                unavailable_reasons.append("scoring_infrastructure_failures")
             _invalidate_pairwise_inference(
-                pairwise[name], ["interrupted_unknown_outcomes"]
+                pairwise[name], unavailable_reasons
             )
 
     attempted_keys = set(latest)
@@ -1367,6 +1514,10 @@ def comparison_summary(
         inference_invalid_reasons.append("missing_arm_tasks")
     if errored_arm_tasks:
         inference_invalid_reasons.append("errored_arm_tasks")
+    if recalculation_infrastructure_keys:
+        inference_invalid_reasons.append("recalculation_infrastructure_failures")
+    if scoring_infrastructure_keys:
+        inference_invalid_reasons.append("scoring_infrastructure_failures")
     if interrupted_keys:
         inference_invalid_reasons.append("interrupted_unknown_outcomes")
     if inference_invalid_reasons:
@@ -1395,6 +1546,16 @@ def comparison_summary(
         "known_model_execution_failure_arm_tasks": sum(
             latest[key].get("outcome_kind") == "model_execution_failure"
             for key in attempted_expected
+        ),
+        "known_infrastructure_failure_arm_tasks": sum(
+            latest[key].get("outcome_kind") == "infrastructure_failure"
+            for key in attempted_expected
+        ),
+        "known_recalculation_infrastructure_failure_arm_tasks": len(
+            recalculation_infrastructure_keys & attempted_expected
+        ),
+        "known_scoring_infrastructure_failure_arm_tasks": len(
+            scoring_infrastructure_keys & attempted_expected
         ),
         "interrupted_unknown_keys": sorted(interrupted_keys),
         "invalid_result_rows_ignored": invalid,
@@ -1785,7 +1946,10 @@ class ComparisonBenchmarkRunner:
                     "provider_transient",
                     "routing_protocol",
                 ],
-                "circuit_breaker_immediate_categories": ["provider_fatal"],
+                "circuit_breaker_immediate_categories": [
+                    "provider_fatal",
+                    "recalculation_infrastructure",
+                ],
                 "skills_for_ours_only": skills,
                 "code_isolation": STRICT_ISOLATION_POLICY,
                 **COMPARISON_CONFIGURATION_POLICIES,
@@ -2232,6 +2396,7 @@ class ComparisonBenchmarkRunner:
             "calculation_backend": "libreoffice" if self.recalculate else "not_recalculated",
         }
         session: WorkbookSession | None = None
+        result: Any | None = None
 
         def remaining_seconds(stage: str) -> float:
             ensure_postprocess_time(stage)
@@ -2312,7 +2477,7 @@ class ComparisonBenchmarkRunner:
                 )
                 ensure_postprocess_time("recalculate")
             ensure_postprocess_time("score")
-            comparison = compare_workbooks(
+            comparison = compare_workbooks_chartsheet_safe(
                 task.golden_path,
                 session.workbook_path,
                 task.answer_position,
@@ -2375,10 +2540,11 @@ class ComparisonBenchmarkRunner:
             raise
         except Exception as caught:
             effective_exc = caught
-            try:
-                ensure_postprocess_time("postprocess")
-            except (AgentBudgetError, AgentTimeoutError) as budget_exc:
-                effective_exc = budget_exc
+            if not isinstance(caught, RecalculationIntegrityError):
+                try:
+                    ensure_postprocess_time("postprocess")
+                except (AgentBudgetError, AgentTimeoutError) as budget_exc:
+                    effective_exc = budget_exc
             safe_error = str(effective_exc).replace(self.config.api_key, "[REDACTED]")
             row.update(
                 {
@@ -2408,6 +2574,60 @@ class ComparisonBenchmarkRunner:
                 )
             elif isinstance(effective_exc, AgentRoutingError):
                 row["error_category"] = "routing_protocol"
+            elif isinstance(effective_exc, RecalculationIntegrityError):
+                agent_evidence = result.to_dict() if result is not None else None
+                if not isinstance(agent_evidence, dict) or session is None:
+                    raise HarnessError(
+                        "Recalculation integrity failure omitted auditable run evidence"
+                    ) from effective_exc
+                row.update(
+                    {
+                        "outcome_kind": "infrastructure_failure",
+                        "score_available": False,
+                        "error_category": "recalculation_infrastructure",
+                        "infrastructure_failure_stage": "recalculation",
+                        "recalculation_failure_reason": "sheet_inventory_changed",
+                        "agent": agent_evidence,
+                        "recalculation": effective_exc.evidence,
+                        "output_workbook": str(session.workbook_path),
+                        "output_sha256": _sha256(session.workbook_path),
+                    }
+                )
+                if execution_failure is not None:
+                    row["prior_model_execution_failure"] = {
+                        "error": str(execution_failure).replace(
+                            self.config.api_key, "[REDACTED]"
+                        ),
+                        "error_type": type(execution_failure).__name__,
+                        "model_failure_reason": execution_failure.reason,
+                    }
+            elif isinstance(effective_exc, ScoringInfrastructureError):
+                agent_evidence = result.to_dict() if result is not None else None
+                if not isinstance(agent_evidence, dict) or session is None:
+                    raise HarnessError(
+                        "Scoring infrastructure failure omitted auditable run evidence"
+                    ) from effective_exc
+                row.update(
+                    {
+                        "outcome_kind": "infrastructure_failure",
+                        "score_available": False,
+                        "error_category": "scoring_infrastructure",
+                        "infrastructure_failure_stage": "scoring",
+                        "scoring_failure_reason": "worksheet_scorer_unsupported",
+                        "agent": agent_evidence,
+                        "recalculation": recalculation,
+                        "output_workbook": str(session.workbook_path),
+                        "output_sha256": _sha256(session.workbook_path),
+                    }
+                )
+                if execution_failure is not None:
+                    row["prior_model_execution_failure"] = {
+                        "error": str(execution_failure).replace(
+                            self.config.api_key, "[REDACTED]"
+                        ),
+                        "error_type": type(execution_failure).__name__,
+                        "model_failure_reason": execution_failure.reason,
+                    }
             elif isinstance(effective_exc, ProviderError):
                 row.update(
                     {
@@ -2441,6 +2661,18 @@ class ComparisonBenchmarkRunner:
                                 "style_checked": False,
                                 "calculation_backend": row["calculation_backend"],
                                 "error_category": row.get("error_category"),
+                                "outcome_kind": row.get("outcome_kind"),
+                                "score_available": row.get("score_available"),
+                                "infrastructure_failure_stage": row.get(
+                                    "infrastructure_failure_stage"
+                                ),
+                                "recalculation_failure_reason": row.get(
+                                    "recalculation_failure_reason"
+                                ),
+                                "scoring_failure_reason": row.get(
+                                    "scoring_failure_reason"
+                                ),
+                                "recalculation": row.get("recalculation"),
                             },
                         )
                     except Exception:
@@ -2557,8 +2789,18 @@ class ComparisonBenchmarkRunner:
                 row.get("error_category") == "routing_protocol"
                 for row in latest.values()
             )
+            recalculation_infrastructure_errors = sum(
+                row.get("error_category") == "recalculation_infrastructure"
+                for row in latest.values()
+            )
+            scoring_infrastructure_errors = sum(
+                row.get("error_category") == "scoring_infrastructure"
+                for row in latest.values()
+            )
             circuit_breaker = bool(
                 fatal_provider_errors
+                or recalculation_infrastructure_errors
+                or scoring_infrastructure_errors
                 or exhausted_transient >= self.circuit_breaker_threshold
                 or routing_protocol_errors >= self.circuit_breaker_threshold
             )
@@ -2589,6 +2831,12 @@ class ComparisonBenchmarkRunner:
                     finished += 1
                     if row.get("error_category") == "provider_fatal":
                         fatal_provider_errors += 1
+                        circuit_breaker = True
+                    elif row.get("error_category") == "recalculation_infrastructure":
+                        recalculation_infrastructure_errors += 1
+                        circuit_breaker = True
+                    elif row.get("error_category") == "scoring_infrastructure":
+                        scoring_infrastructure_errors += 1
                         circuit_breaker = True
                     elif row.get("error_category") == "provider_transient":
                         exhausted_transient += 1
@@ -2630,6 +2878,12 @@ class ComparisonBenchmarkRunner:
             summary["exhausted_transient_arm_tasks"] = exhausted_transient
             summary["fatal_provider_arm_tasks"] = fatal_provider_errors
             summary["routing_protocol_arm_tasks"] = routing_protocol_errors
+            summary["recalculation_infrastructure_arm_tasks"] = (
+                recalculation_infrastructure_errors
+            )
+            summary["scoring_infrastructure_arm_tasks"] = (
+                scoring_infrastructure_errors
+            )
             summary["circuit_breaker_threshold"] = self.circuit_breaker_threshold
             # Bind the official summary to a full read-only protocol audit. A
             # score alone is not evidence that the frozen resources and routes

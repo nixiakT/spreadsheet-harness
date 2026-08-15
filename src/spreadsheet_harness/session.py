@@ -25,7 +25,7 @@ from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .code_interpreter import validate_formula_transaction
-from .errors import ToolInputError, WorkbookValidationError
+from .errors import RecalculationIntegrityError, ToolInputError, WorkbookValidationError
 from .trajectory import TrajectoryRecorder
 
 SUPPORTED_EDIT_FORMATS = {".xlsx", ".xlsm"}
@@ -916,9 +916,18 @@ class WorkbookSession:
                 # The renderer publishes atomically, but restore explicitly in case a
                 # platform-specific replace succeeded immediately before validation.
                 shutil.copy2(snapshot, self.workbook_path)
+                failure_evidence = (
+                    exc.evidence if isinstance(exc, RecalculationIntegrityError) else None
+                )
                 self.recorder.record(
                     "workbook.mutation.rolled_back",
-                    {"operation": "recalculate", "snapshot": snapshot, "error": str(exc)},
+                    {
+                        "operation": "recalculate",
+                        "snapshot": snapshot,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "recalculation": failure_evidence,
+                    },
                 )
                 raise
 

@@ -18,7 +18,7 @@ import uuid
 from collections import Counter, deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timezone
 from pathlib import Path
@@ -31,8 +31,16 @@ from openpyxl.utils.cell import range_boundaries
 
 from .agent import CONTEXT_POLICY, SpreadsheetAgent
 from .config import ProviderConfig
-from .errors import AgentTimeoutError, HarnessError, ProviderError
+from .errors import (
+    AgentTimeoutError,
+    HarnessError,
+    ProviderError,
+    RecalculationIntegrityError,
+    RenderError,
+    ScoringInfrastructureError,
+)
 from .pacing import PACING_POLICY, RelayPacer
+from .render import openpyxl_worksheet_view
 from .session import WorkbookSession
 from .skills import SkillRegistry
 from .tools import SpreadsheetToolRegistry
@@ -2303,6 +2311,55 @@ def compare_workbooks(
     return Comparison(not differences, checked, tuple(differences))
 
 
+def compare_workbooks_chartsheet_safe(
+    golden_path: str | Path,
+    candidate_path: str | Path,
+    answer_position: str,
+    *,
+    answer_sheet: str | None = None,
+    compare_styles: bool = False,
+    max_differences: int = 100,
+) -> Comparison:
+    """Run the legacy cell scorer through immutable worksheet-only OOXML views."""
+
+    candidate_file = Path(candidate_path)
+    if not candidate_file.is_file():
+        return compare_workbooks(
+            golden_path,
+            candidate_path,
+            answer_position,
+            answer_sheet=answer_sheet,
+            compare_styles=compare_styles,
+            max_differences=max_differences,
+        )
+
+    try:
+        with ExitStack() as stack:
+            scoring_paths: list[Path] = []
+            for raw_path in (golden_path, candidate_path):
+                path = Path(raw_path)
+                if path.suffix.lower() in {".xlsx", ".xlsm"}:
+                    view_path, _ = stack.enter_context(openpyxl_worksheet_view(path))
+                    scoring_paths.append(view_path)
+                else:
+                    scoring_paths.append(path)
+            return compare_workbooks(
+                scoring_paths[0],
+                scoring_paths[1],
+                answer_position,
+                answer_sheet=answer_sheet,
+                compare_styles=compare_styles,
+                max_differences=max_differences,
+            )
+    except (RenderError, ScoringInfrastructureError):
+        raise
+    except Exception as exc:
+        raise ScoringInfrastructureError(
+            "The worksheet scorer could not consume a validated workbook view: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
 class VerifiedBenchmarkRunner:
     """Run isolated agents with bounded concurrency and resumable durable results."""
 
@@ -2528,6 +2585,8 @@ class VerifiedBenchmarkRunner:
             "started_at": started_at.isoformat(),
         }
         session: WorkbookSession | None = None
+        agent_result: Any | None = None
+        recalc_metadata: dict[str, Any] | None = None
         try:
             session = WorkbookSession.create(
                 task.input_path,
@@ -2569,12 +2628,11 @@ class VerifiedBenchmarkRunner:
                 pacer=pacer,
             )
             agent_result = agent.run(task.instruction)
-            recalc_metadata: dict[str, Any] | None = None
             if self.recalculate:
                 from .render import recalculate_workbook
 
                 recalc_metadata = recalculate_workbook(session.workbook_path, session.workbook_path)
-            comparison = compare_workbooks(
+            comparison = compare_workbooks_chartsheet_safe(
                 task.golden_path,
                 session.workbook_path,
                 task.answer_position,
@@ -2642,6 +2700,38 @@ class VerifiedBenchmarkRunner:
                 )
             elif isinstance(exc, AgentTimeoutError):
                 row["error_category"] = "task_timeout"
+            elif isinstance(exc, RecalculationIntegrityError):
+                row.update(
+                    {
+                        "outcome_kind": "infrastructure_failure",
+                        "score_available": False,
+                        "error_category": "recalculation_infrastructure",
+                        "infrastructure_failure_stage": "recalculation",
+                        "recalculation_failure_reason": "sheet_inventory_changed",
+                        "agent": agent_result.to_dict(),
+                        "recalculation": exc.evidence,
+                        "output_workbook": str(session.workbook_path),
+                        "output_sha256": _sha256(session.workbook_path),
+                    }
+                )
+            elif isinstance(exc, ScoringInfrastructureError):
+                if agent_result is None or session is None:
+                    raise HarnessError(
+                        "Scoring infrastructure failure omitted auditable run evidence"
+                    ) from exc
+                row.update(
+                    {
+                        "outcome_kind": "infrastructure_failure",
+                        "score_available": False,
+                        "error_category": "scoring_infrastructure",
+                        "infrastructure_failure_stage": "scoring",
+                        "scoring_failure_reason": "worksheet_scorer_unsupported",
+                        "agent": agent_result.to_dict(),
+                        "recalculation": recalc_metadata,
+                        "output_workbook": str(session.workbook_path),
+                        "output_sha256": _sha256(session.workbook_path),
+                    }
+                )
         finally:
             row["finished_at"] = datetime.now(timezone.utc).isoformat()
             row["elapsed_seconds"] = round(monotonic() - started_clock, 3)
@@ -2657,6 +2747,18 @@ class VerifiedBenchmarkRunner:
                                 "style_checked": False,
                                 "calculation_backend": row["calculation_backend"],
                                 "error_category": row.get("error_category"),
+                                "outcome_kind": row.get("outcome_kind"),
+                                "score_available": row.get("score_available"),
+                                "infrastructure_failure_stage": row.get(
+                                    "infrastructure_failure_stage"
+                                ),
+                                "recalculation_failure_reason": row.get(
+                                    "recalculation_failure_reason"
+                                ),
+                                "scoring_failure_reason": row.get(
+                                    "scoring_failure_reason"
+                                ),
+                                "recalculation": row.get("recalculation"),
                             },
                         )
                     except Exception:
@@ -2770,7 +2872,11 @@ class VerifiedBenchmarkRunner:
                         )
                         if category == "provider_transient" and not retry_eligible:
                             exhausted_transient_tasks += 1
-                        if category == "provider_fatal" or (
+                        if category in {
+                            "provider_fatal",
+                            "recalculation_infrastructure",
+                            "scoring_infrastructure",
+                        } or (
                             exhausted_transient_tasks >= self.circuit_breaker_threshold
                         ):
                             circuit_breaker_tripped = True
@@ -2847,10 +2953,36 @@ def summarize_results(
     expected = list(dict.fromkeys(str(item) for item in (expected_task_ids or latest.keys())))
     rows = [latest[task_id] for task_id in expected if task_id in latest]
     completed = [row for row in rows if row.get("status") == "completed"]
+    no_score_infrastructure = [
+        row
+        for row in rows
+        if row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("score_available") is False
+    ]
+    recalculation_infrastructure = [
+        row
+        for row in no_score_infrastructure
+        if row.get("error_category") == "recalculation_infrastructure"
+    ]
+    scoring_infrastructure = [
+        row
+        for row in no_score_infrastructure
+        if row.get("error_category") == "scoring_infrastructure"
+    ]
     scores = [1.0 if row.get("passed") else 0.0 for row in completed]
     passed = int(sum(scores))
     denominator = len(expected)
     attempted_score = passed / denominator if denominator else 0.0
+    inference_valid = not no_score_infrastructure
+    primary_score = attempted_score if inference_valid else None
+    completed_score = fmean(scores) if scores else 0.0
+    inference_invalid_reasons: list[str] = []
+    if recalculation_infrastructure:
+        inference_invalid_reasons.append("recalculation_infrastructure_failures")
+    if scoring_infrastructure:
+        inference_invalid_reasons.append("scoring_infrastructure_failures")
+    if no_score_infrastructure and not inference_invalid_reasons:
+        inference_invalid_reasons.append("unclassified_infrastructure_failures")
     error_categories = Counter(
         str(row.get("error_category") or "unspecified")
         for row in rows
@@ -2882,10 +3014,26 @@ def summarize_results(
         "invalid_result_rows_ignored": invalid_rows,
         "completion_rate": len(completed) / denominator if denominator else 0.0,
         "passed": passed,
-        "verified_accuracy": attempted_score,
-        "completed_accuracy": fmean(scores) if scores else 0.0,
-        "soft": attempted_score,
-        "hard": attempted_score,
+        "verified_accuracy": primary_score,
+        "completed_accuracy": completed_score if inference_valid else None,
+        "soft": primary_score,
+        "hard": primary_score,
+        "inference_valid": inference_valid,
+        "inference_invalid_reasons": inference_invalid_reasons,
+        "no_score_infrastructure_failures": len(no_score_infrastructure),
+        "no_score_infrastructure_task_ids": sorted(
+            str(row.get("task_id")) for row in no_score_infrastructure
+        ),
+        "recalculation_infrastructure_failures": len(
+            recalculation_infrastructure
+        ),
+        "scoring_infrastructure_failures": len(scoring_infrastructure),
+        "known_scored_descriptive": {
+            "tasks": len(completed),
+            "passed": passed,
+            "accuracy": completed_score if scores else None,
+            "primary": False,
+        },
     }
     if write_summary:
         _atomic_write_json(path.with_name("summary.json"), summary)

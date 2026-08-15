@@ -3,17 +3,22 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import warnings
+import zipfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
+import spreadsheet_harness.audit as audit_module
+import spreadsheet_harness.render as render_module
+from spreadsheet_harness import benchmark as benchmark_module
 from spreadsheet_harness.arms import (
     COMPARISON_FORCED_TOOL_PREFIX_POLICY,
     comparison_stage_turn_caps,
 )
-from spreadsheet_harness.audit import audit_comparison
+from spreadsheet_harness.audit import _valid_sheet_inventory_identity, audit_comparison
 from spreadsheet_harness.benchmark import SpreadsheetTask, compare_workbooks
 from spreadsheet_harness.comparison import (
     COMPARISON_CONFIGURATION_POLICIES,
@@ -30,11 +35,19 @@ from spreadsheet_harness.comparison import (
     V26_COMPARISON_CONFIGURATION_POLICIES,
     V26_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V26_COMPARISON_PROTOCOL_VERSION,
+    V27_COMPARISON_CONFIGURATION_POLICIES,
+    V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V27_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     _allowed_observed_terminals_policy,
     _stage_allowed_tools_policy,
 )
 from spreadsheet_harness.config import ProviderConfig
+from spreadsheet_harness.errors import (
+    RecalculationIntegrityError,
+    ScoringInfrastructureError,
+)
+from spreadsheet_harness.render import recalculate_workbook
 from spreadsheet_harness.skills import SkillRegistry
 
 
@@ -251,6 +264,52 @@ def _set_final_model_execution_failure(row: dict[str, Any], message: str) -> Non
     for result in (final_agent, row["agent"]):
         result["final_text"] = message
         result.pop("terminal_response", None)
+
+
+def _set_recalculation_manifest(
+    results: Path,
+    row: dict[str, Any],
+) -> None:
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["configuration"]["recalculate"] = True
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["calculation_backend"] = "libreoffice"
+
+
+def _mock_recalculation(
+    output: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    change_sheet_identity: bool,
+) -> dict[str, Any]:
+    monkeypatch.setattr(render_module, "find_libreoffice", lambda explicit=None: "/fake/soffice")
+    monkeypatch.setattr(render_module, "libreoffice_version", lambda binary: "LibreOffice test")
+
+    def fake_convert(
+        source_copy: Path,
+        output_dir: Path,
+        **kwargs: object,
+    ) -> Path:
+        output_dir.mkdir(parents=True)
+        converted = output_dir / output.name
+        shutil.copy2(source_copy, converted)
+        if change_sheet_identity:
+            workbook = load_workbook(converted)
+            try:
+                workbook.active.title = "Changed"
+                workbook.save(converted)
+            finally:
+                workbook.close()
+        return converted
+
+    monkeypatch.setattr(render_module, "_convert_with_libreoffice", fake_convert)
+    if not change_sheet_identity:
+        return recalculate_workbook(output, output)
+    with pytest.raises(RecalculationIntegrityError) as caught:
+        recalculate_workbook(output, output)
+    return caught.value.evidence
 
 
 def _truncated_terminal_fixture(
@@ -929,6 +988,358 @@ def test_audit_comparison_valid_and_read_only(tmp_path: Path) -> None:
         "expected_output_sha256"
     ]
     assert _tree_hashes(tmp_path) == before
+
+
+def test_audit_accepts_verified_recalculation_identity_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    output = Path(row["output_workbook"])
+    row["recalculation"] = _mock_recalculation(
+        output,
+        monkeypatch,
+        change_sheet_identity=False,
+    )
+    row["output_sha256"] = _sha256(output)
+    _set_recalculation_manifest(results, row)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["study_complete"] is True
+    assert summary["inference_valid"] is True
+    assert summary["rows"][0]["audit_valid"] is True
+
+
+def test_v28_audit_reopens_and_scores_hidden_chartsheet_through_worksheet_view(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    output = Path(row["output_workbook"])
+    for workbook_path in (task.golden_path, output):
+        workbook = load_workbook(workbook_path)
+        try:
+            workbook.create_chartsheet("Chart").sheet_state = "hidden"
+            workbook.save(workbook_path)
+        finally:
+            workbook.close()
+
+    comparison = benchmark_module.compare_workbooks_chartsheet_safe(
+        task.golden_path,
+        output,
+        task.answer_position,
+        answer_sheet=task.answer_sheet,
+    )
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tasks"][0]["golden_sha256"] = _sha256(task.golden_path)
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row.update(
+        {
+            "comparison_manifest_sha256": _sha256(manifest_path),
+            "passed": comparison.passed,
+            "artifact_score_passed": comparison.passed,
+            "comparison": comparison.to_dict(),
+            "output_sha256": _sha256(output),
+        }
+    )
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    reopened_paths: list[Path] = []
+    original_loader = audit_module.load_workbook
+
+    def tracking_loader(path: str | Path, *args: Any, **kwargs: Any) -> Any:
+        reopened_paths.append(Path(path))
+        return original_loader(path, *args, **kwargs)
+
+    monkeypatch.setattr(audit_module, "load_workbook", tracking_loader)
+    output_sha256 = _sha256(output)
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["inference_valid"] is True
+    assert reopened_paths and all(path != output for path in reopened_paths)
+    audited = summary["rows"][0]
+    assert audited["artifact_validation_method"] == (
+        "ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"
+    )
+    assert audited["sheet_names"] == ["Sheet1", "Chart"]
+    assert audited["worksheet_names"] == ["Sheet1"]
+    assert audited["fresh_comparison"]["passed"] is True
+    assert _sha256(output) == output_sha256
+
+
+def test_v28_audit_classifies_unavailable_fresh_scorer_as_infrastructure_no_score(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, _ = _fixture(tmp_path)
+
+    def unavailable_scorer(*_: Any, **__: Any) -> Any:
+        raise ScoringInfrastructureError("validated worksheet view is unsupported")
+
+    monkeypatch.setattr(
+        audit_module,
+        "compare_workbooks_chartsheet_safe",
+        unavailable_scorer,
+    )
+
+    summary = audit_comparison(results, [task])
+
+    audited = summary["rows"][0]
+    assert summary["audit_valid"] is False
+    assert audited["score_available"] is False
+    assert audited["scorer_infrastructure_stage"] == "fresh_score"
+    assert audited["scorer_infrastructure_error_type"] == (
+        "ScoringInfrastructureError"
+    )
+    assert "scorer_infrastructure_no_score" in audited["reasons"]
+    assert "artifact_reopen_failed" not in audited["reasons"]
+
+
+def test_v28_audit_accepts_reproduced_scoring_infrastructure_no_score_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    row.update(
+        {
+            "status": "error",
+            "outcome_kind": "infrastructure_failure",
+            "passed": False,
+            "score_available": False,
+            "error": "worksheet scorer unsupported",
+            "error_type": "ScoringInfrastructureError",
+            "error_retryable": False,
+            "error_category": "scoring_infrastructure",
+            "infrastructure_failure_stage": "scoring",
+            "scoring_failure_reason": "worksheet_scorer_unsupported",
+        }
+    )
+    row.pop("comparison")
+    row.pop("artifact_score_passed")
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    def unavailable_scorer(*_: Any, **__: Any) -> Any:
+        raise ScoringInfrastructureError("worksheet scorer unsupported")
+
+    monkeypatch.setattr(
+        audit_module,
+        "compare_workbooks_chartsheet_safe",
+        unavailable_scorer,
+    )
+
+    summary = audit_comparison(results, [task])
+
+    audited = summary["rows"][0]
+    assert summary["audit_valid"] is True, (summary["reasons"], audited)
+    assert summary["journal_integrity_valid"] is True
+    assert summary["study_complete"] is False
+    assert summary["inference_valid"] is False
+    assert summary["inference_invalid_reasons"] == [
+        "scoring_infrastructure_failure"
+    ]
+    assert summary["known_scoring_infrastructure_failure_rows"] == 1
+    assert summary["known_recalculation_infrastructure_failure_rows"] == 0
+    assert summary["known_passed_rows"] == 0
+    assert summary["known_failed_rows"] == 0
+    assert audited["audit_valid"] is True
+    assert audited["score_available"] is False
+    assert audited["scorer_infrastructure_reproduced"] is True
+    assert "artifact_reopen_failed" not in audited["reasons"]
+
+
+def test_audit_sheet_inventory_schema_rejects_duplicate_names_and_no_visible_sheet() -> None:
+    sheets = [
+        {"index": 0, "kind": "worksheet", "name": "Data", "visibility": "visible"},
+        {"index": 1, "kind": "chartsheet", "name": "Chart", "visibility": "hidden"},
+    ]
+
+    def identity(records: list[dict[str, Any]]) -> dict[str, Any]:
+        encoded = json.dumps(
+            records,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return {
+            "schema_version": 2,
+            "workbook_sha256": "a" * 64,
+            "inventory_sha256": _text_sha256(encoded),
+            "sheets": records,
+        }
+
+    assert _valid_sheet_inventory_identity(identity(sheets)) is True
+    duplicate = [dict(sheet) for sheet in sheets]
+    duplicate[1]["name"] = "data"
+    assert _valid_sheet_inventory_identity(identity(duplicate)) is False
+    all_hidden = [{**sheet, "visibility": "hidden"} for sheet in sheets]
+    assert _valid_sheet_inventory_identity(identity(all_hidden)) is False
+
+
+def test_audit_rejects_duplicate_workbook_xml_recalculation_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    output = Path(row["output_workbook"])
+    recalculation = _mock_recalculation(
+        output,
+        monkeypatch,
+        change_sheet_identity=False,
+    )
+
+    with zipfile.ZipFile(output) as package:
+        workbook_xml = package.read("xl/workbook.xml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(output, "a") as package:
+            package.writestr("xl/workbook.xml", workbook_xml)
+
+    output_sha256 = _sha256(output)
+    recalculation["source_sha256"] = output_sha256
+    recalculation["output_sha256"] = output_sha256
+    recalculation["sheet_inventory_integrity"]["pre"][
+        "workbook_sha256"
+    ] = output_sha256
+    recalculation["sheet_inventory_integrity"]["post"][
+        "workbook_sha256"
+    ] = output_sha256
+    comparison = compare_workbooks(
+        task.golden_path,
+        output,
+        task.answer_position,
+        answer_sheet=task.answer_sheet,
+    )
+    row.update(
+        {
+            "recalculation": recalculation,
+            "output_sha256": output_sha256,
+            "passed": comparison.passed,
+            "artifact_score_passed": comparison.passed,
+            "comparison": comparison.to_dict(),
+        }
+    )
+    _set_recalculation_manifest(results, row)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "artifact_reopen_failed" in summary["rows"][0]["reasons"]
+
+
+def test_audit_requires_recalculation_identity_evidence_when_enabled(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    _set_recalculation_manifest(results, row)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "recalculation_evidence_missing" in summary["rows"][0]["reasons"]
+
+
+def test_audit_accepts_recalculation_identity_failure_but_invalidates_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    output = Path(row["output_workbook"])
+    recalculation = _mock_recalculation(
+        output,
+        monkeypatch,
+        change_sheet_identity=True,
+    )
+    _set_recalculation_manifest(results, row)
+    row.update(
+        {
+            "status": "error",
+            "outcome_kind": "infrastructure_failure",
+            "passed": False,
+            "score_available": False,
+            "error": "Recalculation changed sheet identity",
+            "error_type": "RecalculationIntegrityError",
+            "error_retryable": False,
+            "error_category": "recalculation_infrastructure",
+            "infrastructure_failure_stage": "recalculation",
+            "recalculation_failure_reason": "sheet_inventory_changed",
+            "recalculation": recalculation,
+            "output_sha256": _sha256(output),
+        }
+    )
+    row.pop("comparison")
+    row.pop("artifact_score_passed")
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+    assert summary["journal_integrity_valid"] is True
+    assert summary["study_complete"] is False
+    assert summary["inference_valid"] is False
+    assert summary["inference_invalid_reasons"] == [
+        "recalculation_infrastructure_failure"
+    ]
+    assert summary["known_passed_rows"] == 0
+    assert summary["known_failed_rows"] == 0
+    assert summary["known_recalculation_infrastructure_failure_rows"] == 1
+    assert summary["rows"][0]["score_available"] is False
+    assert "outcome_passed" not in summary["rows"][0]
+
+
+@pytest.mark.parametrize("tamper", ["pre_digest", "match_claim", "post_hash", "score"])
+def test_audit_rejects_tampered_recalculation_failure_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    results, task, row = _fixture(tmp_path)
+    output = Path(row["output_workbook"])
+    recalculation = _mock_recalculation(
+        output,
+        monkeypatch,
+        change_sheet_identity=True,
+    )
+    _set_recalculation_manifest(results, row)
+    row.update(
+        {
+            "status": "error",
+            "outcome_kind": "infrastructure_failure",
+            "passed": False,
+            "score_available": False,
+            "error": "Recalculation changed sheet identity",
+            "error_type": "RecalculationIntegrityError",
+            "error_retryable": False,
+            "error_category": "recalculation_infrastructure",
+            "infrastructure_failure_stage": "recalculation",
+            "recalculation_failure_reason": "sheet_inventory_changed",
+            "recalculation": recalculation,
+            "output_sha256": _sha256(output),
+        }
+    )
+    row.pop("comparison")
+    row.pop("artifact_score_passed")
+    integrity = recalculation["sheet_inventory_integrity"]
+    if tamper == "pre_digest":
+        integrity["pre"]["inventory_sha256"] = "0" * 64
+    elif tamper == "match_claim":
+        integrity["matched"] = True
+    elif tamper == "post_hash":
+        recalculation["output_sha256"] = "0" * 64
+    else:
+        row["comparison"] = {"passed": False}
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert summary["rows"][0]["audit_valid"] is False
+    assert summary["rows"][0]["reasons"]
 
 
 def test_live_v23_pilot_audit_has_no_version_drift_false_positives() -> None:
@@ -1997,7 +2408,7 @@ def test_audit_rejects_manifest_continuation_repository_source_mismatch(
     assert "continuation_source_invalid" in summary["reasons"]
 
 
-def test_audit_rejects_registered_v27_manifest_not_bound_to_current_git(
+def test_audit_rejects_current_manifest_for_registered_split_not_bound_to_git(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -2385,7 +2796,7 @@ def test_audit_requires_frozen_manifest_provenance(
     assert any(expected_fragment in reason for reason in summary["reasons"])
 
 
-def test_v27_audit_requires_manifest_source_to_match_active_checkout(
+def test_v28_audit_requires_manifest_source_to_match_active_checkout(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)
@@ -2434,6 +2845,39 @@ def test_v26_audit_accepts_historical_source_fingerprint(tmp_path: Path) -> None
     manifest["harness_source"]["sha256"] = combined.hexdigest()
     path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
     row["comparison_protocol_version"] = V26_COMPARISON_PROTOCOL_VERSION
+    row["comparison_manifest_sha256"] = _sha256(path)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+
+
+def test_v27_audit_accepts_historical_source_fingerprint(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    path = results / "comparison-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V27_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V27_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V27_COMPARISON_CONFIGURATION_POLICIES)
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
+        manifest["stage_turn_caps"],
+        protocol_version=V27_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["stage_allowed_tools"] = _stage_allowed_tools_policy(
+        tuple(manifest["arms"]),
+        protocol_version=V27_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["harness_source"]["files"][0]["sha256"] = "0" * 64
+    combined = hashlib.sha256()
+    for entry in manifest["harness_source"]["files"]:
+        combined.update(entry["path"].encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(entry["sha256"].encode("ascii"))
+        combined.update(b"\n")
+    manifest["harness_source"]["sha256"] = combined.hexdigest()
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_protocol_version"] = V27_COMPARISON_PROTOCOL_VERSION
     row["comparison_manifest_sha256"] = _sha256(path)
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
 
