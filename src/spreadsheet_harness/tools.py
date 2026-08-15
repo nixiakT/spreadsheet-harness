@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
+
 from .code_interpreter import LocalCodeInterpreter
 from .errors import CodeIsolationError, HarnessError, ToolInputError
 from .session import WorkbookSession
 
+_INSPECT_MAX_CELLS = 500
 _LATEX_MAX_CELLS = 500
 _LATEX_MAX_CHARS = 65_536
 _LATEX_MAX_CELL_CHARS = 512
@@ -20,6 +25,123 @@ _STYLE_MAX_GROUPS = 64
 _STYLE_MAX_SAMPLE_CELLS = 24
 _STYLE_MAX_TEXT_CHARS = 160
 _INSPECT_DEFAULT_INCLUDE_STYLES = False
+_CALCULATION_VALIDATION_MAX_CELLS = 500
+_CALCULATION_ERROR_COORDINATE_LIMIT = 32
+_SPREADSHEET_ERROR_VALUES = frozenset(
+    {
+        "#BLOCKED!",
+        "#BUSY!",
+        "#CALC!",
+        "#CONNECT!",
+        "#DIV/0!",
+        "#FIELD!",
+        "#GETTING_DATA",
+        "#N/A",
+        "#NAME?",
+        "#NULL!",
+        "#NUM!",
+        "#PYTHON!",
+        "#REF!",
+        "#SPILL!",
+        "#UNKNOWN!",
+        "#VALUE!",
+    }
+)
+_LIBREOFFICE_ERROR_VALUE = re.compile(r"Err:\s*\d{3}\Z", re.IGNORECASE)
+
+
+def _bounded_inspection_range(range_ref: str) -> tuple[str, dict[str, Any]]:
+    try:
+        bounds = range_boundaries(range_ref.replace("$", ""))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ToolInputError(f"Invalid A1 range: {range_ref!r}") from exc
+    min_col, min_row, max_col, max_row = bounds
+    if not all(isinstance(item, int) and item >= 1 for item in bounds):
+        raise ToolInputError(f"Range must be bounded: {range_ref!r}")
+    width = max_col - min_col + 1
+    height = max_row - min_row + 1
+    if width <= 0 or height <= 0:
+        raise ToolInputError(f"Invalid A1 range: {range_ref!r}")
+
+    requested_cell_count = width * height
+    requested_range = (
+        f"{get_column_letter(min_col)}{min_row}:"
+        f"{get_column_letter(max_col)}{max_row}"
+    )
+    if requested_cell_count <= _INSPECT_MAX_CELLS:
+        return requested_range, {
+            "requested_range": requested_range,
+            "requested_cell_count": requested_cell_count,
+            "returned_cell_count": requested_cell_count,
+            "truncated": False,
+        }
+
+    # Preserve all requested columns when they fit, then return as many complete
+    # top rows as the limit allows. Very wide ranges return the first row prefix.
+    returned_width = min(width, _INSPECT_MAX_CELLS)
+    returned_height = min(height, max(1, _INSPECT_MAX_CELLS // returned_width))
+    returned_max_col = min_col + returned_width - 1
+    returned_max_row = min_row + returned_height - 1
+    returned_range = (
+        f"{get_column_letter(min_col)}{min_row}:"
+        f"{get_column_letter(returned_max_col)}{returned_max_row}"
+    )
+    returned_cell_count = returned_width * returned_height
+    return returned_range, {
+        "requested_range": requested_range,
+        "requested_cell_count": requested_cell_count,
+        "returned_cell_count": returned_cell_count,
+        "truncated": True,
+        "omitted_cell_count": requested_cell_count - returned_cell_count,
+        "policy": "top_left_rectangle_preserve_columns_when_possible",
+    }
+
+
+def _spreadsheet_error_value(cell: dict[str, Any]) -> str | None:
+    value = cell.get("value")
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    normalized = candidate.upper()
+    is_error_typed = (
+        cell.get("data_type") == "e" or cell.get("cached_data_type") == "e"
+    )
+    has_formula = cell.get("formula") is not None
+    if normalized in _SPREADSHEET_ERROR_VALUES and is_error_typed:
+        return normalized
+    if is_error_typed and normalized.startswith("#"):
+        return normalized
+    if _LIBREOFFICE_ERROR_VALUE.fullmatch(candidate) and (is_error_typed or has_formula):
+        return candidate
+    return None
+
+
+def _calculation_error_summary(inspection: dict[str, Any]) -> dict[str, Any]:
+    errors: list[tuple[str, str]] = []
+    for cell in inspection.get("cells", []):
+        if not isinstance(cell, dict):
+            continue
+        error = _spreadsheet_error_value(cell)
+        coordinate = cell.get("coordinate")
+        if error is not None and isinstance(coordinate, str):
+            errors.append((coordinate, error))
+
+    counts: dict[str, int] = {}
+    for _, error in errors:
+        counts[error] = counts.get(error, 0) + 1
+    sampled = errors[:_CALCULATION_ERROR_COORDINATE_LIMIT]
+    return {
+        "sheet": inspection.get("sheet"),
+        "range": inspection.get("range"),
+        "count": len(errors),
+        "by_error": dict(sorted(counts.items())),
+        "coordinates": [
+            {"coordinate": coordinate, "error": error}
+            for coordinate, error in sampled
+        ],
+        "coordinate_limit": _CALCULATION_ERROR_COORDINATE_LIMIT,
+        "coordinates_truncated": len(sampled) < len(errors),
+    }
 
 
 def _bounded_text(value: Any, limit: int) -> str | None:
@@ -219,6 +341,23 @@ class SpreadsheetToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         sheet = {"type": "string", "description": "Exact worksheet name."}
         a1 = {"type": "string", "description": "Bounded A1 range such as A1:F20."}
+        inspect_a1 = {
+            "type": "string",
+            "description": (
+                "Bounded A1 range such as A1:F20. Runtime output is limited to "
+                f"{_INSPECT_MAX_CELLS} cells; "
+                "larger requests return a deterministic truncated top-left rectangle with "
+                "the requested and returned ranges reported."
+            ),
+        }
+        calculation_a1 = {
+            "type": "string",
+            "description": (
+                "Bounded A1 validation target such as A1:F20, with a maximum of "
+                f"{_CALCULATION_VALIDATION_MAX_CELLS} cells. Larger targets are rejected "
+                "before recalculation; split them into fully inspected ranges."
+            ),
+        }
         schemas = [
             self._schema(
                 "list_sheets",
@@ -228,14 +367,17 @@ class SpreadsheetToolRegistry:
             self._schema(
                 "inspect_range",
                 (
-                    "Read formulas, cached values, merges and tables in a bounded range. "
+                    "Read formulas, cached values, merges and tables in a bounded range, with "
+                    f"a runtime maximum of {_INSPECT_MAX_CELLS} returned cells. Larger "
+                    "requests succeed with "
+                    "explicit deterministic truncation metadata instead of failing. "
                     "Set include_styles=true only for formatting/layout tasks because style "
                     "details are verbose."
                 ),
                 _object_schema(
                     {
                         "sheet": sheet,
-                        "range_ref": a1,
+                        "range_ref": inspect_a1,
                         "include_styles": {
                             "type": "boolean",
                             "default": _INSPECT_DEFAULT_INCLUDE_STYLES,
@@ -356,8 +498,18 @@ class SpreadsheetToolRegistry:
             ),
             self._schema(
                 "recalculate_and_read",
-                "Recalculate a safe workspace copy with LibreOffice, replace the working copy atomically, then inspect a range.",
-                _object_schema({"sheet": sheet, "range_ref": a1}, ["sheet", "range_ref"]),
+                (
+                    "Recalculate a safe workspace copy with LibreOffice, replace the working "
+                    "copy atomically, then inspect a range. ok=true reports transport/tool "
+                    "success; calculation_valid separately reports whether the inspected "
+                    "target contains spreadsheet error values. Validation targets are limited "
+                    f"to {_CALCULATION_VALIDATION_MAX_CELLS} cells and oversized requests fail "
+                    "before recalculation."
+                ),
+                _object_schema(
+                    {"sheet": sheet, "range_ref": calculation_a1},
+                    ["sheet", "range_ref"],
+                ),
             ),
             self._schema(
                 "render_workbook",
@@ -457,15 +609,44 @@ class SpreadsheetToolRegistry:
         return ToolOutcome(self.session.list_sheets())
 
     def _inspect_range(self, args: dict[str, Any]) -> ToolOutcome:
-        return ToolOutcome(
-            self.session.inspect_range(
-                args["sheet"],
-                args["range_ref"],
-                include_styles=args.get(
-                    "include_styles", _INSPECT_DEFAULT_INCLUDE_STYLES
-                ),
-            )
+        returned_range, bounds = _bounded_inspection_range(args["range_ref"])
+        inspection = self.session.inspect_range(
+            args["sheet"],
+            returned_range,
+            include_styles=args.get(
+                "include_styles", _INSPECT_DEFAULT_INCLUDE_STYLES
+            ),
+            max_cells=_INSPECT_MAX_CELLS,
         )
+        result = {
+            "ok": inspection["ok"],
+            "sheet": inspection["sheet"],
+            "requested_range": bounds["requested_range"],
+            "returned_range": inspection["range"],
+            "range": inspection["range"],
+            "requested_cell_count": bounds["requested_cell_count"],
+            "returned_cell_count": bounds["returned_cell_count"],
+            "cell_count": bounds["returned_cell_count"],
+            "truncated": bounds["truncated"],
+            "limits": {"max_cells": _INSPECT_MAX_CELLS},
+        }
+        if bounds["truncated"]:
+            result["truncation"] = {
+                "policy": bounds["policy"],
+                "omitted_cell_count": bounds["omitted_cell_count"],
+                "message": (
+                    f"The requested range exceeded {_INSPECT_MAX_CELLS} cells; this response "
+                    "contains the reported deterministic top-left rectangle."
+                ),
+            }
+        result.update(
+            {
+                key: value
+                for key, value in inspection.items()
+                if key not in result
+            }
+        )
+        return ToolOutcome(result)
 
     def _range_to_latex(self, args: dict[str, Any]) -> ToolOutcome:
         inspection = self.session.inspect_range(
@@ -603,9 +784,32 @@ class SpreadsheetToolRegistry:
         )
 
     def _recalculate_and_read(self, args: dict[str, Any]) -> ToolOutcome:
+        normalized_range, request = _bounded_inspection_range(args["range_ref"])
+        if request["requested_cell_count"] > _CALCULATION_VALIDATION_MAX_CELLS:
+            raise ToolInputError(
+                "recalculate_and_read validates at most "
+                f"{_CALCULATION_VALIDATION_MAX_CELLS} cells; requested "
+                f"{request['requested_range']} contains "
+                f"{request['requested_cell_count']} cells. Split the target into smaller "
+                "ranges; no recalculation was performed."
+            )
         metadata = self.session.recalculate()
-        inspected = self.session.inspect_range(args["sheet"], args["range_ref"])
-        return ToolOutcome({"ok": True, "calculation": metadata, "inspection": inspected})
+        inspected = self.session.inspect_range(
+            args["sheet"],
+            normalized_range,
+            max_cells=_CALCULATION_VALIDATION_MAX_CELLS,
+        )
+        calculation_errors = _calculation_error_summary(inspected)
+        return ToolOutcome(
+            {
+                "ok": True,
+                "calculation_valid": calculation_errors["count"] == 0,
+                "calculation_errors": calculation_errors,
+                "limits": {"max_cells": _CALCULATION_VALIDATION_MAX_CELLS},
+                "calculation": metadata,
+                "inspection": inspected,
+            }
+        )
 
     def _undo_last(self, _: dict[str, Any]) -> ToolOutcome:
         return ToolOutcome(self.session.undo_last())

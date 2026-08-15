@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
+import pytest
 from openpyxl import load_workbook
 from PIL import Image
 
+from spreadsheet_harness.render import find_libreoffice
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry
+from spreadsheet_harness.trajectory import read_trajectory
 
 
 def test_tool_registry_dispatch_and_errors(sample_workbook: Path, tmp_path: Path) -> None:
@@ -20,6 +24,190 @@ def test_tool_registry_dispatch_and_errors(sample_workbook: Path, tmp_path: Path
     result = tools.invoke("inspect_range", {"sheet": "Nope", "range_ref": "A1"})
     assert result.data["ok"] is False
     assert result.data["type"] == "ToolInputError"
+
+
+def test_inspect_range_schema_discloses_limit_and_returns_bounded_evidence(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"inspect_range"}
+    )
+    schema = tools.schemas[0]
+
+    assert "runtime maximum of 500 returned cells" in schema["description"]
+    assert "limited to 500 cells" in schema["parameters"]["properties"][
+        "range_ref"
+    ]["description"]
+
+    before = session.workbook_path.read_bytes()
+    result = tools.invoke(
+        "inspect_range", {"sheet": "Sales", "range_ref": "$A$1:$Z$1000"}
+    ).data
+
+    assert result["ok"] is True
+    assert result["requested_range"] == "A1:Z1000"
+    assert result["requested_cell_count"] == 26_000
+    assert result["returned_range"] == "A1:Z19"
+    assert result["returned_cell_count"] == 494
+    assert result["range"] == "A1:Z19"
+    assert result["cell_count"] == 494
+    assert result["truncated"] is True
+    assert result["limits"] == {"max_cells": 500}
+    assert result["truncation"] == {
+        "policy": "top_left_rectangle_preserve_columns_when_possible",
+        "omitted_cell_count": 25_506,
+        "message": (
+            "The requested range exceeded 500 cells; this response contains the "
+            "reported deterministic top-left rectangle."
+        ),
+    }
+    assert len(result["matrix"]) == 19
+    assert all(len(row) == 26 for row in result["matrix"])
+    assert session.workbook_path.read_bytes() == before
+
+    returned = [
+        event
+        for event in read_trajectory(session.paths.trajectory)
+        if event["event"] == "tool.returned"
+    ]
+    assert returned[-1]["payload"]["result"]["truncated"] is True
+    assert returned[-1]["payload"]["result"]["range"] == "A1:Z19"
+
+
+def test_recalculate_and_read_reports_semantic_errors_separately_from_success(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    workbook = load_workbook(sample_workbook)
+    error_values = ["#VALUE!", "#REF!", "#NAME?", "#DIV/0!", "#N/A"]
+    for row in range(1, 36):
+        workbook["Sales"].cell(row, 8, error_values[(row - 1) % len(error_values)])
+    workbook["Sales"]["I1"] = "'#REF!"
+    workbook.save(sample_workbook)
+    workbook.close()
+
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    metadata = {"backend": "libreoffice-headless", "atomic_replace": True}
+    monkeypatch.setattr(session, "recalculate", lambda: metadata)
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+    schema = tools.schemas[0]
+
+    assert "ok=true reports transport/tool success" in schema["description"]
+    result = tools.invoke(
+        "recalculate_and_read", {"sheet": "Sales", "range_ref": "H1:I35"}
+    ).data
+
+    assert result["ok"] is True
+    assert result["calculation"] == metadata
+    assert result["calculation_valid"] is False
+    assert result["calculation_errors"]["sheet"] == "Sales"
+    assert result["calculation_errors"]["range"] == "H1:I35"
+    assert result["calculation_errors"]["count"] == 35
+    assert result["calculation_errors"]["by_error"] == {
+        "#DIV/0!": 7,
+        "#N/A": 7,
+        "#NAME?": 7,
+        "#REF!": 7,
+        "#VALUE!": 7,
+    }
+    assert result["calculation_errors"]["coordinate_limit"] == 32
+    assert result["calculation_errors"]["coordinates_truncated"] is True
+    assert result["calculation_errors"]["coordinates"][0] == {
+        "coordinate": "H1",
+        "error": "#VALUE!",
+    }
+    assert result["calculation_errors"]["coordinates"][-1]["coordinate"] == "H32"
+    assert "I1" not in {
+        item["coordinate"] for item in result["calculation_errors"]["coordinates"]
+    }
+    assert result["inspection"]["cells"][0]["cached_data_type"] == "e"
+
+    returned = [
+        event
+        for event in read_trajectory(session.paths.trajectory)
+        if event["event"] == "tool.returned"
+    ]
+    assert returned[-1]["payload"]["result"]["ok"] is True
+    assert returned[-1]["payload"]["result"]["calculation_valid"] is False
+    assert returned[-1]["payload"]["result"]["calculation_errors"]["count"] == 35
+
+
+def test_recalculate_and_read_rejects_oversized_target_before_recalculation(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "oversized-recalc-run")
+    recalculate_calls = 0
+
+    def unexpected_recalculation() -> dict[str, Any]:
+        nonlocal recalculate_calls
+        recalculate_calls += 1
+        return {"backend": "should-not-run"}
+
+    monkeypatch.setattr(session, "recalculate", unexpected_recalculation)
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+    schema = tools.schemas[0]
+    before_sha256 = hashlib.sha256(session.workbook_path.read_bytes()).hexdigest()
+
+    result = tools.invoke(
+        "recalculate_and_read", {"sheet": "Sales", "range_ref": "$A$1:$Z$100"}
+    ).data
+
+    after_sha256 = hashlib.sha256(session.workbook_path.read_bytes()).hexdigest()
+    assert "limited to 500 cells" in schema["description"]
+    assert "maximum of 500 cells" in schema["parameters"]["properties"][
+        "range_ref"
+    ]["description"]
+    assert result["ok"] is False
+    assert result["type"] == "ToolInputError"
+    assert "at most 500 cells" in result["error"]
+    assert "A1:Z100 contains 2600 cells" in result["error"]
+    assert "no recalculation was performed" in result["error"]
+    assert recalculate_calls == 0
+    assert after_sha256 == before_sha256
+
+
+@pytest.mark.skipif(find_libreoffice() is None, reason="LibreOffice is not installed")
+def test_recalculate_and_read_detects_real_libreoffice_formula_errors(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    workbook = load_workbook(sample_workbook)
+    workbook["Sales"]["H1"] = "=1/0"
+    workbook["Sales"]["H2"] = "=NO_SUCH_FUNCTION(1)"
+    workbook["Sales"]["H3"] = '="#REF!"'
+    workbook.save(sample_workbook)
+    workbook.close()
+
+    session = WorkbookSession.create(sample_workbook, tmp_path / "run")
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+    result = tools.invoke(
+        "recalculate_and_read", {"sheet": "Sales", "range_ref": "H1:H3"}
+    ).data
+
+    assert result["ok"] is True
+    assert result["calculation"]["backend"] == "libreoffice-headless"
+    assert result["calculation_valid"] is False
+    assert result["calculation_errors"]["count"] == 2
+    assert result["calculation_errors"]["by_error"] == {
+        "#DIV/0!": 1,
+        "#NAME?": 1,
+    }
+    assert result["calculation_errors"]["coordinates"] == [
+        {"coordinate": "H1", "error": "#DIV/0!"},
+        {"coordinate": "H2", "error": "#NAME?"},
+    ]
+    h3 = next(
+        cell
+        for cell in result["inspection"]["cells"]
+        if cell["coordinate"] == "H3"
+    )
+    assert h3["value"] == "#REF!"
+    assert h3["cached_data_type"] == "s"
 
 
 def test_code_interpreter_schema_requires_self_contained_calls(

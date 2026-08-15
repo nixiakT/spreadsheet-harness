@@ -304,6 +304,18 @@ def test_chat_completions_length_is_typed_and_discards_partial_message_before_co
             {"ok": False, "workbook_rolled_back": True},
             True,
         ),
+        (
+            "recalculate_and_read",
+            {"sheet": "Sales", "range_ref": "D2:D4"},
+            {"ok": True, "calculation_valid": False},
+            False,
+        ),
+        (
+            "recalculate_and_read",
+            {"sheet": "Sales", "range_ref": "D2:D4"},
+            {"ok": True, "calculation_valid": True},
+            False,
+        ),
     ],
 )
 def test_failed_tool_edit_recovery_classification(
@@ -713,6 +725,87 @@ def test_agent_forced_tool_prefix_reprompts_empty_response_without_advancing(
         if event["event"] == "agent.empty_forced_tool_response_reprompted"
     ]
     assert reprompted[0]["payload"]["forced_prefix_index"] == 0
+
+
+def test_native_forced_inspection_prefix_keeps_oversized_request_as_evidence(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class OversizedInspectionClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> OversizedInspectionClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                name = "list_sheets"
+                arguments = "{}"
+            elif self.turn == 2:
+                name = "inspect_range"
+                arguments = json.dumps(
+                    {"sheet": "Sales", "range_ref": "A1:Z1000"}
+                )
+            else:
+                return ResponseTurn(
+                    "response-final",
+                    [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}],
+                        }
+                    ],
+                    "done",
+                    {},
+                )
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": arguments,
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", OversizedInspectionClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "oversized-prefix-run")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        SpreadsheetToolRegistry(session, enable_code=False),
+        forced_tool_prefix=("list_sheets", "inspect_range"),
+        max_turns=3,
+    ).run("Inspect the workbook")
+
+    assert result.final_text == "done"
+    assert result.observed_forced_tool_prefix == ["list_sheets", "inspect_range"]
+    assert result.tool_trace == [
+        {"name": "list_sheets", "ok": True},
+        {"name": "inspect_range", "ok": True},
+    ]
+    inspection_outputs = [
+        json.loads(item["output"])
+        for item in OversizedInspectionClient.requests[2]["input"]
+        if item.get("type") == "function_call_output"
+    ]
+    assert inspection_outputs[-1]["truncated"] is True
+    assert inspection_outputs[-1]["requested_range"] == "A1:Z1000"
+    assert inspection_outputs[-1]["returned_range"] == "A1:Z19"
+    assert inspection_outputs[-1]["range"] == "A1:Z19"
 
 
 def test_agent_forced_tool_prefix_fails_closed_on_later_turn(
@@ -1390,6 +1483,641 @@ def test_agent_reprompts_text_after_change_and_keeps_final_turn_for_submit(
         for item in final_input
         for content in item.get("content", [])
     )
+
+
+def test_agent_fails_closed_after_invalid_calculation_without_later_repair(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    recalculate_schema = {
+        "type": "function",
+        "name": "recalculate_and_read",
+        "description": "recalculate and validate",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sheet": {"type": "string"},
+                "range_ref": {"type": "string"},
+            },
+            "required": ["sheet", "range_ref"],
+            "additionalProperties": False,
+        },
+    }
+
+    class InvalidCalculationTools:
+        schemas = [recalculate_schema]
+
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            assert name == "recalculate_and_read"
+            return ToolOutcome(
+                {
+                    "ok": True,
+                    "calculation_valid": False,
+                    "calculation_errors": {
+                        "count": 1,
+                        "coordinates": [
+                            {"coordinate": "D4", "error": "#VALUE!"}
+                        ],
+                        "coordinate_limit": 32,
+                        "coordinates_truncated": False,
+                    },
+                }
+            )
+
+    class InvalidCalculationClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> InvalidCalculationClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-validation",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-validation",
+                            "name": "recalculate_and_read",
+                            "arguments": json.dumps(
+                                {"sheet": "Sales", "range_ref": "D4"}
+                            ),
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "submit_result",
+            }
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.agent.ResponsesClient", InvalidCalculationClient
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "invalid-calculation-run")
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            InvalidCalculationTools(session),  # type: ignore[arg-type]
+            required_tool_termination=True,
+            max_turns=2,
+        ).run("Fix the formulas")
+
+    assert caught.value.reason == "edit_recovery_exhausted"
+    assert caught.value.agent_result.observed_terminal_tool == "submit_result"
+    assert caught.value.agent_result.terminal_submissions == 1
+    assert caught.value.agent_result.tool_trace == [
+        {
+            "name": "recalculate_and_read",
+            "ok": True,
+            "calculation_valid": False,
+        }
+    ]
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event["event"] == "agent.calculation_validation_failed"
+        and event["payload"]["sheet"] == "Sales"
+        and event["payload"]["range_ref"] == "D4"
+        and event["payload"]["calculation_errors"]["count"] == 1
+        for event in events
+    )
+    assert events[-1]["event"] == "agent.execution_failed"
+    assert events[-1]["payload"]["reason"] == "edit_recovery_exhausted"
+
+
+_CALCULATION_TEST_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "recalculate_and_read",
+        "description": "recalculate and validate",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "type": "function",
+        "name": "write_range",
+        "description": "write a cell",
+        "parameters": {"type": "object", "properties": {}},
+    },
+]
+
+
+def _calculation_test_outcome(
+    sheet: str,
+    range_ref: str,
+    errors: list[tuple[str, str]],
+    *,
+    coordinates_truncated: bool = False,
+    calculation_valid: bool | None = None,
+    reported_count: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "calculation_valid": (
+            not errors if calculation_valid is None else calculation_valid
+        ),
+        "calculation_errors": {
+            "sheet": sheet,
+            "range": range_ref,
+            "count": len(errors) if reported_count is None else reported_count,
+            "coordinates": [
+                {"coordinate": coordinate, "error": error}
+                for coordinate, error in errors
+            ],
+            "coordinate_limit": 32,
+            "coordinates_truncated": coordinates_truncated,
+        },
+    }
+
+
+class _CalculationScenarioTools:
+    schemas = _CALCULATION_TEST_SCHEMAS
+
+    def __init__(
+        self,
+        session: WorkbookSession,
+        recalculation_outcomes: list[dict[str, Any]],
+    ) -> None:
+        self.session = session
+        self.recalculation_outcomes = iter(recalculation_outcomes)
+
+    def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        if name == "recalculate_and_read":
+            return ToolOutcome(next(self.recalculation_outcomes))
+        assert name == "write_range"
+        workbook = load_workbook(self.session.workbook_path)
+        workbook[arguments["sheet"]][arguments["start_cell"]] = arguments["values"][0][0]
+        workbook.save(self.session.workbook_path)
+        workbook.close()
+        return ToolOutcome({"ok": True, "cells_written": 1})
+
+
+def _sequenced_calculation_client(steps: list[dict[str, Any]]) -> type[Any]:
+    class SequencedCalculationClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            step = steps[self.turn]
+            self.turn += 1
+            if step["type"] == "text":
+                text = step["text"]
+                return ResponseTurn(
+                    f"response-{self.turn}",
+                    [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    ],
+                    text,
+                    {},
+                )
+            name = step["name"]
+            if name == "submit_result":
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "submit_result",
+                }
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(step.get("arguments", {})),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    return SequencedCalculationClient
+
+
+def _calculation_trajectory(session: WorkbookSession) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def test_agent_does_not_clear_invalid_calculation_after_unrelated_saved_write(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {
+                "type": "tool",
+                "name": "write_range",
+                "arguments": {
+                    "sheet": "Sales",
+                    "start_cell": "H20",
+                    "values": [["unrelated saved mutation"]],
+                },
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "unrelated-write-run")
+    tools = _CalculationScenarioTools(
+        session,
+        [_calculation_test_outcome("Sales", "D4", [("D4", "#REF!")])],
+    )
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            tools,  # type: ignore[arg-type]
+            required_tool_termination=True,
+            require_workbook_change=True,
+            max_turns=3,
+        ).run("Fix the formulas")
+
+    assert caught.value.reason == "edit_recovery_exhausted"
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    assert workbook["Sales"]["H20"].value == "unrelated saved mutation"
+    workbook.close()
+    events = _calculation_trajectory(session)
+    failed = next(
+        event
+        for event in events
+        if event["event"] == "agent.calculation_validation_failed"
+    )
+    assert failed["payload"]["outstanding_after"]["coordinates"] == [
+        {"sheet": "Sales", "coordinate": "D4", "error": "#REF!"}
+    ]
+    assert not any(
+        event["event"] == "agent.calculation_validation_repair_observed"
+        for event in events
+    )
+    assert events[-1]["event"] == "agent.execution_failed"
+
+
+def test_agent_does_not_clear_invalid_calculation_with_unrelated_clean_validation(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "H1:H2"},
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "unrelated-validation-run")
+    tools = _CalculationScenarioTools(
+        session,
+        [
+            _calculation_test_outcome("Sales", "D4", [("D4", "#VALUE!")]),
+            _calculation_test_outcome("Sales", "H1:H2", []),
+        ],
+    )
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            tools,  # type: ignore[arg-type]
+            required_tool_termination=True,
+            max_turns=3,
+        ).run("Fix the formulas")
+
+    assert caught.value.reason == "edit_recovery_exhausted"
+    passed = [
+        event
+        for event in _calculation_trajectory(session)
+        if event["event"] == "agent.calculation_validation_passed"
+    ][0]
+    assert passed["payload"]["validation"]["range"] == "H1:H2"
+    assert passed["payload"]["outstanding_changes"]["cleared_coordinate_count"] == 0
+    assert passed["payload"]["outstanding_changes"]["cleared_range_count"] == 0
+    assert passed["payload"]["outstanding_after"]["coordinates"] == [
+        {"sheet": "Sales", "coordinate": "D4", "error": "#VALUE!"}
+    ]
+
+
+def test_agent_keeps_truncated_failed_range_after_partial_clean_validation(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D1:D35"},
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D1:D32"},
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "partial-sentinel-run")
+    sampled_errors = [(f"D{row}", "#REF!") for row in range(1, 33)]
+    tools = _CalculationScenarioTools(
+        session,
+        [
+            _calculation_test_outcome(
+                "Sales",
+                "D1:D35",
+                sampled_errors,
+                coordinates_truncated=True,
+                reported_count=35,
+            ),
+            _calculation_test_outcome("Sales", "D1:D32", []),
+        ],
+    )
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            tools,  # type: ignore[arg-type]
+            required_tool_termination=True,
+            max_turns=3,
+        ).run("Fix the formulas")
+
+    assert caught.value.reason == "edit_recovery_exhausted"
+    passed = [
+        event
+        for event in _calculation_trajectory(session)
+        if event["event"] == "agent.calculation_validation_passed"
+    ][0]
+    assert passed["payload"]["outstanding_changes"]["cleared_range_count"] == 0
+    assert passed["payload"]["outstanding_after"]["ranges"] == [
+        {
+            "sheet": "Sales",
+            "range": "D1:D35",
+            "bounds": [4, 1, 4, 35],
+        }
+    ]
+
+
+def test_agent_replaces_fully_revalidated_range_sentinel_with_current_errors(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D1:D35"},
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D1:D35"},
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D35"},
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "replace-sentinel-run")
+    sampled_errors = [(f"D{row}", "#REF!") for row in range(1, 33)]
+    tools = _CalculationScenarioTools(
+        session,
+        [
+            _calculation_test_outcome(
+                "Sales",
+                "D1:D35",
+                sampled_errors,
+                coordinates_truncated=True,
+                reported_count=35,
+            ),
+            _calculation_test_outcome("Sales", "D1:D35", [("D35", "#VALUE!")]),
+            _calculation_test_outcome("Sales", "D35", []),
+        ],
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,  # type: ignore[arg-type]
+        required_tool_termination=True,
+        max_turns=4,
+    ).run("Fix the formulas")
+
+    assert result.final_text == "Spreadsheet task completed."
+    failed = [
+        event
+        for event in _calculation_trajectory(session)
+        if event["event"] == "agent.calculation_validation_failed"
+    ]
+    replacement = failed[1]["payload"]
+    assert replacement["outstanding_changes"]["cleared_range_count"] == 1
+    assert replacement["outstanding_after"]["range_count"] == 0
+    assert replacement["outstanding_after"]["coordinates"] == [
+        {"sheet": "Sales", "coordinate": "D35", "error": "#VALUE!"}
+    ]
+
+
+def test_agent_allows_submit_after_repair_and_covering_clean_validation(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {
+                "type": "tool",
+                "name": "write_range",
+                "arguments": {
+                    "sheet": "Sales",
+                    "start_cell": "D4",
+                    "values": [["=B4*C4+0"]],
+                },
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "covering-validation-run")
+    tools = _CalculationScenarioTools(
+        session,
+        [
+            _calculation_test_outcome("Sales", "D4", [("D4", "#REF!")]),
+            _calculation_test_outcome("Sales", "D4", []),
+        ],
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,  # type: ignore[arg-type]
+        required_tool_termination=True,
+        require_workbook_change=True,
+        max_turns=4,
+    ).run("Fix the formulas")
+
+    assert result.final_text == "Spreadsheet task completed."
+    passed = [
+        event
+        for event in _calculation_trajectory(session)
+        if event["event"] == "agent.calculation_validation_passed"
+    ][0]
+    assert passed["payload"]["outstanding_changes"]["cleared_coordinate_count"] == 1
+    assert passed["payload"]["outstanding_after"]["total_count"] == 0
+
+
+def test_agent_clears_outstanding_calculation_coordinates_progressively(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4:E4"},
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "E4"},
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "progressive-validation-run")
+    tools = _CalculationScenarioTools(
+        session,
+        [
+            _calculation_test_outcome(
+                "Sales",
+                "D4:E4",
+                [("D4", "#REF!"), ("E4", "#DIV/0!")],
+            ),
+            _calculation_test_outcome("Sales", "D4", []),
+            _calculation_test_outcome("Sales", "E4", []),
+        ],
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,  # type: ignore[arg-type]
+        required_tool_termination=True,
+        max_turns=4,
+    ).run("Fix the formulas")
+
+    assert result.final_text == "Spreadsheet task completed."
+    passed = [
+        event
+        for event in _calculation_trajectory(session)
+        if event["event"] == "agent.calculation_validation_passed"
+    ]
+    assert passed[0]["payload"]["outstanding_after"]["coordinates"] == [
+        {"sheet": "Sales", "coordinate": "E4", "error": "#DIV/0!"}
+    ]
+    assert passed[1]["payload"]["outstanding_after"]["total_count"] == 0
+
+
+def test_agent_blocks_text_completion_while_calculation_errors_are_outstanding(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {"type": "text", "text": "Done"},
+            {"type": "text", "text": "Still done"},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "text-calculation-gate-run")
+    tools = _CalculationScenarioTools(
+        session,
+        [_calculation_test_outcome("Sales", "D4", [("D4", "#NAME?")])],
+    )
+
+    with pytest.raises(AgentExecutionFailure) as caught:
+        SpreadsheetAgent(
+            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            tools,  # type: ignore[arg-type]
+            max_turns=3,
+        ).run("Fix the formulas")
+
+    assert caught.value.reason == "edit_recovery_exhausted"
+    assert caught.value.agent_result.observed_terminal_tool == "assistant_text"
+    events = _calculation_trajectory(session)
+    reprompted = next(
+        event
+        for event in events
+        if event["event"] == "agent.invalid_calculation_text_reprompted"
+    )
+    assert reprompted["payload"]["outstanding"]["coordinates"] == [
+        {"sheet": "Sales", "coordinate": "D4", "error": "#NAME?"}
+    ]
+    assert events[-1]["event"] == "agent.execution_failed"
 
 
 def test_agent_blocks_submit_after_rolled_back_edit_until_successful_recovery(

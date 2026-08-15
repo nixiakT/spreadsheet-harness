@@ -469,7 +469,8 @@ class WorkbookSession:
                 matrix_row: list[Any] = []
                 for column in range(min_col, max_col + 1):
                     cell = formula_sheet.cell(row, column)
-                    cached = value_sheet.cell(row, column).value
+                    cached_cell = value_sheet.cell(row, column)
+                    cached = cached_cell.value
                     raw = cell.value
                     display = raw if isinstance(raw, str) and raw.startswith("=") else cached
                     if display is None:
@@ -483,6 +484,7 @@ class WorkbookSession:
                             if isinstance(raw, str) and raw.startswith("=")
                             else None,
                             "data_type": cell.data_type,
+                            "cached_data_type": cached_cell.data_type,
                         }
                         if include_styles:
                             item["style"] = {
