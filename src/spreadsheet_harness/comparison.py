@@ -25,6 +25,7 @@ from .agent import (
     ASSISTANT_TEXT_TERMINAL,
     BUDGET_EXHAUSTED_TERMINAL,
     CONNECT_RETRY_MIN_SECONDS,
+    MODEL_RESPONSE_TRUNCATED_TERMINAL,
     OVERLOAD_RETRY_MIN_SECONDS,
     RETRY_BACKOFF_MAX_SECONDS,
     SAFE_AUTOMATIC_RETRY_REASONS,
@@ -72,6 +73,7 @@ from .errors import (
     LEGACY_AGENT_EXECUTION_FAILURE_REASONS,
     POSTPROCESS_RECALCULATION_FAILURE_STAGE,
     RECALCULATION_VALIDATION_TOOL,
+    V28_AGENT_EXECUTION_FAILURE_REASONS,
     AgentBudgetError,
     AgentExecutionFailure,
     AgentRoutingError,
@@ -103,6 +105,11 @@ COMPARISON_ARM_DISPLAY_NAMES = {
     "paper": "paper-inspired",
     "ours": "ours",
 }
+PROVIDER_INFRASTRUCTURE_FAILURE_STAGE = "provider"
+PROVIDER_INFRASTRUCTURE_CATEGORIES = frozenset(
+    {"provider_transient", "provider_fatal", "provider_task"}
+)
+PROVIDER_REQUEST_AUDIT_SCHEMA_VERSION = 1
 TERMINAL_SUBMISSION_TRUNCATED_OBSERVED = "submit_result_length"
 HISTORICAL_FINAL_RECOVERY_TERMINAL = "final_recovery_code_interpreter"
 V24_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v24"
@@ -131,29 +138,34 @@ V27_RUN_SPEC_SOURCE_CONTRACT = {
     "sha256": "ab359f5c45ab797ec1b88ae1cfa54e50c9aba7fd44d6fddeb28e0a5df1448328",
     "file_count": 21,
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v28"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 17
+V28_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v28"
+V28_COMPARISON_MANIFEST_SCHEMA_VERSION = 17
+V28_RUN_SPEC_SOURCE_CONTRACT = {
+    "schema_version": 1,
+    "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
+    "sha256": "f282ee00d271eba52dd81cb8b388124cb01d6c3fa45111eb2aa2d0d5a654d650",
+    "file_count": 23,
+}
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v29"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 18
 _V26_RUNTIME_PROTOCOL_VERSIONS = frozenset(
     {
         V26_COMPARISON_PROTOCOL_VERSION,
         V27_COMPARISON_PROTOCOL_VERSION,
+        V28_COMPARISON_PROTOCOL_VERSION,
         COMPARISON_PROTOCOL_VERSION,
     }
 )
 PILOT_RUN_SPEC_SCHEMA_VERSION = "spreadsheet-harness-comparison-run-spec-v1"
 PILOT_RUN_SPEC_ID = "qwen36-local-pilot16-v2-bare-ours-v23-seed41"
 PILOT_RUN_SPEC_FILENAME = "qwen35-trace2skill-local-pilot16-run-spec-v1.json"
-PILOT_RUN_SPEC_SHA256 = (
-    "8dc1583b96a76209023586c8ebafde9dfa1a55cb31778e88247da595bdd60086"
-)
+PILOT_RUN_SPEC_SHA256 = "8dc1583b96a76209023586c8ebafde9dfa1a55cb31778e88247da595bdd60086"
 RUN_SPEC_COPY_FILENAME = "run-spec.json"
 INFLIGHT_FILENAME = ".inflight-arm-task.json"
 INTERRUPTED_SEALS_FILENAME = "interrupted-arm-tasks.json"
 CONTINUATION_SOURCE_FILENAME = "continuation-source.json"
 PILOT_SPLIT_MANIFEST_ID = "qwen35-trace2skill-local-unattempted-pilot16-v2"
-LEGACY_PILOT_MANIFEST_SHA256 = (
-    "7eee847bc9880ec112ac78eefaac0c97d350da31c6e045c1d5c924e95b0b04c1"
-)
+LEGACY_PILOT_MANIFEST_SHA256 = "7eee847bc9880ec112ac78eefaac0c97d350da31c6e045c1d5c924e95b0b04c1"
 LEGACY_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v23"
 LEGACY_COMPARISON_MANIFEST_SCHEMA_VERSION = 12
 LEGACY_COMPARISON_CONFIGURATION_POLICIES = {
@@ -180,9 +192,7 @@ V24_COMPARISON_CONFIGURATION_POLICIES = {
     "model_execution_failure_policy": (
         "known-false-score-artifact-and-request-audited-nonbreaker-v1"
     ),
-    "model_execution_failure_reasons": sorted(
-        LEGACY_AGENT_EXECUTION_FAILURE_REASONS
-    ),
+    "model_execution_failure_reasons": sorted(LEGACY_AGENT_EXECUTION_FAILURE_REASONS),
     "circuit_breaker_nonbreaker_categories": ["model_execution_failure"],
 }
 V25_COMPARISON_CONFIGURATION_POLICIES = {
@@ -196,7 +206,7 @@ V25_COMPARISON_CONFIGURATION_POLICIES = {
 }
 V26_COMPARISON_CONFIGURATION_POLICIES = {
     **V25_COMPARISON_CONFIGURATION_POLICIES,
-    "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
+    "model_execution_failure_reasons": sorted(V28_AGENT_EXECUTION_FAILURE_REASONS),
     "terminal_submission_policy": "empty-ack-harness-final-text-v1",
     "edit_recovery_terminal_policy": "penultimate-recovery-final-submit-v1",
     "ours_tool_policy": "fixed-six-code-first-v1",
@@ -205,26 +215,29 @@ V26_COMPARISON_CONFIGURATION_POLICIES = {
 }
 V27_COMPARISON_CONFIGURATION_POLICIES = dict(V26_COMPARISON_CONFIGURATION_POLICIES)
 # v28 also fails closed if the recalculation engine changes sheet identity.
-COMPARISON_CONFIGURATION_POLICIES = {
+V28_COMPARISON_CONFIGURATION_POLICIES = {
     **V27_COMPARISON_CONFIGURATION_POLICIES,
     "recalculation_integrity_policy": RECALCULATION_SHEET_INTEGRITY_POLICY,
     "recalculation_failure_policy": "audited-infrastructure-error-no-score-v1",
-    "recalculation_failure_stage_policy": (
-        "postprocess-or-agent-tool-recalculation-v1"
-    ),
-    "artifact_reopen_policy": (
-        "ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"
-    ),
-    "scoring_compatibility_policy": (
-        "worksheet-only-ooxml-view-scorer-infrastructure-no-score-v1"
-    ),
-    "formula_runtime_gate": (
-        "raw-ooxml-dirty-formula-scope-complete-clean-calc-v1"
-    ),
+    "recalculation_failure_stage_policy": ("postprocess-or-agent-tool-recalculation-v1"),
+    "artifact_reopen_policy": ("ooxml-inventory-plus-worksheet-only-openpyxl-view-v1"),
+    "scoring_compatibility_policy": ("worksheet-only-ooxml-view-scorer-infrastructure-no-score-v1"),
+    "formula_runtime_gate": ("raw-ooxml-dirty-formula-scope-complete-clean-calc-v1"),
     "formula_runtime_gate_arms": ["ours"],
-    "formula_runtime_validation_scope": (
-        "range-or-single-recalc-sparse-pending-formulas-v1"
+    "formula_runtime_validation_scope": ("range-or-single-recalc-sparse-pending-formulas-v1"),
+}
+# v29 records delivered output-limit responses as model failures and provider
+# delivery failures as audited infrastructure no-scores.
+COMPARISON_CONFIGURATION_POLICIES = {
+    **V28_COMPARISON_CONFIGURATION_POLICIES,
+    "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
+    "model_response_truncation_policy": (
+        "delivered-output-limit-known-false-no-partial-execution-v1"
     ),
+    "model_response_truncation_observed_terminal": (MODEL_RESPONSE_TRUNCATED_TERMINAL),
+    "provider_failure_policy": "audited-infrastructure-error-no-score-v1",
+    "provider_no_score_categories": sorted(PROVIDER_INFRASTRUCTURE_CATEGORIES),
+    "provider_request_audit_policy": "exact-failed-request-attempt-history-v1",
 }
 
 
@@ -326,11 +339,7 @@ def resolve_run_spec_anchor(value: Any) -> RunSpecAnchor:
     else:
         run_spec_id = value.get("run_spec_id")
         anchor = next(
-            (
-                candidate
-                for candidate in RUN_SPEC_ANCHORS
-                if candidate.run_spec_id == run_spec_id
-            ),
+            (candidate for candidate in RUN_SPEC_ANCHORS if candidate.run_spec_id == run_spec_id),
             None,
         )
     if anchor is None:
@@ -356,15 +365,12 @@ def require_launchable_run_spec(
 ) -> RunSpecAnchor:
     anchor = resolve_run_spec_anchor(value)
     if not anchor.launchable:
-        raise HarnessError(
-            f"Run spec {anchor.run_spec_id} is read-only and cannot {operation}"
-        )
+        raise HarnessError(f"Run spec {anchor.run_spec_id} is read-only and cannot {operation}")
     if resume and not anchor.resumable:
         raise HarnessError(f"Run spec {anchor.run_spec_id} is fresh-only and cannot resume")
     if (
         anchor.comparison_protocol_version != COMPARISON_PROTOCOL_VERSION
-        or anchor.comparison_manifest_schema_version
-        != COMPARISON_MANIFEST_SCHEMA_VERSION
+        or anchor.comparison_manifest_schema_version != COMPARISON_MANIFEST_SCHEMA_VERSION
     ):
         raise HarnessError("Run spec execution version is not supported by this runner")
     return anchor
@@ -487,8 +493,7 @@ def parse_pilot_run_spec_bytes(
     execution = document["execution"]
     split_provenance = execution.get("split_provenance")
     if (
-        execution.get("comparison_protocol_version")
-        != anchor.comparison_protocol_version
+        execution.get("comparison_protocol_version") != anchor.comparison_protocol_version
         or execution.get("comparison_manifest_schema_version")
         != anchor.comparison_manifest_schema_version
         or not isinstance(split_provenance, dict)
@@ -567,9 +572,11 @@ def verify_repository_source_state(
         timeout=30,
     ).splitlines()
     expected_remote_line = f"{commit}\t{remote_ref}"
-    if remote_lines != [expected_remote_line] or any(
-        character not in "0123456789abcdef" for character in commit
-    ) or len(commit) != 40:
+    if (
+        remote_lines != [expected_remote_line]
+        or any(character not in "0123456789abcdef" for character in commit)
+        or len(commit) != 40
+    ):
         raise HarnessError("Harness HEAD does not match the observed origin/main remote head")
     source = _source_fingerprint()
     return {
@@ -633,15 +640,12 @@ def comparison_execution_contract(
             "arm_order_seed": arm_order_seed,
         },
         "skills_for_ours_only": [
-            {"name": skill.name, "sha256": skill.sha256}
-            for skill in skills.discover()
+            {"name": skill.name, "sha256": skill.sha256} for skill in skills.discover()
         ],
     }
 
 
-def verify_pilot_run_spec_contract(
-    document: dict[str, Any], actual: dict[str, Any]
-) -> None:
+def verify_pilot_run_spec_contract(document: dict[str, Any], actual: dict[str, Any]) -> None:
     if document.get("execution") != actual:
         raise HarnessError("Pilot run spec does not match the resolved execution contract")
 
@@ -659,9 +663,7 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
             "base_url": configuration.get("provider_base_url"),
             "model": configuration.get("model"),
             "api_protocol": configuration.get("api_protocol"),
-            "requested_reasoning_effort": configuration.get(
-                "requested_reasoning_effort"
-            ),
+            "requested_reasoning_effort": configuration.get("requested_reasoning_effort"),
             "reasoning_effort": configuration.get("reasoning_effort"),
             "request_timeout_seconds": configuration.get("request_timeout_seconds"),
             "request_retries": configuration.get("request_retries"),
@@ -674,15 +676,11 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
             "max_model_calls": configuration.get("max_model_calls"),
             "max_turns_per_arm": configuration.get("max_turns_per_arm"),
             "max_total_tokens": configuration.get("max_total_tokens"),
-            "max_output_tokens_per_call": configuration.get(
-                "max_output_tokens_per_call"
-            ),
+            "max_output_tokens_per_call": configuration.get("max_output_tokens_per_call"),
             "task_timeout_seconds": configuration.get("task_timeout_seconds"),
             "recalculate": configuration.get("recalculate"),
             "task_retries": configuration.get("task_retries"),
-            "circuit_breaker_threshold": configuration.get(
-                "circuit_breaker_threshold"
-            ),
+            "circuit_breaker_threshold": configuration.get("circuit_breaker_threshold"),
             "arm_order_seed": manifest.get("arm_order_seed"),
         },
         "skills_for_ours_only": configuration.get("skills_for_ours_only"),
@@ -694,6 +692,8 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
         contract["source_contract"] = dict(V26_RUN_SPEC_SOURCE_CONTRACT)
     elif protocol_version == V27_COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = dict(V27_RUN_SPEC_SOURCE_CONTRACT)
+    elif protocol_version == V28_COMPARISON_PROTOCOL_VERSION:
+        contract["source_contract"] = dict(V28_RUN_SPEC_SOURCE_CONTRACT)
     elif protocol_version == COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = _run_spec_source_fingerprint()
     return contract
@@ -745,6 +745,11 @@ def _allowed_observed_terminals_policy(
                 [
                     ASSISTANT_TEXT_TERMINAL,
                     *(
+                        [MODEL_RESPONSE_TRUNCATED_TERMINAL]
+                        if protocol_version == COMPARISON_PROTOCOL_VERSION
+                        else []
+                    ),
+                    *(
                         [BUDGET_EXHAUSTED_TERMINAL]
                         if protocol_version
                         in {
@@ -767,14 +772,18 @@ def _allowed_observed_terminals_policy(
                         if stage == "solve"
                         and protocol_version not in _V26_RUNTIME_PROTOCOL_VERSIONS
                         and (
-                            protocol_version != LEGACY_COMPARISON_PROTOCOL_VERSION
-                            or arm == "ours"
+                            protocol_version != LEGACY_COMPARISON_PROTOCOL_VERSION or arm == "ours"
                         )
                         else []
                     ),
                     *(
                         [TERMINAL_SUBMISSION_TRUNCATED_OBSERVED]
                         if protocol_version in _V26_RUNTIME_PROTOCOL_VERSIONS
+                        else []
+                    ),
+                    *(
+                        [MODEL_RESPONSE_TRUNCATED_TERMINAL]
+                        if protocol_version == COMPARISON_PROTOCOL_VERSION
                         else []
                     ),
                     *(
@@ -804,6 +813,51 @@ def _require_int(value: Any, *, minimum: int = 0) -> int | None:
     return value
 
 
+def _provider_request_audit_evidence(
+    provider_error: dict[str, Any],
+    budget: dict[str, Any],
+    *,
+    request_retries: int,
+) -> dict[str, int | bool]:
+    """Seal exact HTTP-attempt counts for no-score provider failures.
+
+    A failed arm has no aggregate ``AgentResult``. With request retries disabled,
+    however, each recorded successful model call is exactly one HTTP attempt and
+    the final failed logical request carries its complete attempt history.
+    """
+
+    successful_model_calls = _require_int(
+        ((budget.get("used") or {}).get("model_calls")),
+    )
+    failed_attempts = _require_int(provider_error.get("attempts"))
+    attempt_history = provider_error.get("attempt_history")
+    history_exact = bool(
+        failed_attempts is not None
+        and isinstance(attempt_history, list)
+        and len(attempt_history) == failed_attempts
+        and all(
+            isinstance(attempt, dict) and attempt.get("attempt") == index
+            for index, attempt in enumerate(attempt_history, start=1)
+        )
+    )
+    successful = successful_model_calls or 0
+    failed = failed_attempts or 0
+    exact = bool(
+        successful_model_calls is not None
+        and request_retries == 0
+        and failed_attempts in {0, 1}
+        and history_exact
+    )
+    return {
+        "schema_version": PROVIDER_REQUEST_AUDIT_SCHEMA_VERSION,
+        "request_retries": request_retries,
+        "successful_model_calls": successful,
+        "failed_attempts": failed,
+        "known_http_attempts": successful + failed,
+        "exact": exact,
+    }
+
+
 def _request_attempt_audit(row: dict[str, Any]) -> dict[str, int | bool]:
     budget_calls = _require_int(
         ((row.get("budget") or {}).get("used") or {}).get("model_calls"),
@@ -818,7 +872,11 @@ def _request_attempt_audit(row: dict[str, Any]) -> dict[str, int | bool]:
                 break
             raw_attempts = _require_int(timing.get("attempts"), minimum=1)
             history = timing.get("attempt_history")
-            if raw_attempts is None or not isinstance(history, list) or len(history) != raw_attempts:
+            if (
+                raw_attempts is None
+                or not isinstance(history, list)
+                or len(history) != raw_attempts
+            ):
                 valid_timings = False
                 break
             attempts.append(raw_attempts)
@@ -827,6 +885,46 @@ def _request_attempt_audit(row: dict[str, Any]) -> dict[str, int | bool]:
     )
     if failed_attempts is None:
         failed_attempts = 0
+    provider_infrastructure = bool(
+        row.get("status") == "error"
+        and row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("score_available") is False
+        and row.get("infrastructure_failure_stage") == PROVIDER_INFRASTRUCTURE_FAILURE_STAGE
+        and row.get("error_category") in PROVIDER_INFRASTRUCTURE_CATEGORIES
+    )
+    if provider_infrastructure:
+        provider_request_audit = row.get("provider_request_audit")
+        request_retries = (
+            _require_int(provider_request_audit.get("request_retries"))
+            if isinstance(provider_request_audit, dict)
+            else None
+        )
+        expected = (
+            _provider_request_audit_evidence(
+                row.get("provider_error") or {},
+                row.get("budget") or {},
+                request_retries=request_retries,
+            )
+            if request_retries is not None
+            else None
+        )
+        evidence_exact = bool(
+            expected is not None
+            and provider_request_audit == expected
+            and expected["exact"] is True
+        )
+        known_http_attempts = (
+            int(expected["known_http_attempts"])
+            if expected is not None
+            else (budget_calls or 0) + failed_attempts
+        )
+        return {
+            "known_http_attempts": known_http_attempts,
+            "known_successful_retries": 0,
+            "known_failed_attempts": failed_attempts,
+            "has_audit": isinstance(provider_request_audit, dict),
+            "exact": evidence_exact,
+        }
     request_history_complete = bool(
         row.get("status") == "completed"
         or (
@@ -1062,12 +1160,19 @@ def _arm_subset_summary(
     )
     infrastructure_failures = Counter(
         str(
-            row.get("recalculation_failure_reason")
+            row.get("provider_failure_reason")
+            or row.get("recalculation_failure_reason")
             or row.get("scoring_failure_reason")
             or "unspecified"
         )
         for row in arm_rows
         if row.get("outcome_kind") == "infrastructure_failure"
+    )
+    provider_infrastructure_failures = Counter(
+        str(row.get("provider_failure_reason") or "unspecified")
+        for row in arm_rows
+        if row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("infrastructure_failure_stage") == PROVIDER_INFRASTRUCTURE_FAILURE_STAGE
     )
     score_unavailable = bool(infrastructure_failures)
     terminations = Counter(
@@ -1096,23 +1201,21 @@ def _arm_subset_summary(
         "completion_rate": len(completed) / len(tasks) if tasks else 0.0,
         "error_categories": dict(sorted(errors.items())),
         "known_model_execution_failures": sum(model_execution_failures.values()),
-        "model_execution_failure_reasons": dict(
-            sorted(model_execution_failures.items())
-        ),
+        "model_execution_failure_reasons": dict(sorted(model_execution_failures.items())),
         "known_infrastructure_failures": sum(infrastructure_failures.values()),
         "infrastructure_failure_reasons": dict(sorted(infrastructure_failures.items())),
+        "known_provider_infrastructure_failures": sum(provider_infrastructure_failures.values()),
+        "provider_infrastructure_failure_reasons": dict(
+            sorted(provider_infrastructure_failures.items())
+        ),
         "score_unavailable": score_unavailable,
         "budget_termination_reasons": dict(sorted(terminations.items())),
         "input_tokens": _distribution([item["input_tokens"] for item in usage]),
         "output_tokens": _distribution([item["output_tokens"] for item in usage]),
         "total_tokens": _distribution([item["total_tokens"] for item in usage]),
         "total_tokens_sum": total_tokens,
-        "usage_rows_with_input_output": sum(
-            item["input_output_complete"] for item in usage
-        ),
-        "usage_total_mismatches": sum(
-            item["agent_budget_total_mismatch"] for item in usage
-        ),
+        "usage_rows_with_input_output": sum(item["input_output_complete"] for item in usage),
+        "usage_total_mismatches": sum(item["agent_budget_total_mismatch"] for item in usage),
         "model_calls": _distribution(calls),
         "known_http_attempts": _distribution(
             [float(item["known_http_attempts"]) for item in request_attempt_audits]
@@ -1144,19 +1247,21 @@ def _pairwise_result(
     *,
     seed: int,
 ) -> dict[str, Any]:
+    jointly_scored = [
+        task
+        for task in tasks
+        if _row_has_available_score(latest.get(_run_key(task.task_id, left_arm)))
+        and _row_has_available_score(latest.get(_run_key(task.task_id, right_arm)))
+    ]
     left_only = sum(
         passes[left_arm][task.task_id] and not passes[right_arm][task.task_id]
-        for task in tasks
+        for task in jointly_scored
     )
     right_only = sum(
         passes[right_arm][task.task_id] and not passes[left_arm][task.task_id]
-        for task in tasks
+        for task in jointly_scored
     )
-    complete_pairs = sum(
-        latest.get(_run_key(task.task_id, left_arm), {}).get("status") == "completed"
-        and latest.get(_run_key(task.task_id, right_arm), {}).get("status") == "completed"
-        for task in tasks
-    )
+    complete_pairs = len(jointly_scored)
     inference_valid = bool(tasks) and complete_pairs == len(tasks)
     invalid_reasons = (
         []
@@ -1187,15 +1292,11 @@ def _pairwise_result(
         ),
         "left_only_passes": left_only,
         "right_only_passes": right_only,
-        "mcnemar_exact_p": (
-            _mcnemar_exact(left_only, right_only) if inference_valid else None
-        ),
+        "mcnemar_exact_p": (_mcnemar_exact(left_only, right_only) if inference_valid else None),
     }
 
 
-def _invalidate_pairwise_inference(
-    result: dict[str, Any], reasons: list[str]
-) -> None:
+def _invalidate_pairwise_inference(result: dict[str, Any], reasons: list[str]) -> None:
     """Remove inferential fields when collection integrity is not established."""
 
     merged = list(result.get("inference_invalid_reasons") or [])
@@ -1251,9 +1352,7 @@ def comparison_summary(
         task_id = str(raw_task_id) if raw_task_id is not None else "<missing>"
         arm = str(raw_arm) if raw_arm is not None else "<missing>"
         raw_protocol = row.get("comparison_protocol_version")
-        observed_protocol = (
-            str(raw_protocol) if raw_protocol is not None else "<missing>"
-        )
+        observed_protocol = str(raw_protocol) if raw_protocol is not None else "<missing>"
         observed_protocols.add(observed_protocol)
         if raw_protocol != expected_protocol_version:
             protocol_mismatch_rows += 1
@@ -1268,12 +1367,8 @@ def comparison_summary(
         elif arm not in expected_arms:
             unexpected_arm_rows += 1
             unexpected_arms.add(arm)
-    duplicate_arm_task_keys = sorted(
-        key for key, count in identity_counts.items() if count > 1
-    )
-    duplicate_arm_task_rows = sum(
-        count - 1 for count in identity_counts.values() if count > 1
-    )
+    duplicate_arm_task_keys = sorted(key for key, count in identity_counts.items() if count > 1)
+    duplicate_arm_task_rows = sum(count - 1 for count in identity_counts.values() if count > 1)
     latest = {
         _run_key(str(row.get("task_id")), str(row.get("arm"))): row
         for row in rows
@@ -1295,6 +1390,12 @@ def comparison_summary(
         for key in infrastructure_failure_keys
         if latest[key].get("error_category") == "scoring_infrastructure"
     }
+    provider_infrastructure_keys = {
+        key
+        for key in infrastructure_failure_keys
+        if latest[key].get("infrastructure_failure_stage") == PROVIDER_INFRASTRUCTURE_FAILURE_STAGE
+        and latest[key].get("error_category") in PROVIDER_INFRASTRUCTURE_CATEGORIES
+    }
     score_unavailable_keys = interrupted_keys | infrastructure_failure_keys
     expected_keys = [_run_key(task.task_id, arm) for task in tasks for arm in arms]
     unknown_interrupted_keys = sorted(interrupted_keys - set(expected_keys))
@@ -1311,18 +1412,15 @@ def comparison_summary(
             for task in tasks
         }
         arm_summary = _arm_subset_summary(tasks, arm, latest, passes[arm])
-        arm_interrupted = sorted(
-            key for key in interrupted_keys if key.endswith(f"::{arm}")
-        )
+        arm_interrupted = sorted(key for key in interrupted_keys if key.endswith(f"::{arm}"))
         arm_recalculation_infrastructure_failures = sorted(
-            key
-            for key in recalculation_infrastructure_keys
-            if key.endswith(f"::{arm}")
+            key for key in recalculation_infrastructure_keys if key.endswith(f"::{arm}")
         )
         arm_scoring_infrastructure_failures = sorted(
-            key
-            for key in scoring_infrastructure_keys
-            if key.endswith(f"::{arm}")
+            key for key in scoring_infrastructure_keys if key.endswith(f"::{arm}")
+        )
+        arm_provider_infrastructure_failures = sorted(
+            key for key in provider_infrastructure_keys if key.endswith(f"::{arm}")
         )
         known_tasks = [
             task
@@ -1341,12 +1439,10 @@ def comparison_summary(
         arm_summary["recalculation_infrastructure_failure_keys"] = (
             arm_recalculation_infrastructure_failures
         )
-        arm_summary["scoring_infrastructure_failures"] = len(
-            arm_scoring_infrastructure_failures
-        )
-        arm_summary["scoring_infrastructure_failure_keys"] = (
-            arm_scoring_infrastructure_failures
-        )
+        arm_summary["scoring_infrastructure_failures"] = len(arm_scoring_infrastructure_failures)
+        arm_summary["scoring_infrastructure_failure_keys"] = arm_scoring_infrastructure_failures
+        arm_summary["provider_infrastructure_failures"] = len(arm_provider_infrastructure_failures)
+        arm_summary["provider_infrastructure_failure_keys"] = arm_provider_infrastructure_failures
         arm_summary["known_outcome_descriptive"] = {
             "tasks": len(known_tasks),
             "passed": known_passed,
@@ -1368,20 +1464,22 @@ def comparison_summary(
         for stratum, stratum_summary in strata.items():
             stratum_tasks = [task for task in tasks if _task_stratum(task) == stratum]
             stratum_interrupted = [
-                task
-                for task in stratum_tasks
-                if _run_key(task.task_id, arm) in interrupted_keys
+                task for task in stratum_tasks if _run_key(task.task_id, arm) in interrupted_keys
             ]
             stratum_recalculation_infrastructure_failures = [
                 task
                 for task in stratum_tasks
-                if _run_key(task.task_id, arm)
-                in recalculation_infrastructure_keys
+                if _run_key(task.task_id, arm) in recalculation_infrastructure_keys
             ]
             stratum_scoring_infrastructure_failures = [
                 task
                 for task in stratum_tasks
                 if _run_key(task.task_id, arm) in scoring_infrastructure_keys
+            ]
+            stratum_provider_infrastructure_failures = [
+                task
+                for task in stratum_tasks
+                if _run_key(task.task_id, arm) in provider_infrastructure_keys
             ]
             stratum_unknown = {
                 task.task_id
@@ -1389,15 +1487,14 @@ def comparison_summary(
                     *stratum_interrupted,
                     *stratum_recalculation_infrastructure_failures,
                     *stratum_scoring_infrastructure_failures,
+                    *stratum_provider_infrastructure_failures,
                 ]
             }
             stratum_known = [
                 task
                 for task in stratum_tasks
                 if task.task_id not in stratum_unknown
-                and _row_has_available_score(
-                    latest.get(_run_key(task.task_id, arm))
-                )
+                and _row_has_available_score(latest.get(_run_key(task.task_id, arm)))
             ]
             stratum_passed = sum(passes[arm][task.task_id] for task in stratum_known)
             if stratum_unknown:
@@ -1410,16 +1507,15 @@ def comparison_summary(
             stratum_summary["scoring_infrastructure_failures"] = len(
                 stratum_scoring_infrastructure_failures
             )
+            stratum_summary["provider_infrastructure_failures"] = len(
+                stratum_provider_infrastructure_failures
+            )
             stratum_summary["known_outcome_descriptive"] = {
                 "tasks": len(stratum_known),
                 "passed": stratum_passed,
-                "accuracy": (
-                    stratum_passed / len(stratum_known) if stratum_known else None
-                ),
+                "accuracy": (stratum_passed / len(stratum_known) if stratum_known else None),
                 "wilson_95": (
-                    _wilson(stratum_passed, len(stratum_known))
-                    if stratum_known
-                    else None
+                    _wilson(stratum_passed, len(stratum_known)) if stratum_known else None
                 ),
                 "primary": False,
             }
@@ -1466,12 +1562,8 @@ def comparison_summary(
         known_pairs = [
             task
             for task in tasks
-            if _row_has_available_score(
-                latest.get(_run_key(task.task_id, left_arm))
-            )
-            and _row_has_available_score(
-                latest.get(_run_key(task.task_id, right_arm))
-            )
+            if _row_has_available_score(latest.get(_run_key(task.task_id, left_arm)))
+            and _row_has_available_score(latest.get(_run_key(task.task_id, right_arm)))
         ]
         pairwise[name]["known_outcome_descriptive"] = {
             "pairs": len(known_pairs),
@@ -1494,16 +1586,19 @@ def comparison_summary(
                 unavailable_reasons.append("recalculation_infrastructure_failures")
             if scoring_infrastructure_keys:
                 unavailable_reasons.append("scoring_infrastructure_failures")
-            _invalidate_pairwise_inference(
-                pairwise[name], unavailable_reasons
-            )
+            if provider_infrastructure_keys:
+                unavailable_reasons.append("provider_infrastructure_failures")
+            _invalidate_pairwise_inference(pairwise[name], unavailable_reasons)
 
     attempted_keys = set(latest)
     expected_key_set = set(expected_keys)
     attempted_expected = attempted_keys & expected_key_set
-    errored_arm_tasks = sum(
-        latest[key].get("status") != "completed" for key in attempted_expected
-    )
+    errored_arm_tasks = sum(latest[key].get("status") != "completed" for key in attempted_expected)
+    unclassified_error_keys = {
+        key
+        for key in attempted_expected
+        if latest[key].get("status") != "completed" and key not in infrastructure_failure_keys
+    }
     missing_arm_tasks = len(expected_key_set - attempted_keys - interrupted_keys)
     inference_invalid_reasons: list[str] = []
     if invalid:
@@ -1519,32 +1614,34 @@ def comparison_summary(
     if protocol_mismatch_rows:
         inference_invalid_reasons.append("comparison_protocol_mismatch")
     if any(
-        not arm_summary.get("request_attempt_audit_complete")
-        for arm_summary in by_arm.values()
+        not arm_summary.get("request_attempt_audit_complete") for arm_summary in by_arm.values()
     ):
         inference_invalid_reasons.append("request_attempt_audit_incomplete")
     if missing_arm_tasks:
         inference_invalid_reasons.append("missing_arm_tasks")
-    if errored_arm_tasks:
+    if unclassified_error_keys:
         inference_invalid_reasons.append("errored_arm_tasks")
     if recalculation_infrastructure_keys:
         inference_invalid_reasons.append("recalculation_infrastructure_failures")
     if scoring_infrastructure_keys:
         inference_invalid_reasons.append("scoring_infrastructure_failures")
+    if provider_infrastructure_keys:
+        inference_invalid_reasons.append("provider_infrastructure_failures")
     if interrupted_keys:
         inference_invalid_reasons.append("interrupted_unknown_outcomes")
     if inference_invalid_reasons:
         for result in pairwise.values():
             _invalidate_pairwise_inference(result, inference_invalid_reasons)
     calculation_backends = Counter(
-        str(latest[key].get("calculation_backend") or "unspecified")
-        for key in attempted_expected
+        str(latest[key].get("calculation_backend") or "unspecified") for key in attempted_expected
+    )
+    provider_infrastructure_reasons = Counter(
+        str(latest[key].get("provider_failure_reason") or "unspecified")
+        for key in provider_infrastructure_keys & attempted_expected
     )
     return {
         "protocol": expected_protocol_version,
-        "arm_display_names": {
-            arm: COMPARISON_ARM_DISPLAY_NAMES[arm] for arm in arms
-        },
+        "arm_display_names": {arm: COMPARISON_ARM_DISPLAY_NAMES[arm] for arm in arms},
         "scorer": "cleanroom-corrected-value-v1",
         "style_checked": False,
         "calculation_backends": dict(sorted(calculation_backends.items())),
@@ -1554,6 +1651,7 @@ def comparison_summary(
         "attempted_arm_tasks": len(attempted_expected) + len(interrupted_keys),
         "completed_arm_tasks": len(attempted_expected) - errored_arm_tasks,
         "errored_arm_tasks": errored_arm_tasks,
+        "unclassified_error_arm_tasks": len(unclassified_error_keys),
         "missing_arm_tasks": missing_arm_tasks,
         "interrupted_unknown_arm_tasks": len(interrupted_keys),
         "known_model_execution_failure_arm_tasks": sum(
@@ -1569,6 +1667,12 @@ def comparison_summary(
         ),
         "known_scoring_infrastructure_failure_arm_tasks": len(
             scoring_infrastructure_keys & attempted_expected
+        ),
+        "known_provider_infrastructure_failure_arm_tasks": len(
+            provider_infrastructure_keys & attempted_expected
+        ),
+        "provider_infrastructure_failure_reasons": dict(
+            sorted(provider_infrastructure_reasons.items())
         ),
         "interrupted_unknown_keys": sorted(interrupted_keys),
         "invalid_result_rows_ignored": invalid,
@@ -1613,8 +1717,10 @@ class ComparisonBenchmarkRunner:
         run_spec_provenance: dict[str, str] | None = None,
         run_spec_bytes: bytes | None = None,
     ) -> None:
-        if not arms or len(set(arms)) != len(arms) or any(
-            arm not in AVAILABLE_COMPARISON_ARMS for arm in arms
+        if (
+            not arms
+            or len(set(arms)) != len(arms)
+            or any(arm not in AVAILABLE_COMPARISON_ARMS for arm in arms)
         ):
             raise ValueError(f"arms must be unique members of {AVAILABLE_COMPARISON_ARMS}")
         if max_model_calls < 1 or max_total_tokens < 1 or max_output_tokens < 1:
@@ -1640,22 +1746,16 @@ class ComparisonBenchmarkRunner:
         self.arm_order_seed = arm_order_seed
         self.circuit_breaker_threshold = circuit_breaker_threshold
         self.split_provenance = (
-            json.loads(json.dumps(split_provenance))
-            if split_provenance is not None
-            else None
+            json.loads(json.dumps(split_provenance)) if split_provenance is not None else None
         )
         self.repository_source_state: dict[str, Any] | None = None
         self.continuation_source_record: dict[str, Any] | None = None
         self.legacy_source_transition = False
         self.run_spec_document = (
-            json.loads(json.dumps(run_spec_document))
-            if run_spec_document is not None
-            else None
+            json.loads(json.dumps(run_spec_document)) if run_spec_document is not None else None
         )
         self.run_spec_provenance = (
-            json.loads(json.dumps(run_spec_provenance))
-            if run_spec_provenance is not None
-            else None
+            json.loads(json.dumps(run_spec_provenance)) if run_spec_provenance is not None else None
         )
         self.run_spec_bytes = bytes(run_spec_bytes) if run_spec_bytes is not None else None
         self.run_spec_anchor: RunSpecAnchor | None = None
@@ -1676,9 +1776,7 @@ class ComparisonBenchmarkRunner:
         ):
             raise ValueError("run spec document, provenance, and bytes must be provided together")
         if self.run_spec_bytes is not None:
-            parsed_document, parsed_provenance = parse_pilot_run_spec_bytes(
-                self.run_spec_bytes
-            )
+            parsed_document, parsed_provenance = parse_pilot_run_spec_bytes(self.run_spec_bytes)
             if (
                 parsed_document != self.run_spec_document
                 or parsed_provenance != self.run_spec_provenance
@@ -1741,11 +1839,15 @@ class ComparisonBenchmarkRunner:
             (task.task_id for task in tasks),
             authorized_manifest_id=(
                 self.run_spec_anchor.split_manifest_id
-                if self.run_spec_anchor is not None
-                and self.run_spec_anchor.launchable
+                if self.run_spec_anchor is not None and self.run_spec_anchor.launchable
                 else None
             ),
         )
+        if self.config.max_retries != 0:
+            raise HarnessError(
+                "v29 comparisons require request retries to be disabled so provider "
+                "no-score rows retain exact HTTP-attempt evidence"
+            )
         self._manifest(tasks)
         self._prepare_repository_source_state()
         ensure_strict_code_isolation((self.config.api_key,))
@@ -1757,23 +1859,16 @@ class ComparisonBenchmarkRunner:
         if self.split_provenance is not None and (
             not verify_trace2skill_split_provenance(self.split_provenance)
             or self.split_provenance["task_count"] != len(tasks)
-            or self.split_provenance["task_ids_sha256"]
-            != _text_sha256(execution_task_ids)
-            or self.split_provenance["dataset_json_sha256"]
-            != dataset_manifest_sha256
+            or self.split_provenance["task_ids_sha256"] != _text_sha256(execution_task_ids)
+            or self.split_provenance["dataset_json_sha256"] != dataset_manifest_sha256
         ):
-            raise HarnessError(
-                "Comparison tasks or dataset do not match frozen split provenance"
-            )
+            raise HarnessError("Comparison tasks or dataset do not match frozen split provenance")
         split_manifest_id = (
             self.split_provenance.get("manifest_id")
             if isinstance(self.split_provenance, dict)
             else None
         )
-        if (
-            split_manifest_id in protected_run_spec_split_ids()
-            and self.run_spec_document is None
-        ):
+        if split_manifest_id in protected_run_spec_split_ids() and self.run_spec_document is None:
             raise HarnessError("The frozen split requires its code-anchored run spec")
         if self.run_spec_document is not None:
             anchor = resolve_run_spec_anchor(self.run_spec_provenance)
@@ -1797,8 +1892,7 @@ class ComparisonBenchmarkRunner:
             if not verify_pilot_run_spec_provenance(self.run_spec_provenance):
                 raise HarnessError("Pilot run spec provenance does not match its code anchor")
         skills = [
-            {"name": skill.name, "sha256": skill.sha256}
-            for skill in self.skill_registry.discover()
+            {"name": skill.name, "sha256": skill.sha256} for skill in self.skill_registry.discover()
         ]
         arm_orders = _balanced_arm_orders(
             [task.task_id for task in tasks], self.arm_order_seed, self.arms
@@ -1841,9 +1935,7 @@ class ComparisonBenchmarkRunner:
                 for task in tasks
             ],
             "arms": list(self.arms),
-            "arm_display_names": {
-                arm: COMPARISON_ARM_DISPLAY_NAMES[arm] for arm in self.arms
-            },
+            "arm_display_names": {arm: COMPARISON_ARM_DISPLAY_NAMES[arm] for arm in self.arms},
             "arm_order_seed": self.arm_order_seed,
             "arm_order_policy": "seeded_hash_rank_cyclic_counterbalance_v1",
             "arm_order": arm_orders,
@@ -1864,17 +1956,13 @@ class ComparisonBenchmarkRunner:
                 self.arms,
                 protocol_version=COMPARISON_PROTOCOL_VERSION,
             ),
-            "allowed_observed_terminals": _allowed_observed_terminals_policy(
-                self.stage_turn_caps
-            ),
+            "allowed_observed_terminals": _allowed_observed_terminals_policy(self.stage_turn_caps),
             "forced_prefix_wire_policy": {
                 "tool_choice": "explicit_function",
                 "available_tools": "forced tool only",
                 "terminal_tool_available": False,
             },
-            "stage_turn_caps": {
-                arm: dict(self.stage_turn_caps[arm]) for arm in self.arms
-            },
+            "stage_turn_caps": {arm: dict(self.stage_turn_caps[arm]) for arm in self.arms},
             "turn_cap_policy": {
                 "version": COMPARISON_TURN_CAP_POLICY_VERSION,
                 "max_turns_per_arm": self.max_turns_per_arm,
@@ -1895,9 +1983,7 @@ class ComparisonBenchmarkRunner:
             },
             "deterministic_profile": {
                 "enabled": bool({"profile", "ours"} & set(self.arms)),
-                "consumed_by_arms": [
-                    arm for arm in self.arms if arm in {"profile", "ours"}
-                ],
+                "consumed_by_arms": [arm for arm in self.arms if arm in {"profile", "ours"}],
                 "schema_version": DETERMINISTIC_PROFILE_SCHEMA_VERSION,
                 "bounds": dict(DETERMINISTIC_PROFILE_BOUNDS),
                 "task_profile_sha256": profile_evidence,
@@ -1930,9 +2016,7 @@ class ComparisonBenchmarkRunner:
                 "request_pacing_first_attempt_immediate": True,
                 "automatic_retry_policy": "delivery-aware-allowlist-v1",
                 "safe_retry_http_statuses": sorted(SAFE_RETRY_HTTP_STATUSES),
-                "safe_automatic_retry_reasons": sorted(
-                    SAFE_AUTOMATIC_RETRY_REASONS
-                ),
+                "safe_automatic_retry_reasons": sorted(SAFE_AUTOMATIC_RETRY_REASONS),
                 "overload_retry_min_seconds": OVERLOAD_RETRY_MIN_SECONDS,
                 "capacity_retry_delay_policy": (
                     "max-valid-retry-after-and-overload-min-then-global-cap"
@@ -1942,9 +2026,7 @@ class ComparisonBenchmarkRunner:
                 "read_timeout_policy": "fail-closed-no-replay",
                 "http_408_policy": "fail-closed-no-replay",
                 "stream_interruption_policy": "fail-closed-no-replay",
-                "request_attempt_telemetry": (
-                    "delivery-safe-retry-ids-headers-backoff-pacing-v4"
-                ),
+                "request_attempt_telemetry": ("delivery-safe-retry-ids-headers-backoff-pacing-v4"),
                 "store_responses": self.config.store_responses,
                 "generation": self.config.generation_dict(),
                 "max_model_calls": self.max_model_calls,
@@ -1987,9 +2069,7 @@ class ComparisonBenchmarkRunner:
                     )
                 mutable_source_fields = {"harness_source", "runtime", "repository_source"}
                 actual_static = {
-                    key: value
-                    for key, value in actual.items()
-                    if key not in mutable_source_fields
+                    key: value for key, value in actual.items() if key not in mutable_source_fields
                 }
                 expected_static = {
                     key: value
@@ -2040,9 +2120,10 @@ class ComparisonBenchmarkRunner:
         if self.run_spec_bytes is None:
             return
         if self.run_spec_copy_path.is_file():
-            if _regular_file_bytes(
-                self.run_spec_copy_path, label="saved pilot run spec"
-            ) != self.run_spec_bytes:
+            if (
+                _regular_file_bytes(self.run_spec_copy_path, label="saved pilot run spec")
+                != self.run_spec_bytes
+            ):
                 raise HarnessError("Saved pilot run spec does not match the current run spec")
             return
         if self.run_spec_copy_path.exists():
@@ -2067,8 +2148,7 @@ class ComparisonBenchmarkRunner:
         if duplicate_keys:
             duplicates = ", ".join(sorted(duplicate_keys))
             raise HarnessError(
-                "Refusing to resume comparison with duplicate arm-task rows: "
-                f"{duplicates}"
+                f"Refusing to resume comparison with duplicate arm-task rows: {duplicates}"
             )
         return latest
 
@@ -2089,13 +2169,9 @@ class ComparisonBenchmarkRunner:
             path = path.with_name(f"{arm}-{uuid.uuid4().hex[:8]}")
         return path
 
-    def _write_inflight(
-        self, task_id: str, arm: str, *, comparison_manifest_sha256: str
-    ) -> None:
+    def _write_inflight(self, task_id: str, arm: str, *, comparison_manifest_sha256: str) -> None:
         if self.inflight_path.exists():
-            raise HarnessError(
-                "Refusing to sample with an unresolved in-flight arm-task marker"
-            )
+            raise HarnessError("Refusing to sample with an unresolved in-flight arm-task marker")
         _atomic_write_json(
             self.inflight_path,
             {
@@ -2137,8 +2213,7 @@ class ComparisonBenchmarkRunner:
             set(marker) != required
             or marker.get("schema_version") != 1
             or marker.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION
-            or marker.get("comparison_manifest_sha256")
-            != comparison_manifest_sha256
+            or marker.get("comparison_manifest_sha256") != comparison_manifest_sha256
             or marker.get("run_spec_provenance") != self.run_spec_provenance
             or marker.get("task_id") not in allowed_tasks
             or marker.get("arm") not in self.arms
@@ -2162,8 +2237,7 @@ class ComparisonBenchmarkRunner:
         matching = [
             row
             for row in rows
-            if row.get("task_id") == marker["task_id"]
-            and row.get("arm") == marker["arm"]
+            if row.get("task_id") == marker["task_id"] and row.get("arm") == marker["arm"]
         ]
         if not matching:
             return False
@@ -2187,9 +2261,7 @@ class ComparisonBenchmarkRunner:
         if not self.interrupted_seals_path.exists():
             return []
         document = _strict_json_document(
-            _regular_file_bytes(
-                self.interrupted_seals_path, label="interrupted arm-task seals"
-            ),
+            _regular_file_bytes(self.interrupted_seals_path, label="interrupted arm-task seals"),
             label="interrupted arm-task seals",
         )
         seals = document.get("seals")
@@ -2242,10 +2314,8 @@ class ComparisonBenchmarkRunner:
                 or seal.get("schema_version") != 1
                 or task_id not in allowed_tasks
                 or arm not in self.arms
-                or seal.get("comparison_protocol_version")
-                != COMPARISON_PROTOCOL_VERSION
-                or seal.get("comparison_manifest_sha256")
-                != comparison_manifest_sha256
+                or seal.get("comparison_protocol_version") != COMPARISON_PROTOCOL_VERSION
+                or seal.get("comparison_manifest_sha256") != comparison_manifest_sha256
                 or seal.get("split_provenance") != self.split_provenance
                 or seal.get("run_spec_provenance") != self.run_spec_provenance
                 or seal.get("status") != "interrupted"
@@ -2291,10 +2361,7 @@ class ComparisonBenchmarkRunner:
         ):
             raise HarnessError("Cannot seal against a damaged results journal")
         key = _run_key(str(marker["task_id"]), str(marker["arm"]))
-        if any(
-            _run_key(str(row.get("task_id")), str(row.get("arm"))) == key
-            for row in existing
-        ):
+        if any(_run_key(str(row.get("task_id")), str(row.get("arm"))) == key for row in existing):
             raise HarnessError("In-flight arm-task already has a terminal result row")
         existing_seals = self._read_interrupted_seals()
         existing_seal = next(
@@ -2371,8 +2438,7 @@ class ComparisonBenchmarkRunner:
         comparison_manifest_sha256: str,
     ) -> dict[str, Any]:
         if len(comparison_manifest_sha256) != 64 or any(
-            character not in "0123456789abcdef"
-            for character in comparison_manifest_sha256
+            character not in "0123456789abcdef" for character in comparison_manifest_sha256
         ):
             raise ValueError("comparison_manifest_sha256 must be a lowercase SHA-256")
         started_at = datetime.now(timezone.utc)
@@ -2421,9 +2487,7 @@ class ComparisonBenchmarkRunner:
             reason = termination.get("reason") if isinstance(termination, dict) else None
             if reason in {"max_model_calls", "max_total_tokens"}:
                 if budget.deadline is not None and monotonic() >= budget.deadline:
-                    raise AgentTimeoutError(
-                        f"Agent exceeded the task timeout during {stage}"
-                    )
+                    raise AgentTimeoutError(f"Agent exceeded the task timeout during {stage}")
                 return
             budget.ensure_within_time(stage=stage)
 
@@ -2470,9 +2534,7 @@ class ComparisonBenchmarkRunner:
                 )
             except AgentExecutionFailure as exc:
                 if exc.reason not in AGENT_EXECUTION_FAILURE_REASONS:
-                    raise HarnessError(
-                        "Agent execution failure used an unknown reason"
-                    ) from exc
+                    raise HarnessError("Agent execution failure used an unknown reason") from exc
                 result = exc.agent_result
                 if result is None or not callable(getattr(result, "to_dict", None)):
                     raise HarnessError(
@@ -2511,16 +2573,12 @@ class ComparisonBenchmarkRunner:
                     "output_workbook": str(session.workbook_path),
                     "output_sha256": _sha256(session.workbook_path),
                     "outcome_kind": (
-                        "scored"
-                        if execution_failure is None
-                        else "model_execution_failure"
+                        "scored" if execution_failure is None else "model_execution_failure"
                     ),
                 }
             )
             if execution_failure is not None:
-                safe_error = str(execution_failure).replace(
-                    self.config.api_key, "[REDACTED]"
-                )
+                safe_error = str(execution_failure).replace(self.config.api_key, "[REDACTED]")
                 row.update(
                     {
                         "error": safe_error,
@@ -2625,16 +2683,12 @@ class ComparisonBenchmarkRunner:
                     row.update(
                         {
                             "agent_failure_stage": effective_exc.agent_stage,
-                            "infrastructure_failure_tool": (
-                                effective_exc.failed_tool
-                            ),
+                            "infrastructure_failure_tool": (effective_exc.failed_tool),
                         }
                     )
                 if execution_failure is not None:
                     row["prior_model_execution_failure"] = {
-                        "error": str(execution_failure).replace(
-                            self.config.api_key, "[REDACTED]"
-                        ),
+                        "error": str(execution_failure).replace(self.config.api_key, "[REDACTED]"),
                         "error_type": type(execution_failure).__name__,
                         "model_failure_reason": execution_failure.reason,
                     }
@@ -2659,25 +2713,40 @@ class ComparisonBenchmarkRunner:
                 )
                 if execution_failure is not None:
                     row["prior_model_execution_failure"] = {
-                        "error": str(execution_failure).replace(
-                            self.config.api_key, "[REDACTED]"
-                        ),
+                        "error": str(execution_failure).replace(self.config.api_key, "[REDACTED]"),
                         "error_type": type(execution_failure).__name__,
                         "model_failure_reason": execution_failure.reason,
                     }
             elif isinstance(effective_exc, ProviderError):
+                if session is None or not session.workbook_path.is_file():
+                    raise HarnessError(
+                        "Provider failure omitted the managed workbook artifact"
+                    ) from effective_exc
+                provider_error = effective_exc.public_dict(secrets=(self.config.api_key,))
+                provider_error["retryable"] = bool(effective_exc.retryable)
+                provider_category = (
+                    "provider_transient"
+                    if effective_exc.retryable
+                    else "provider_fatal"
+                    if effective_exc.global_fatal
+                    else "provider_task"
+                )
                 row.update(
                     {
+                        "outcome_kind": "infrastructure_failure",
+                        "score_available": False,
+                        "infrastructure_failure_stage": (PROVIDER_INFRASTRUCTURE_FAILURE_STAGE),
+                        "provider_failure_reason": provider_category,
+                        "replay_permitted": False,
                         "error_retryable": bool(effective_exc.safe_to_retry),
-                        "error_category": (
-                            "provider_transient"
-                            if effective_exc.retryable
-                            else "provider_fatal"
-                            if effective_exc.global_fatal
-                            else "provider_task"
-                        ),
-                        "provider_error": effective_exc.public_dict(
-                            secrets=(self.config.api_key,)
+                        "error_category": provider_category,
+                        "provider_error": provider_error,
+                        "output_workbook": str(session.workbook_path),
+                        "output_sha256": _sha256(session.workbook_path),
+                        "provider_request_audit": _provider_request_audit_evidence(
+                            provider_error,
+                            budget.to_dict(),
+                            request_retries=self.config.max_retries,
                         ),
                     }
                 )
@@ -2706,15 +2775,13 @@ class ComparisonBenchmarkRunner:
                                 "recalculation_failure_reason": row.get(
                                     "recalculation_failure_reason"
                                 ),
-                                "agent_failure_stage": row.get(
-                                    "agent_failure_stage"
-                                ),
+                                "agent_failure_stage": row.get("agent_failure_stage"),
                                 "infrastructure_failure_tool": row.get(
                                     "infrastructure_failure_tool"
                                 ),
-                                "scoring_failure_reason": row.get(
-                                    "scoring_failure_reason"
-                                ),
+                                "scoring_failure_reason": row.get("scoring_failure_reason"),
+                                "provider_failure_reason": row.get("provider_failure_reason"),
+                                "provider_request_audit": row.get("provider_request_audit"),
                                 "recalculation": row.get("recalculation"),
                             },
                         )
@@ -2744,9 +2811,7 @@ class ComparisonBenchmarkRunner:
             allowed = {RUN_SPEC_COPY_FILENAME} if self.run_spec_document is not None else set()
             unexpected = {path.name for path in self.output_dir.iterdir()} - allowed
             if unexpected:
-                raise HarnessError(
-                    "Refusing to start a fresh comparison in a non-empty directory"
-                )
+                raise HarnessError("Refusing to start a fresh comparison in a non-empty directory")
         with self._exclusive_lock():
             self._prepare_run_spec_copy()
             self._prepare_manifest(tasks)
@@ -2754,8 +2819,7 @@ class ComparisonBenchmarkRunner:
             _, invalid_rows = _strict_jsonl_rows(self.results_path)
             if invalid_rows or (raw_results and not raw_results.endswith(b"\n")):
                 raise HarnessError(
-                    "Refusing to resume comparison with a damaged or non-terminated "
-                    "results journal"
+                    "Refusing to resume comparison with a damaged or non-terminated results journal"
                 )
             manifest_sha256 = _manifest_file_sha256(self.manifest_path)
             self.continuation_source_record = self._prepare_continuation_source(
@@ -2800,8 +2864,7 @@ class ComparisonBenchmarkRunner:
                         f"from the current manifest: {task_id}::{arm}"
                     )
                 if row.get("continuation_source") != self.continuation_source_record and not (
-                    self.legacy_source_transition
-                    and row.get("continuation_source") is None
+                    self.legacy_source_transition and row.get("continuation_source") is None
                 ):
                     raise HarnessError(
                         "Refusing to resume comparison with a result row not bound to the "
@@ -2821,24 +2884,20 @@ class ComparisonBenchmarkRunner:
                 [task.task_id for task in tasks], self.arm_order_seed, self.arms
             )
             exhausted_transient = sum(
-                row.get("error_category") == "provider_transient"
-                for row in latest.values()
+                row.get("error_category") == "provider_transient" for row in latest.values()
             )
             fatal_provider_errors = sum(
-                row.get("error_category") == "provider_fatal"
-                for row in latest.values()
+                row.get("error_category") == "provider_fatal" for row in latest.values()
             )
             routing_protocol_errors = sum(
-                row.get("error_category") == "routing_protocol"
-                for row in latest.values()
+                row.get("error_category") == "routing_protocol" for row in latest.values()
             )
             recalculation_infrastructure_errors = sum(
                 row.get("error_category") == "recalculation_infrastructure"
                 for row in latest.values()
             )
             scoring_infrastructure_errors = sum(
-                row.get("error_category") == "scoring_infrastructure"
-                for row in latest.values()
+                row.get("error_category") == "scoring_infrastructure" for row in latest.values()
             )
             circuit_breaker = bool(
                 fatal_provider_errors
@@ -2921,12 +2980,8 @@ class ComparisonBenchmarkRunner:
             summary["exhausted_transient_arm_tasks"] = exhausted_transient
             summary["fatal_provider_arm_tasks"] = fatal_provider_errors
             summary["routing_protocol_arm_tasks"] = routing_protocol_errors
-            summary["recalculation_infrastructure_arm_tasks"] = (
-                recalculation_infrastructure_errors
-            )
-            summary["scoring_infrastructure_arm_tasks"] = (
-                scoring_infrastructure_errors
-            )
+            summary["recalculation_infrastructure_arm_tasks"] = recalculation_infrastructure_errors
+            summary["scoring_infrastructure_arm_tasks"] = scoring_infrastructure_errors
             summary["circuit_breaker_threshold"] = self.circuit_breaker_threshold
             # Bind the official summary to a full read-only protocol audit. A
             # score alone is not evidence that the frozen resources and routes
@@ -2940,17 +2995,11 @@ class ComparisonBenchmarkRunner:
             )
             summary["protocol_audit_valid"] = protocol_audit["audit_valid"]
             summary["protocol_audit_reasons"] = protocol_audit["reasons"]
-            summary["protocol_audit_manifest_sha256"] = protocol_audit[
-                "manifest_sha256"
-            ]
-            summary["protocol_audit_results_sha256"] = protocol_audit[
-                "results_sha256"
-            ]
+            summary["protocol_audit_manifest_sha256"] = protocol_audit["manifest_sha256"]
+            summary["protocol_audit_results_sha256"] = protocol_audit["results_sha256"]
             if not protocol_audit["audit_valid"]:
                 if "comparison_audit_failed" not in summary["inference_invalid_reasons"]:
-                    summary["inference_invalid_reasons"].append(
-                        "comparison_audit_failed"
-                    )
+                    summary["inference_invalid_reasons"].append("comparison_audit_failed")
                 summary["inference_valid"] = False
                 for pairwise in summary["pairwise"].values():
                     _invalidate_pairwise_inference(

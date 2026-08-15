@@ -6,10 +6,13 @@ from typing import Any
 LEGACY_AGENT_EXECUTION_FAILURE_REASONS = frozenset(
     {"edit_recovery_exhausted", "workbook_unchanged"}
 )
-AGENT_EXECUTION_FAILURE_REASONS = LEGACY_AGENT_EXECUTION_FAILURE_REASONS | {
+V28_AGENT_EXECUTION_FAILURE_REASONS = LEGACY_AGENT_EXECUTION_FAILURE_REASONS | {
     "budget_exhausted",
     "terminal_submission_invalid",
     "terminal_submission_truncated",
+}
+AGENT_EXECUTION_FAILURE_REASONS = V28_AGENT_EXECUTION_FAILURE_REASONS | {
+    "model_response_truncated",
 }
 MODEL_EXECUTION_BUDGET_TERMINATIONS = frozenset(
     {"max_model_calls", "max_total_tokens"}

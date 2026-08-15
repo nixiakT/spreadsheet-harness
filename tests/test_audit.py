@@ -5,6 +5,7 @@ import json
 import shutil
 import warnings
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,9 @@ from spreadsheet_harness.comparison import (
     V27_COMPARISON_CONFIGURATION_POLICIES,
     V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V27_COMPARISON_PROTOCOL_VERSION,
+    V28_COMPARISON_CONFIGURATION_POLICIES,
+    V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V28_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     _allowed_observed_terminals_policy,
     _stage_allowed_tools_policy,
@@ -110,6 +114,7 @@ def _fixture(
             "not-a-real-key",
             "test-model",
             reasoning_effort="none",
+            max_retries=0,
         ),
         results,
         skill_registry=SkillRegistry([]),
@@ -257,6 +262,176 @@ def _fixture(
     }
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return results, task, row
+
+
+def _provider_no_score_fixture(
+    tmp_path: Path,
+) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
+    results, task, row = _fixture(tmp_path)
+    attempt = {
+        "attempt": 1,
+        "outcome": "error",
+        "error_type": "_AbsoluteRequestDeadlineExpired",
+        "phase": "total",
+        "status_code": None,
+        "retryable": True,
+        "safe_to_retry": False,
+        "safe_retry_reason": None,
+        "automatic_retry_scheduled": False,
+        "delivery_state": "ambiguous_post_send",
+        "api_protocol": "responses",
+        "endpoint": "/responses",
+    }
+    provider_error = {
+        "message": "Responses request exceeded its absolute 30-second deadline",
+        "retryable": True,
+        "status_code": None,
+        "retry_after_seconds": None,
+        "phase": "total",
+        "attempts": 1,
+        "elapsed_seconds": 30.0,
+        "global_fatal": False,
+        "safe_to_retry": False,
+        "safe_retry_reason": None,
+        "delivery_state": "ambiguous_post_send",
+        "attempt_history": [attempt],
+    }
+    provider_request_audit = {
+        "schema_version": 1,
+        "request_retries": 0,
+        "successful_model_calls": 3,
+        "failed_attempts": 1,
+        "known_http_attempts": 4,
+        "exact": True,
+    }
+    row.update(
+        {
+            "status": "error",
+            "outcome_kind": "infrastructure_failure",
+            "score_available": False,
+            "passed": False,
+            "error": provider_error["message"],
+            "error_type": "ProviderError",
+            "error_retryable": False,
+            "error_category": "provider_transient",
+            "infrastructure_failure_stage": "provider",
+            "provider_failure_reason": "provider_transient",
+            "replay_permitted": False,
+            "provider_error": provider_error,
+            "provider_request_audit": provider_request_audit,
+        }
+    )
+    for field in (
+        "agent",
+        "artifact_score_passed",
+        "comparison",
+    ):
+        row.pop(field, None)
+    trajectory = Path(row["run_dir"]) / "trajectory.jsonl"
+    trajectory.parent.mkdir(parents=True, exist_ok=True)
+    events: list[dict[str, Any]] = []
+    for turn, usage in enumerate(
+        (
+            {"input_tokens": 2, "output_tokens": 0, "total_tokens": 2},
+            {"input_tokens": 2, "output_tokens": 0, "total_tokens": 2},
+            {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+        ),
+        start=1,
+    ):
+        events.extend(
+            [
+                {
+                    "event": "model.requested",
+                    "payload": {"turn": turn, "stage": "solve"},
+                },
+                {
+                    "event": "model.responded",
+                    "payload": {
+                        "turn": turn,
+                        "stage": "solve",
+                        "usage": usage,
+                        "timing": {
+                            "attempts": 1,
+                            "attempt_history": [
+                                {
+                                    "attempt": 1,
+                                    "outcome": "success",
+                                    "api_protocol": "responses",
+                                    "endpoint": "/responses",
+                                }
+                            ],
+                        },
+                    },
+                },
+            ]
+        )
+    events.extend(
+        [
+            {
+                "event": "model.requested",
+                "payload": {"turn": 4, "stage": "solve"},
+            },
+            {
+                "event": "model.failed",
+                "payload": {
+                    "turn": 4,
+                    "stage": "solve",
+                    "provider_error": provider_error,
+                },
+            },
+            {
+                "event": "benchmark.not_evaluated",
+                "payload": {
+                    "task_id": task.task_id,
+                    "arm": row["arm"],
+                    "status": "error",
+                    "error_category": "provider_transient",
+                    "outcome_kind": "infrastructure_failure",
+                    "score_available": False,
+                    "infrastructure_failure_stage": "provider",
+                    "provider_failure_reason": "provider_transient",
+                    "provider_request_audit": provider_request_audit,
+                },
+            },
+        ]
+    )
+    trajectory.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "timestamp": "2026-08-15T00:00:00+00:00",
+                    "run_id": "provider-no-score",
+                    **event,
+                }
+            )
+            + "\n"
+            for event in events
+        ),
+        encoding="utf-8",
+    )
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+    return results, task, row
+
+
+def _enable_provider_no_score_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    select_contract = audit_module._select_audit_contract
+
+    def enabled(
+        manifest: dict[str, Any],
+        manifest_sha256: str | None,
+        reasons: list[str],
+    ) -> Any:
+        contract = select_contract(manifest, manifest_sha256, reasons)
+        return (
+            replace(contract, allow_provider_infrastructure_no_score=True)
+            if contract is not None
+            else None
+        )
+
+    monkeypatch.setattr(audit_module, "_select_audit_contract", enabled)
 
 
 def _set_final_model_execution_failure(row: dict[str, Any], message: str) -> None:
@@ -539,6 +714,42 @@ def _truncated_terminal_fixture(
         }
     )
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return results, task, row
+
+
+def _generic_truncated_response_fixture(
+    tmp_path: Path,
+) -> tuple[Path, SpreadsheetTask, dict[str, Any]]:
+    results, task, row = _truncated_terminal_fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["configuration"]["max_model_calls"] = 4
+    manifest["configuration"]["max_turns_per_arm"] = 4
+    manifest["stage_turn_caps"]["bare"]["solve"] = 4
+    manifest["turn_cap_policy"]["max_turns_per_arm"] = 4
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    row = json.loads(json.dumps(row))
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    row["max_model_calls"] = 4
+    row["max_turns_per_arm"] = 4
+    row["stage_turn_caps"] = {"solve": 4}
+    stage = row["agent"]["stages"][-1]
+    stage["max_turns"] = 4
+    for budget in (row["budget"], row["agent"]["budget"], stage["agent"]["budget"]):
+        budget["limit"]["model_calls"] = 4
+    message = "Model response was truncated by the provider output limit."
+    stage["observed_terminal_tool"] = "model_response_length"
+    stage["agent"]["final_text"] = message
+    stage["agent"]["observed_terminal_tool"] = "model_response_length"
+    row["agent"]["final_text"] = message
+    row["agent"]["observed_terminal_tool"] = "model_response_length"
+    row["error"] = message
+    row["model_failure_reason"] = "model_response_truncated"
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
     return results, task, row
 
 
@@ -1220,6 +1431,112 @@ def test_v28_audit_accepts_reproduced_scoring_infrastructure_no_score_row(
     assert audited["score_available"] is False
     assert audited["scorer_infrastructure_reproduced"] is True
     assert "artifact_reopen_failed" not in audited["reasons"]
+
+
+def test_audit_accepts_provider_infrastructure_no_score_with_exact_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, task, _ = _provider_no_score_fixture(tmp_path)
+    _enable_provider_no_score_contract(monkeypatch)
+
+    summary = audit_comparison(results, [task])
+
+    audited = summary["rows"][0]
+    assert summary["audit_valid"] is True, (summary["reasons"], audited)
+    assert summary["journal_integrity_valid"] is True
+    assert summary["study_complete"] is False
+    assert summary["inference_valid"] is False
+    assert summary["inference_invalid_reasons"] == [
+        "provider_infrastructure_failure"
+    ]
+    assert summary["known_provider_infrastructure_failure_rows"] == 1
+    assert summary["provider_infrastructure_failure_reasons"] == {
+        "provider_transient": 1
+    }
+    assert summary["known_recalculation_infrastructure_failure_rows"] == 0
+    assert summary["known_scoring_infrastructure_failure_rows"] == 0
+    assert summary["known_passed_rows"] == 0
+    assert summary["known_failed_rows"] == 0
+    assert audited["audit_valid"] is True
+    assert audited["outcome_kind"] == "infrastructure_failure"
+    assert audited["infrastructure_failure_stage"] == "provider"
+    assert audited["provider_failure_reason"] == "provider_transient"
+    assert audited["score_available"] is False
+    assert len(audited["trajectory_sha256"]) == 64
+
+
+def test_v28_contract_does_not_retroactively_accept_provider_no_score() -> None:
+    assert (
+        audit_module._V28_AUDIT_CONTRACT.allow_provider_infrastructure_no_score
+        is False
+    )
+
+
+def test_v29_contract_enables_new_failure_semantics_only_for_current_protocol() -> None:
+    assert audit_module._V29_AUDIT_CONTRACT.protocol_version == (
+        COMPARISON_PROTOCOL_VERSION
+    )
+    assert audit_module._V29_AUDIT_CONTRACT.allow_generic_response_truncation is True
+    assert (
+        audit_module._V29_AUDIT_CONTRACT.allow_provider_infrastructure_no_score
+        is True
+    )
+    assert audit_module._V28_AUDIT_CONTRACT.allow_generic_response_truncation is False
+    assert (
+        audit_module._V28_AUDIT_CONTRACT.allow_provider_infrastructure_no_score
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected_reason"),
+    [
+        ("delivery_safety", "provider_infrastructure_evidence_invalid"),
+        ("attempt_total", "provider_request_attempt_audit_invalid"),
+        ("trajectory", "provider_trajectory_evidence_invalid"),
+        ("trajectory_accounting", "provider_trajectory_accounting_invalid"),
+        ("artifact", "artifact_hash_mismatch"),
+    ],
+)
+def test_audit_rejects_tampered_provider_infrastructure_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+    expected_reason: str,
+) -> None:
+    results, task, row = _provider_no_score_fixture(tmp_path)
+    _enable_provider_no_score_contract(monkeypatch)
+    if tamper == "delivery_safety":
+        row["provider_error"]["safe_to_retry"] = True
+    elif tamper == "attempt_total":
+        row["provider_request_audit"]["known_http_attempts"] += 1
+    elif tamper in {"trajectory", "trajectory_accounting"}:
+        trajectory = Path(row["run_dir"]) / "trajectory.jsonl"
+        events = [
+            json.loads(line)
+            for line in trajectory.read_text(encoding="utf-8").splitlines()
+        ]
+        if tamper == "trajectory":
+            events[-1]["payload"]["provider_failure_reason"] = "provider_task"
+        else:
+            events[1]["payload"]["usage"]["total_tokens"] += 1
+        trajectory.write_text(
+            "".join(json.dumps(event) + "\n" for event in events),
+            encoding="utf-8",
+        )
+    else:
+        Path(row["output_workbook"]).write_bytes(b"tampered")
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert summary["journal_integrity_valid"] is False
+    assert expected_reason in summary["rows"][0]["reasons"]
 
 
 def test_audit_sheet_inventory_schema_rejects_duplicate_names_and_no_visible_sheet() -> None:
@@ -2136,6 +2453,85 @@ def test_v26_audit_accepts_exact_truncated_terminal_evidence(tmp_path: Path) -> 
     )
 
 
+def test_v29_audit_accepts_generic_output_limit_as_known_model_failure(
+    tmp_path: Path,
+) -> None:
+    results, task, _ = _generic_truncated_response_fixture(tmp_path)
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True, summary["reasons"]
+    assert summary["study_complete"] is True
+    assert summary["inference_valid"] is True
+    assert summary["known_failed_rows"] == 1
+    assert summary["known_model_execution_failure_rows"] == 1
+    assert summary["rows"][0]["outcome_passed"] is False
+    assert summary["rows"][0]["model_failure_reason"] == (
+        "model_response_truncated"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("agent", "terminal_response", "finish_reason"), "stop"),
+        (("agent", "terminal_response", "discarded_message", "sha256"), "x" * 64),
+        (("agent", "stages", 0, "agent", "observed_terminal_tool"), "submit_result"),
+        (("agent", "stages", 0, "agent", "terminal_submissions"), 1),
+    ],
+)
+def test_v29_audit_rejects_tampered_generic_output_limit_evidence(
+    tmp_path: Path,
+    path: tuple[str | int, ...],
+    value: Any,
+) -> None:
+    results, task, row = _generic_truncated_response_fixture(tmp_path)
+    row = json.loads(json.dumps(row))
+    target: Any = row
+    for component in path[:-1]:
+        target = target[component]
+    target[path[-1]] = value
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "output_limit_response_evidence_invalid")
+
+
+def test_v28_contract_rejects_generic_output_limit_downgrade(tmp_path: Path) -> None:
+    results, task, row = _generic_truncated_response_fixture(tmp_path)
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V28_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V28_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V28_COMPARISON_CONFIGURATION_POLICIES)
+    for field in set(COMPARISON_CONFIGURATION_POLICIES) - set(
+        V28_COMPARISON_CONFIGURATION_POLICIES
+    ):
+        manifest["configuration"].pop(field, None)
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
+        manifest["stage_turn_caps"],
+        protocol_version=V28_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_protocol_version"] = V28_COMPARISON_PROTOCOL_VERSION
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert _row_reason(summary, "model_execution_failure_reason_invalid")
+    assert audit_module._V28_AUDIT_CONTRACT.allow_generic_response_truncation is False
+
+
 def test_v26_audit_accepts_budget_precedence_with_truncated_response(
     tmp_path: Path,
 ) -> None:
@@ -2184,7 +2580,7 @@ def test_v26_audit_rejects_tampered_budget_precedence_truncation(
     summary = audit_comparison(results, [task])
 
     assert summary["audit_valid"] is False
-    assert _row_reason(summary, "terminal_submission_truncated_evidence_invalid")
+    assert _row_reason(summary, "output_limit_response_evidence_invalid")
 
 
 def test_v26_audit_accepts_empty_ack_terminal_response(tmp_path: Path) -> None:
@@ -2408,7 +2804,7 @@ def test_v26_audit_rejects_tampered_truncated_terminal_evidence(
     summary = audit_comparison(results, [task])
 
     assert summary["audit_valid"] is False
-    assert _row_reason(summary, "terminal_submission_truncated_evidence_invalid")
+    assert _row_reason(summary, "output_limit_response_evidence_invalid")
 
 
 def test_v26_audit_requires_derivable_forced_terminal_route_basis(
@@ -2424,7 +2820,7 @@ def test_v26_audit_requires_derivable_forced_terminal_route_basis(
     summary = audit_comparison(results, [task])
 
     assert summary["audit_valid"] is False
-    assert _row_reason(summary, "terminal_submission_truncated_evidence_invalid")
+    assert _row_reason(summary, "output_limit_response_evidence_invalid")
 
 
 def test_v26_audit_rejects_truncation_before_last_stage(tmp_path: Path) -> None:
@@ -2983,7 +3379,7 @@ def test_audit_requires_frozen_manifest_provenance(
     assert any(expected_fragment in reason for reason in summary["reasons"])
 
 
-def test_v28_audit_requires_manifest_source_to_match_active_checkout(
+def test_v29_audit_requires_manifest_source_to_match_active_checkout(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)
@@ -3071,6 +3467,46 @@ def test_v27_audit_accepts_historical_source_fingerprint(tmp_path: Path) -> None
     row["comparison_protocol_version"] = V27_COMPARISON_PROTOCOL_VERSION
     row["comparison_manifest_sha256"] = _sha256(path)
     (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is True
+
+
+def test_v28_audit_accepts_historical_source_fingerprint(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    path = results / "comparison-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V28_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V28_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V28_COMPARISON_CONFIGURATION_POLICIES)
+    for field in set(COMPARISON_CONFIGURATION_POLICIES) - set(
+        V28_COMPARISON_CONFIGURATION_POLICIES
+    ):
+        manifest["configuration"].pop(field, None)
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
+        manifest["stage_turn_caps"],
+        protocol_version=V28_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["stage_allowed_tools"] = _stage_allowed_tools_policy(
+        tuple(manifest["arms"]),
+        protocol_version=V28_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["harness_source"]["files"][0]["sha256"] = "0" * 64
+    combined = hashlib.sha256()
+    for entry in manifest["harness_source"]["files"]:
+        combined.update(entry["path"].encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(entry["sha256"].encode("ascii"))
+        combined.update(b"\n")
+    manifest["harness_source"]["sha256"] = combined.hexdigest()
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_protocol_version"] = V28_COMPARISON_PROTOCOL_VERSION
+    row["comparison_manifest_sha256"] = _sha256(path)
+    (results / "results.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
 
     summary = audit_comparison(results, [task])
 

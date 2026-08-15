@@ -16,6 +16,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from .agent import MODEL_RESPONSE_TRUNCATED_TERMINAL
 from .arms import COMPARISON_FORCED_TOOL_PREFIX_POLICY, comparison_stage_turn_caps
 from .benchmark import (
     SpreadsheetTask,
@@ -35,6 +36,9 @@ from .comparison import (
     LEGACY_COMPARISON_MANIFEST_SCHEMA_VERSION,
     LEGACY_COMPARISON_PROTOCOL_VERSION,
     LEGACY_PILOT_MANIFEST_SHA256,
+    PROVIDER_INFRASTRUCTURE_CATEGORIES,
+    PROVIDER_INFRASTRUCTURE_FAILURE_STAGE,
+    PROVIDER_REQUEST_AUDIT_SCHEMA_VERSION,
     RUN_SPEC_COPY_FILENAME,
     TERMINAL_SUBMISSION_TRUNCATED_OBSERVED,
     V24_COMPARISON_CONFIGURATION_POLICIES,
@@ -49,6 +53,9 @@ from .comparison import (
     V27_COMPARISON_CONFIGURATION_POLICIES,
     V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V27_COMPARISON_PROTOCOL_VERSION,
+    V28_COMPARISON_CONFIGURATION_POLICIES,
+    V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V28_COMPARISON_PROTOCOL_VERSION,
     _allowed_observed_terminals_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
@@ -72,6 +79,7 @@ from .render import (
     openpyxl_worksheet_view,
     sheet_inventory_identity,
 )
+from .trajectory import read_trajectory
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,8 @@ class _AuditProtocolContract:
     require_truncated_terminal_evidence: bool = False
     require_accepted_terminal_evidence: bool = False
     require_recalculation_integrity: bool = False
+    allow_generic_response_truncation: bool = False
+    allow_provider_infrastructure_no_score: bool = False
 
 
 _V23_AUDIT_CONTRACT = _AuditProtocolContract(
@@ -161,10 +171,27 @@ _V27_AUDIT_CONTRACT = _AuditProtocolContract(
     require_accepted_terminal_evidence=True,
 )
 _V28_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=V28_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V28_COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=_V27_AUDIT_CONTRACT.allowed_model_failure_reasons,
+    require_v24_outcome_fields=True,
+    strict_current_source=False,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
+    require_truncated_terminal_evidence=True,
+    require_accepted_terminal_evidence=True,
+    require_recalculation_integrity=True,
+)
+_V29_AUDIT_CONTRACT = _AuditProtocolContract(
     protocol_version=COMPARISON_PROTOCOL_VERSION,
     manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
     configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
-    allowed_model_failure_reasons=_V27_AUDIT_CONTRACT.allowed_model_failure_reasons,
+    allowed_model_failure_reasons=(
+        _V28_AUDIT_CONTRACT.allowed_model_failure_reasons
+        | {"model_response_truncated"}
+    ),
     require_v24_outcome_fields=True,
     strict_current_source=True,
     allow_budget_exhaustion_evidence=True,
@@ -173,6 +200,8 @@ _V28_AUDIT_CONTRACT = _AuditProtocolContract(
     require_truncated_terminal_evidence=True,
     require_accepted_terminal_evidence=True,
     require_recalculation_integrity=True,
+    allow_generic_response_truncation=True,
+    allow_provider_infrastructure_no_score=True,
 )
 
 
@@ -185,6 +214,11 @@ def _select_audit_contract(
         manifest.get("comparison_protocol_version"),
         manifest.get("schema_version"),
     )
+    if identity == (
+        _V29_AUDIT_CONTRACT.protocol_version,
+        _V29_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V29_AUDIT_CONTRACT
     if identity == (
         _V28_AUDIT_CONTRACT.protocol_version,
         _V28_AUDIT_CONTRACT.manifest_schema_version,
@@ -225,6 +259,7 @@ def _select_audit_contract(
         _V26_AUDIT_CONTRACT.manifest_schema_version,
         _V27_AUDIT_CONTRACT.manifest_schema_version,
         _V28_AUDIT_CONTRACT.manifest_schema_version,
+        _V29_AUDIT_CONTRACT.manifest_schema_version,
     }:
         _add_reason(reasons, "comparison_manifest_schema_mismatch")
     if manifest.get("comparison_protocol_version") not in {
@@ -234,6 +269,7 @@ def _select_audit_contract(
         _V26_AUDIT_CONTRACT.protocol_version,
         _V27_AUDIT_CONTRACT.protocol_version,
         _V28_AUDIT_CONTRACT.protocol_version,
+        _V29_AUDIT_CONTRACT.protocol_version,
     }:
         _add_reason(reasons, "comparison_manifest_protocol_mismatch")
     return None
@@ -661,6 +697,306 @@ def _v26_truncated_terminal_evidence_valid(
             and _non_negative_int(consumed) is not None
             and len(aggregate_token_timings) == len(aggregate_timings)
             and all(_non_negative_int(value) is not None for value in aggregate_token_timings)
+            and sum(aggregate_token_timings) == consumed
+            and sum(aggregate_token_timings[:-1]) < ceiling
+            and consumed > ceiling
+            and aggregate_token_timings[-1] == response_usage["total_tokens"]
+        ):
+            return False
+    return True
+
+
+def _discarded_output_metadata_valid(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "sha256",
+        "serialized_chars",
+        "serialized_bytes",
+        "top_level_field_count",
+        "content_item_count",
+        "tool_call_count",
+    }:
+        return False
+    counts = {
+        field: _non_negative_int(value.get(field))
+        for field in (
+            "serialized_chars",
+            "serialized_bytes",
+            "top_level_field_count",
+            "content_item_count",
+            "tool_call_count",
+        )
+    }
+    return bool(
+        _valid_sha256(value.get("sha256"))
+        and all(item is not None for item in counts.values())
+        and int(counts["serialized_chars"] or 0) > 0
+        and int(counts["serialized_bytes"] or 0)
+        >= int(counts["serialized_chars"] or 0)
+        and int(counts["top_level_field_count"] or 0) > 0
+    )
+
+
+def _v29_generic_output_limit_evidence_valid(
+    row: dict[str, Any],
+    agent: dict[str, Any],
+    stages: list[dict[str, Any]],
+    *,
+    budget_exhaustion: bool,
+) -> bool:
+    """Bind a delivered output limit to a committed, unexecuted partial response."""
+
+    budget = row.get("budget")
+    termination = budget.get("termination") if isinstance(budget, dict) else None
+    budget_precedence = bool(
+        row.get("model_failure_reason") == "budget_exhausted"
+        and budget_exhaustion
+        and isinstance(termination, dict)
+        and termination.get("reason") == "max_total_tokens"
+    )
+    terminal_submission = (
+        row.get("model_failure_reason") == "terminal_submission_truncated"
+    )
+    if (
+        row.get("model_failure_reason") != "model_response_truncated"
+        and not terminal_submission
+        and not budget_precedence
+    ):
+        return False
+    api_protocol = row.get("api_protocol")
+    if api_protocol not in {"chat-completions", "responses"} or row.get(
+        "provider_error"
+    ):
+        return False
+    if not stages or any("terminal_response" in stage for stage in stages):
+        return False
+
+    final_stage = stages[-1]
+    final_agent = final_stage.get("agent")
+    if not isinstance(final_agent, dict):
+        return False
+    if any(
+        stage.get("observed_terminal_tool")
+        in {
+            MODEL_RESPONSE_TRUNCATED_TERMINAL,
+            TERMINAL_SUBMISSION_TRUNCATED_OBSERVED,
+        }
+        or (
+            isinstance(stage.get("agent"), dict)
+            and isinstance(stage["agent"].get("terminal_response"), dict)
+            and stage["agent"]["terminal_response"].get("status") == "truncated"
+        )
+        for stage in stages[:-1]
+    ):
+        return False
+
+    terminal_response = final_agent.get("terminal_response")
+    if not isinstance(terminal_response, dict) or set(terminal_response) != {
+        "status",
+        "finish_reason",
+        "response_id",
+        "usage",
+        "timing",
+        "discarded_message",
+    }:
+        return False
+    response_id = terminal_response.get("response_id")
+    if not isinstance(response_id, str) or not response_id:
+        return False
+    if (
+        terminal_response.get("status") != "truncated"
+        or terminal_response.get("finish_reason") != "length"
+        or terminal_response != agent.get("terminal_response")
+        or response_id != final_agent.get("response_id")
+        or response_id != agent.get("response_id")
+    ):
+        return False
+
+    expected_observed_terminal = (
+        "budget_exhausted"
+        if budget_precedence
+        else TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+        if terminal_submission
+        else MODEL_RESPONSE_TRUNCATED_TERMINAL
+    )
+    terminal_tool = final_stage.get("terminal_tool")
+    if (
+        (terminal_submission and terminal_tool != "submit_result")
+        or
+        final_stage.get("observed_terminal_tool")
+        != expected_observed_terminal
+        or final_agent.get("observed_terminal_tool")
+        != expected_observed_terminal
+        or agent.get("observed_terminal_tool") != expected_observed_terminal
+        or final_agent.get("terminal_tool") != terminal_tool
+        or agent.get("terminal_tool") != terminal_tool
+        or final_stage.get("post_prefix_tool_choice") != "auto"
+        or final_agent.get("post_prefix_tool_choice") != "auto"
+        or agent.get("post_prefix_tool_choice") != "auto"
+        or final_agent.get("terminal_submissions") != 0
+        or final_agent.get("function_calls_total") != final_agent.get("tool_calls")
+    ):
+        return False
+    final_trace = final_agent.get("tool_trace")
+    if not isinstance(final_trace, list) or any(
+        isinstance(item, dict) and item.get("name") == "submit_result"
+        for item in final_trace
+    ):
+        return False
+    final_text = final_agent.get("final_text")
+    if (
+        not isinstance(final_text, str)
+        or not final_text
+        or agent.get("final_text") != final_text
+        or (
+            not budget_precedence
+            and not terminal_submission
+            and final_text
+            != "Model response was truncated by the provider output limit."
+        )
+    ):
+        return False
+
+    turns = _non_negative_int(final_agent.get("turns"))
+    max_turns = _non_negative_int(final_stage.get("max_turns"))
+    if turns is None or turns < 1 or max_turns is None or turns > max_turns:
+        return False
+    if terminal_submission:
+        forced_prefix = final_stage.get("forced_tool_prefix")
+        observed_prefix = final_stage.get("observed_forced_tool_prefix")
+        final_budget = final_agent.get("budget")
+        final_limit = (
+            final_budget.get("limit") if isinstance(final_budget, dict) else None
+        )
+        final_used = (
+            final_budget.get("used") if isinstance(final_budget, dict) else None
+        )
+        final_turn_basis = turns == max_turns
+        last_call_basis = bool(
+            isinstance(final_limit, dict)
+            and isinstance(final_used, dict)
+            and _non_negative_int(final_limit.get("model_calls")) is not None
+            and final_used.get("model_calls") == final_limit.get("model_calls")
+        )
+        if (
+            not isinstance(forced_prefix, list)
+            or observed_prefix != forced_prefix
+            or final_agent.get("forced_tool_prefix") != forced_prefix
+            or final_agent.get("observed_forced_tool_prefix") != forced_prefix
+            or not (final_turn_basis or last_call_basis)
+        ):
+            return False
+    stage_timings = final_agent.get("request_timings")
+    aggregate_timings = agent.get("request_timings")
+    if (
+        not isinstance(stage_timings, list)
+        or not stage_timings
+        or not isinstance(aggregate_timings, list)
+        or not aggregate_timings
+    ):
+        return False
+    final_timing = stage_timings[-1]
+    if not isinstance(final_timing, dict) or (
+        final_timing.get("turn") != turns
+        or final_timing.get("stage") != final_stage.get("name")
+        or aggregate_timings[-1] != final_timing
+    ):
+        return False
+
+    response_timing = terminal_response.get("timing")
+    expected_terminal_event = (
+        "chat.completion"
+        if api_protocol == "chat-completions"
+        else "response.incomplete"
+    )
+    expected_phase = (
+        "response_body"
+        if api_protocol == "chat-completions"
+        else "response_stream"
+    )
+    expected_endpoint = (
+        "/chat/completions"
+        if api_protocol == "chat-completions"
+        else "/responses"
+    )
+    if (
+        not isinstance(response_timing, dict)
+        or set(response_timing) != _TERMINAL_RESPONSE_TIMING_FIELDS
+        or response_timing
+        != {
+            field: final_timing.get(field)
+            for field in _TERMINAL_RESPONSE_TIMING_FIELDS
+        }
+        or response_timing.get("terminal_event") != expected_terminal_event
+        or response_timing.get("status_code") != 200
+        or response_timing.get("delivery_state") != "terminal_seen"
+    ):
+        return False
+    attempts = _non_negative_int(response_timing.get("attempts"))
+    attempt_history = response_timing.get("attempt_history")
+    if (
+        attempts is None
+        or attempts < 1
+        or not isinstance(attempt_history, list)
+        or len(attempt_history) != attempts
+        or not isinstance(attempt_history[-1], dict)
+    ):
+        return False
+    final_attempt = attempt_history[-1]
+    if any(
+        final_attempt.get(field) != expected
+        for field, expected in {
+            "attempt": attempts,
+            "outcome": "error",
+            "error_type": "ProviderOutputLimitError",
+            "phase": expected_phase,
+            "status_code": 200,
+            "terminal_event": expected_terminal_event,
+            "retryable": False,
+            "safe_to_retry": False,
+            "safe_retry_reason": None,
+            "automatic_retry_scheduled": False,
+            "automatic_retry_suppressed_reason": "delivery_not_known_safe",
+            "delivery_state": "terminal_seen",
+            "api_protocol": api_protocol,
+            "endpoint": expected_endpoint,
+        }.items()
+    ):
+        return False
+
+    response_usage = terminal_response.get("usage")
+    timing_usage = {
+        field: final_timing.get(field)
+        for field in ("input_tokens", "output_tokens", "total_tokens")
+    }
+    if (
+        not isinstance(response_usage, dict)
+        or set(response_usage) != set(timing_usage)
+        or _usage_triplet(response_usage) is None
+        or response_usage != timing_usage
+        or not _discarded_output_metadata_valid(
+            terminal_response.get("discarded_message")
+        )
+    ):
+        return False
+
+    if budget_precedence:
+        limit = budget.get("limit") if isinstance(budget, dict) else None
+        used = budget.get("used") if isinstance(budget, dict) else None
+        ceiling = limit.get("total_tokens") if isinstance(limit, dict) else None
+        consumed = used.get("total_tokens") if isinstance(used, dict) else None
+        aggregate_token_timings = [
+            timing.get("total_tokens")
+            for timing in aggregate_timings
+            if isinstance(timing, dict)
+        ]
+        if not (
+            _non_negative_int(ceiling) is not None
+            and _non_negative_int(consumed) is not None
+            and len(aggregate_token_timings) == len(aggregate_timings)
+            and all(
+                _non_negative_int(value) is not None
+                for value in aggregate_token_timings
+            )
             and sum(aggregate_token_timings) == consumed
             and sum(aggregate_token_timings[:-1]) < ceiling
             and consumed > ceiling
@@ -1683,6 +2019,11 @@ def _audit_completed_agent(
     budget_exhaustion, budget_termination = _v25_budget_exhaustion(row, contract)
     agent_tool_failure_stage = _agent_tool_recalculation_failure_stage(row)
     exact_evidence = bool(contract and contract.require_exact_agent_evidence)
+    generic_response_truncation = bool(
+        contract
+        and contract.allow_generic_response_truncation
+        and row.get("model_failure_reason") == "model_response_truncated"
+    )
     if not isinstance(stages, list) or not isinstance(expected_caps, dict):
         _add_reason(reasons, "agent_stages_invalid")
         return
@@ -1703,13 +2044,20 @@ def _audit_completed_agent(
         and observed_names == expected_names[: len(observed_names)]
         and observed_names[-1] == agent_tool_failure_stage
     )
+    generic_truncated_stages = bool(
+        generic_response_truncation
+        and observed_names
+        and observed_names == expected_names[: len(observed_names)]
+    )
     if budget_exhaustion and (
         not observed_names
         or observed_names[-1] != (budget_termination or {}).get("stage")
     ):
         _add_reason(reasons, "agent_budget_termination_stage_mismatch")
     if observed_names != expected_names and not (
-        budget_truncated_paper_stages or infrastructure_truncated_stages
+        budget_truncated_paper_stages
+        or infrastructure_truncated_stages
+        or generic_truncated_stages
     ):
         _add_reason(reasons, "agent_stage_order_mismatch")
         return
@@ -1735,6 +2083,9 @@ def _audit_completed_agent(
             and stage is stages[-1]
             and name == agent_tool_failure_stage
         )
+        generic_failure_stage = bool(
+            generic_response_truncation and stage is stages[-1]
+        )
         if stage.get("max_turns") != expected_caps.get(name):
             _add_reason(reasons, f"agent_stage_turn_cap_mismatch:{name}")
         if stage.get("allowed_tools") != (expected_tools or {}).get(name):
@@ -1749,7 +2100,8 @@ def _audit_completed_agent(
             and observed_prefix == prefix[: len(observed_prefix)]
         )
         if observed_prefix != prefix and not (
-            budget_failure_stage and observed_is_expected_prefix
+            (budget_failure_stage or generic_failure_stage)
+            and observed_is_expected_prefix
         ):
             _add_reason(reasons, f"agent_observed_prefix_mismatch:{name}")
         if prefix:
@@ -1760,7 +2112,7 @@ def _audit_completed_agent(
                 stage.get("observed_first_tool")
                 != (
                     expected_observed_first
-                    if budget_failure_stage
+                    if budget_failure_stage or generic_failure_stage
                     else prefix[0]
                 )
             ):
@@ -1773,8 +2125,16 @@ def _audit_completed_agent(
         budget_reconcile_terminal = bool(
             budget_failure_stage and arm == "paper" and name == "reconcile"
         )
+        generic_reconcile_terminal = bool(
+            generic_failure_stage and arm == "paper" and name == "reconcile"
+        )
         if infrastructure_failure_stage:
             terminal_valid = stage.get("observed_terminal_tool") is None
+        elif generic_failure_stage:
+            terminal_valid = (
+                stage.get("observed_terminal_tool")
+                == MODEL_RESPONSE_TRUNCATED_TERMINAL
+            )
         elif budget_failure_stage:
             terminal_valid = stage.get("observed_terminal_tool") == "budget_exhausted"
         else:
@@ -1791,7 +2151,7 @@ def _audit_completed_agent(
             continue
         turns = stage_agent.get("turns")
         zero_turn_budget_failure = bool(budget_failure_stage and turns == 0)
-        if budget_reconcile_terminal and exact_evidence:
+        if (budget_reconcile_terminal or generic_reconcile_terminal) and exact_evidence:
             expected_budget_terminal = "assistant_text" if zero_turn_budget_failure else None
             terminal_matches = stage.get("terminal_tool") == expected_budget_terminal
         else:
@@ -2045,16 +2405,23 @@ def _audit_completed_agent(
         _add_reason(reasons, "agent_final_stage_budget_mismatch")
     if contract is not None and contract.require_truncated_terminal_evidence:
         truncation_claimed = bool(
-            row.get("model_failure_reason") == "terminal_submission_truncated"
+            row.get("model_failure_reason")
+            in {"model_response_truncated", "terminal_submission_truncated"}
             or agent.get("observed_terminal_tool")
-            == TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+            in {
+                MODEL_RESPONSE_TRUNCATED_TERMINAL,
+                TERMINAL_SUBMISSION_TRUNCATED_OBSERVED,
+            }
             or (
                 isinstance(agent.get("terminal_response"), dict)
                 and agent["terminal_response"].get("status") == "truncated"
             )
             or any(
                 stage.get("observed_terminal_tool")
-                == TERMINAL_SUBMISSION_TRUNCATED_OBSERVED
+                in {
+                    MODEL_RESPONSE_TRUNCATED_TERMINAL,
+                    TERMINAL_SUBMISSION_TRUNCATED_OBSERVED,
+                }
                 or (
                     isinstance(stage.get("agent"), dict)
                     and isinstance(stage["agent"].get("terminal_response"), dict)
@@ -2065,13 +2432,25 @@ def _audit_completed_agent(
             )
             or _v26_output_limit_attempt_observed(stages)
         )
-        if truncation_claimed and not _v26_truncated_terminal_evidence_valid(
-            row,
-            agent,
-            stages,
-            budget_exhaustion=budget_exhaustion,
-        ):
-            _add_reason(reasons, "terminal_submission_truncated_evidence_invalid")
+        if truncation_claimed:
+            if contract.allow_generic_response_truncation:
+                truncation_valid = _v29_generic_output_limit_evidence_valid(
+                    row,
+                    agent,
+                    stages,
+                    budget_exhaustion=budget_exhaustion,
+                )
+                invalid_reason = "output_limit_response_evidence_invalid"
+            else:
+                truncation_valid = _v26_truncated_terminal_evidence_valid(
+                    row,
+                    agent,
+                    stages,
+                    budget_exhaustion=budget_exhaustion,
+                )
+                invalid_reason = "terminal_submission_truncated_evidence_invalid"
+            if not truncation_valid:
+                _add_reason(reasons, invalid_reason)
     if (
         contract is not None
         and contract.require_accepted_terminal_evidence
@@ -2252,6 +2631,403 @@ def _infrastructure_agent_audit_row(
                 "model_failure_reason": prior_failure["model_failure_reason"],
             }
     return agent_audit_row
+
+
+_PROVIDER_PHASES = frozenset(
+    {
+        "connect",
+        "pool",
+        "read",
+        "response_body",
+        "response_headers",
+        "response_protocol",
+        "response_stream",
+        "total",
+        "transport",
+        "write",
+    }
+)
+_PROVIDER_DELIVERY_STATES = frozenset(
+    {"pre_send", "headers_seen", "terminal_seen", "ambiguous_post_send"}
+)
+
+
+def _provider_attempt_history_valid(
+    provider_error: dict[str, Any],
+    row: dict[str, Any],
+    manifest: dict[str, Any],
+) -> bool:
+    attempts = _non_negative_int(provider_error.get("attempts"))
+    history = provider_error.get("attempt_history")
+    configuration = manifest.get("configuration")
+    request_retries = (
+        _non_negative_int(configuration.get("request_retries"))
+        if isinstance(configuration, dict)
+        else None
+    )
+    safe_reasons = (
+        configuration.get("safe_automatic_retry_reasons")
+        if isinstance(configuration, dict)
+        else None
+    )
+    expected_endpoint = (
+        "/responses"
+        if row.get("api_protocol") == "responses"
+        else "/chat/completions"
+    )
+    if (
+        attempts is None
+        or request_retries is None
+        or attempts > request_retries + 1
+        or not isinstance(history, list)
+        or len(history) != attempts
+    ):
+        return False
+    for index, attempt in enumerate(history, start=1):
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("attempt") != index
+            or attempt.get("outcome") != "error"
+            or not isinstance(attempt.get("retryable"), bool)
+            or not isinstance(attempt.get("safe_to_retry"), bool)
+            or not isinstance(attempt.get("automatic_retry_scheduled"), bool)
+            or attempt.get("delivery_state") not in _PROVIDER_DELIVERY_STATES
+            or attempt.get("api_protocol") != row.get("api_protocol")
+            or attempt.get("endpoint") != expected_endpoint
+        ):
+            return False
+        safe_to_retry = attempt["safe_to_retry"]
+        safe_reason = attempt.get("safe_retry_reason")
+        if (
+            safe_to_retry
+            and (
+                not isinstance(safe_reason, str)
+                or not safe_reason
+                or safe_reason not in (safe_reasons or [])
+            )
+        ) or (not safe_to_retry and safe_reason is not None):
+            return False
+        if attempt.get("delivery_state") == "ambiguous_post_send" and (
+            safe_to_retry or safe_reason is not None
+        ):
+            return False
+        retry_scheduled = attempt["automatic_retry_scheduled"]
+        if retry_scheduled != (index < attempts):
+            return False
+        if retry_scheduled and (not safe_to_retry or index > request_retries):
+            return False
+    return True
+
+
+def _audit_provider_infrastructure_row(
+    record: dict[str, Any],
+    row: dict[str, Any],
+    task: SpreadsheetTask,
+    arm: str,
+    root: Path,
+    manifest: dict[str, Any],
+    contract: _AuditProtocolContract | None,
+) -> None:
+    reasons: list[str] = record["reasons"]
+    provider_error = row.get("provider_error")
+    provider_request_audit = row.get("provider_request_audit")
+    configuration = manifest.get("configuration")
+    error_category = row.get("error_category")
+    record.update(
+        {
+            "outcome_kind": row.get("outcome_kind"),
+            "error_category": error_category,
+            "error_type": row.get("error_type"),
+            "error": row.get("error"),
+            "infrastructure_failure_stage": row.get(
+                "infrastructure_failure_stage"
+            ),
+            "provider_failure_reason": row.get("provider_failure_reason"),
+            "score_available": row.get("score_available"),
+            "provider_request_audit": provider_request_audit,
+        }
+    )
+    taxonomy_valid = bool(
+        contract is not None
+        and contract.allow_provider_infrastructure_no_score
+        and row.get("status") == "error"
+        and row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("passed") is False
+        and row.get("score_available") is False
+        and row.get("infrastructure_failure_stage")
+        == PROVIDER_INFRASTRUCTURE_FAILURE_STAGE
+        and error_category in PROVIDER_INFRASTRUCTURE_CATEGORIES
+        and row.get("provider_failure_reason") == error_category
+        and row.get("replay_permitted") is False
+        and isinstance(row.get("error"), str)
+        and bool(row["error"])
+        and isinstance(row.get("error_type"), str)
+        and row["error_type"].endswith("ProviderError")
+        and isinstance(provider_error, dict)
+        and "output_limit" not in provider_error
+        and row.get("error_retryable") is provider_error.get("safe_to_retry")
+    )
+    if not taxonomy_valid:
+        _add_reason(reasons, "provider_infrastructure_taxonomy_invalid")
+    if any(field in row for field in ("comparison", "artifact_score_passed")):
+        _add_reason(reasons, "provider_infrastructure_has_score_evidence")
+
+    provider_evidence_valid = isinstance(provider_error, dict)
+    if provider_evidence_valid:
+        status_code = provider_error.get("status_code")
+        retry_after = provider_error.get("retry_after_seconds")
+        elapsed = provider_error.get("elapsed_seconds")
+        retryable = provider_error.get("retryable")
+        global_fatal = provider_error.get("global_fatal")
+        safe_to_retry = provider_error.get("safe_to_retry")
+        safe_reason = provider_error.get("safe_retry_reason")
+        delivery_state = provider_error.get("delivery_state")
+        expected_category = (
+            "provider_transient"
+            if retryable is True
+            else "provider_fatal"
+            if global_fatal is True
+            else "provider_task"
+        )
+        safe_reasons = (
+            configuration.get("safe_automatic_retry_reasons")
+            if isinstance(configuration, dict)
+            else None
+        )
+        provider_evidence_valid = bool(
+            isinstance(provider_error.get("message"), str)
+            and provider_error["message"]
+            and isinstance(retryable, bool)
+            and isinstance(global_fatal, bool)
+            and isinstance(safe_to_retry, bool)
+            and provider_error.get("phase") in _PROVIDER_PHASES
+            and delivery_state in _PROVIDER_DELIVERY_STATES
+            and (
+                status_code is None
+                or (
+                    isinstance(status_code, int)
+                    and not isinstance(status_code, bool)
+                    and 100 <= status_code <= 599
+                )
+            )
+            and (
+                retry_after is None
+                or (
+                    isinstance(retry_after, int | float)
+                    and not isinstance(retry_after, bool)
+                    and retry_after >= 0
+                )
+            )
+            and isinstance(elapsed, int | float)
+            and not isinstance(elapsed, bool)
+            and elapsed >= 0
+            and expected_category == error_category
+            and not (global_fatal and retryable)
+            and (
+                safe_to_retry
+                and isinstance(safe_reason, str)
+                and safe_reason in (safe_reasons or [])
+                or not safe_to_retry
+                and safe_reason is None
+            )
+            and not (
+                delivery_state == "ambiguous_post_send" and safe_to_retry
+            )
+            and _provider_attempt_history_valid(
+                provider_error,
+                row,
+                manifest,
+            )
+        )
+    if not provider_evidence_valid:
+        _add_reason(reasons, "provider_infrastructure_evidence_invalid")
+
+    request_audit_valid = bool(
+        isinstance(provider_request_audit, dict)
+        and set(provider_request_audit)
+        == {
+            "schema_version",
+            "request_retries",
+            "successful_model_calls",
+            "failed_attempts",
+            "known_http_attempts",
+            "exact",
+        }
+        and provider_request_audit.get("schema_version")
+        == PROVIDER_REQUEST_AUDIT_SCHEMA_VERSION
+        and isinstance(configuration, dict)
+        and provider_request_audit.get("request_retries")
+        == configuration.get("request_retries")
+        and provider_request_audit.get("exact") is True
+        and _request_attempt_audit(row)["exact"] is True
+    )
+    if not request_audit_valid:
+        _add_reason(reasons, "provider_request_attempt_audit_invalid")
+
+    run_dir = _absolute_path(row.get("run_dir"), base=root)
+    output = _absolute_path(row.get("output_workbook"), base=root)
+    record["run_dir"] = str(run_dir) if run_dir is not None else None
+    record["output_workbook"] = str(output) if output is not None else None
+    if run_dir is None:
+        _add_reason(reasons, "run_dir_missing")
+    if output is None:
+        _add_reason(reasons, "output_path_missing")
+    if run_dir is None or output is None:
+        return
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        _add_reason(reasons, "results_dir_unreadable")
+        return
+    expected_parent = resolved_root / "runs" / task.task_id
+    resolved_run = run_dir.resolve(strict=False)
+    resolved_output = output.resolve(strict=False)
+    if resolved_run.parent != expected_parent or not (
+        resolved_run.name == arm or resolved_run.name.startswith(f"{arm}-")
+    ):
+        _add_reason(reasons, "run_dir_outside_expected_arm")
+    expected_output = resolved_run / "artifacts" / f"output{task.input_path.suffix.lower()}"
+    if resolved_output != expected_output:
+        _add_reason(reasons, "output_path_not_managed_artifact")
+    trajectory = resolved_run / "trajectory.jsonl"
+    if (
+        _has_symlink(root, run_dir)
+        or _has_symlink(root, output)
+        or _has_symlink(root, trajectory)
+    ):
+        _add_reason(reasons, "provider_trajectory_path_contains_symlink")
+        return
+    try:
+        output_metadata = output.lstat()
+        if not stat.S_ISREG(output_metadata.st_mode):
+            raise OSError("not a regular file")
+        output_sha256 = _file_sha256(output)
+    except OSError:
+        _add_reason(reasons, "artifact_unreadable")
+        return
+    record["output_sha256"] = output_sha256
+    if (
+        not _valid_sha256(row.get("output_sha256"))
+        or row.get("output_sha256") != output_sha256
+    ):
+        _add_reason(reasons, "artifact_hash_mismatch")
+    try:
+        metadata = trajectory.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("not a regular file")
+        trajectory_rows = read_trajectory(trajectory)
+        record["trajectory_sha256"] = _file_sha256(trajectory)
+    except (OSError, ValueError):
+        _add_reason(reasons, "provider_trajectory_invalid")
+        return
+    not_evaluated = [
+        item
+        for item in trajectory_rows
+        if item.get("event") == "benchmark.not_evaluated"
+    ]
+    expected_event_fields = {
+        "arm": arm,
+        "status": "error",
+        "error_category": error_category,
+        "outcome_kind": "infrastructure_failure",
+        "score_available": False,
+        "infrastructure_failure_stage": PROVIDER_INFRASTRUCTURE_FAILURE_STAGE,
+        "provider_failure_reason": row.get("provider_failure_reason"),
+        "provider_request_audit": provider_request_audit,
+    }
+    if (
+        len(not_evaluated) != 1
+        or not isinstance(not_evaluated[0].get("payload"), dict)
+        or any(
+            not_evaluated[0]["payload"].get(field) != expected
+            for field, expected in expected_event_fields.items()
+        )
+    ):
+        _add_reason(reasons, "provider_trajectory_evidence_invalid")
+
+    requested = [
+        item for item in trajectory_rows if item.get("event") == "model.requested"
+    ]
+    responded = [
+        item for item in trajectory_rows if item.get("event") == "model.responded"
+    ]
+    failed = [item for item in trajectory_rows if item.get("event") == "model.failed"]
+    successful_calls = (
+        _non_negative_int(provider_request_audit.get("successful_model_calls"))
+        if isinstance(provider_request_audit, dict)
+        else None
+    )
+    budget_used = (row.get("budget") or {}).get("used") or {}
+    response_total_tokens = 0
+    response_evidence_valid = True
+    expected_endpoint = (
+        "/responses"
+        if row.get("api_protocol") == "responses"
+        else "/chat/completions"
+    )
+    for event in responded:
+        payload = event.get("payload") if isinstance(event, dict) else None
+        usage = _usage_triplet(payload.get("usage")) if isinstance(payload, dict) else None
+        timing = payload.get("timing") if isinstance(payload, dict) else None
+        attempts = (
+            _non_negative_int(timing.get("attempts"))
+            if isinstance(timing, dict)
+            else None
+        )
+        history = timing.get("attempt_history") if isinstance(timing, dict) else None
+        if (
+            usage is None
+            or attempts is None
+            or attempts < 1
+            or not isinstance(history, list)
+            or len(history) != attempts
+            or any(
+                not isinstance(attempt, dict)
+                or attempt.get("attempt") != index
+                or attempt.get("api_protocol") != row.get("api_protocol")
+                or attempt.get("endpoint") != expected_endpoint
+                or (
+                    index == attempts
+                    and attempt.get("outcome") != "success"
+                )
+                for index, attempt in enumerate(history, start=1)
+            )
+        ):
+            response_evidence_valid = False
+            continue
+        response_total_tokens += usage["total_tokens"]
+    failed_payload = (
+        failed[0].get("payload")
+        if len(failed) == 1 and isinstance(failed[0], dict)
+        else None
+    )
+    failed_provider_error = (
+        failed_payload.get("provider_error")
+        if isinstance(failed_payload, dict)
+        else None
+    )
+    if isinstance(failed_provider_error, dict) and isinstance(provider_error, dict):
+        failed_provider_error = dict(failed_provider_error)
+        failed_provider_error["retryable"] = bool(
+            failed_provider_error.get("retryable")
+        )
+    trajectory_accounting_valid = bool(
+        response_evidence_valid
+        and successful_calls is not None
+        and len(responded) == successful_calls
+        and len(requested) == successful_calls + 1
+        and len(failed) == 1
+        and failed_provider_error == provider_error
+        and budget_used.get("model_calls") == successful_calls
+        and budget_used.get("total_tokens") == response_total_tokens
+    )
+    if not trajectory_accounting_valid:
+        _add_reason(reasons, "provider_trajectory_accounting_invalid")
+    try:
+        if _file_sha256(output) != output_sha256:
+            _add_reason(reasons, "artifact_changed_during_audit")
+    except OSError:
+        _add_reason(reasons, "artifact_unreadable_after_audit")
 
 
 def _audit_recalculation_infrastructure_row(
@@ -2523,7 +3299,20 @@ def _audit_completed_row(
         in {"recalculation_infrastructure", "scoring_infrastructure"}
     )
     if infrastructure_claim:
-        if row.get("error_category") == "scoring_infrastructure":
+        if (
+            row.get("infrastructure_failure_stage")
+            == PROVIDER_INFRASTRUCTURE_FAILURE_STAGE
+        ):
+            _audit_provider_infrastructure_row(
+                record,
+                row,
+                task,
+                arm,
+                root,
+                manifest,
+                contract,
+            )
+        elif row.get("error_category") == "scoring_infrastructure":
             _audit_scoring_infrastructure_row(
                 record,
                 row,
@@ -2976,11 +3765,28 @@ def audit_comparison(
         for row in audited_rows
         if row.get("outcome_observed") is True
     )
+    provider_infrastructure_rows = sum(
+        row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("infrastructure_failure_stage")
+        == PROVIDER_INFRASTRUCTURE_FAILURE_STAGE
+        and row.get("error_category") in PROVIDER_INFRASTRUCTURE_CATEGORIES
+        for row in audited_rows
+        if row.get("outcome_observed") is True
+    )
+    provider_infrastructure_reasons = Counter(
+        str(row.get("provider_failure_reason") or "unspecified")
+        for row in audited_rows
+        if row.get("outcome_observed") is True
+        and row.get("outcome_kind") == "infrastructure_failure"
+        and row.get("infrastructure_failure_stage")
+        == PROVIDER_INFRASTRUCTURE_FAILURE_STAGE
+    )
     study_complete = bool(
         journal_integrity_valid
         and not interrupted_seals
         and not recalculation_infrastructure_rows
         and not scoring_infrastructure_rows
+        and not provider_infrastructure_rows
     )
     inference_invalid_reasons: list[str] = []
     if not journal_integrity_valid:
@@ -2992,6 +3798,8 @@ def audit_comparison(
             inference_invalid_reasons.append("recalculation_infrastructure_failure")
         if scoring_infrastructure_rows:
             inference_invalid_reasons.append("scoring_infrastructure_failure")
+        if provider_infrastructure_rows:
+            inference_invalid_reasons.append("provider_infrastructure_failure")
     known_passed_rows = sum(
         row.get("outcome_passed") is True
         for row in audited_rows
@@ -3003,7 +3811,7 @@ def audit_comparison(
         if row.get("outcome_observed") is True
     )
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "audit_valid": journal_integrity_valid,
         "journal_integrity_valid": journal_integrity_valid,
         "study_complete": study_complete,
@@ -3036,6 +3844,10 @@ def audit_comparison(
             recalculation_infrastructure_rows
         ),
         "known_scoring_infrastructure_failure_rows": scoring_infrastructure_rows,
+        "known_provider_infrastructure_failure_rows": provider_infrastructure_rows,
+        "provider_infrastructure_failure_reasons": dict(
+            sorted(provider_infrastructure_reasons.items())
+        ),
         "rows": audited_rows,
     }
     if not study_complete:

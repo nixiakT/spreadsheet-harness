@@ -37,6 +37,10 @@ from spreadsheet_harness.comparison import (
     V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V27_COMPARISON_PROTOCOL_VERSION,
     V27_RUN_SPEC_SOURCE_CONTRACT,
+    V28_COMPARISON_CONFIGURATION_POLICIES,
+    V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V28_COMPARISON_PROTOCOL_VERSION,
+    V28_RUN_SPEC_SOURCE_CONTRACT,
     ComparisonBenchmarkRunner,
     RunSpecAnchor,
     _allowed_observed_terminals_policy,
@@ -138,9 +142,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 17
-    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 17
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v28"
+    assert manifest["schema_version"] == 18
+    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 18
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v29"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -160,9 +164,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["edit_recovery_terminal_policy"] == (
         "penultimate-recovery-final-submit-v1"
     )
-    assert manifest["configuration"]["ours_tool_policy"] == (
-        "fixed-six-code-first-v1"
-    )
+
+
+    assert manifest["configuration"]["ours_tool_policy"] == ("fixed-six-code-first-v1")
     assert manifest["configuration"]["deterministic_profile_policy"] == (
         "representative-evidence-12k-v1"
     )
@@ -191,14 +195,29 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["formula_runtime_validation_scope"] == (
         "range-or-single-recalc-sparse-pending-formulas-v1"
     )
+    assert manifest["configuration"]["model_response_truncation_policy"] == (
+        "delivered-output-limit-known-false-no-partial-execution-v1"
+    )
+    assert (
+        manifest["configuration"]["model_response_truncation_observed_terminal"]
+        == "model_response_length"
+    )
+    assert manifest["configuration"]["provider_failure_policy"] == (
+        "audited-infrastructure-error-no-score-v1"
+    )
+    assert manifest["configuration"]["provider_no_score_categories"] == [
+        "provider_fatal",
+        "provider_task",
+        "provider_transient",
+    ]
+    assert manifest["configuration"]["provider_request_audit_policy"] == (
+        "exact-failed-request-attempt-history-v1"
+    )
     assert "artifact_reopen_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert "scoring_compatibility_policy" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert "formula_runtime_gate" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert "formula_runtime_gate_arms" not in V27_COMPARISON_CONFIGURATION_POLICIES
-    assert (
-        "formula_runtime_validation_scope"
-        not in V27_COMPARISON_CONFIGURATION_POLICIES
-    )
+    assert "formula_runtime_validation_scope" not in V27_COMPARISON_CONFIGURATION_POLICIES
     assert manifest["arms"] == list(COMPARISON_ARMS)
     assert manifest["arm_display_names"] == {
         "bare": "bare",
@@ -247,21 +266,25 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     ) == {"ours": {"solve": "all"}}
     assert manifest["allowed_observed_terminals"]["paper"]["reconcile"] == [
         "assistant_text",
+        "model_response_length",
         "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["ours"]["solve"] == [
         "submit_result",
         "submit_result_length",
+        "model_response_length",
         "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["bare"]["solve"] == [
         "submit_result",
         "submit_result_length",
+        "model_response_length",
         "budget_exhausted",
     ]
     assert manifest["allowed_observed_terminals"]["paper"]["solve"] == [
         "submit_result",
         "submit_result_length",
+        "model_response_length",
         "budget_exhausted",
     ]
     assert manifest["forced_prefix_wire_policy"] == {
@@ -310,14 +333,10 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["request_pacing_policy"] == (
         "process_local_min_attempt_start_interval_v1"
     )
-    assert manifest["configuration"]["request_pacing_scope"] == (
-        "comparison_runner_process"
-    )
+    assert manifest["configuration"]["request_pacing_scope"] == ("comparison_runner_process")
     assert manifest["configuration"]["request_pacing_retries_included"] is True
     assert manifest["configuration"]["request_pacing_first_attempt_immediate"] is True
-    assert manifest["configuration"]["automatic_retry_policy"] == (
-        "delivery-aware-allowlist-v1"
-    )
+    assert manifest["configuration"]["automatic_retry_policy"] == ("delivery-aware-allowlist-v1")
     assert manifest["configuration"]["safe_retry_http_statuses"] == [425, 429, 503]
     assert manifest["configuration"]["safe_automatic_retry_reasons"] == [
         "connect_error",
@@ -334,9 +353,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["retry_backoff_max_seconds"] == 60.0
     assert manifest["configuration"]["read_timeout_policy"] == "fail-closed-no-replay"
     assert manifest["configuration"]["http_408_policy"] == "fail-closed-no-replay"
-    assert manifest["configuration"]["stream_interruption_policy"] == (
-        "fail-closed-no-replay"
-    )
+    assert manifest["configuration"]["stream_interruption_policy"] == ("fail-closed-no-replay")
     assert manifest["configuration"]["request_attempt_telemetry"] == (
         "delivery-safe-retry-ids-headers-backoff-pacing-v4"
     )
@@ -352,6 +369,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["model_execution_failure_reasons"] == [
         "budget_exhausted",
         "edit_recovery_exhausted",
+        "model_response_truncated",
         "terminal_submission_invalid",
         "terminal_submission_truncated",
         "workbook_unchanged",
@@ -362,6 +380,27 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
         "answer_sheet",
         "golden_path",
     ]
+
+
+def test_v29_preflight_requires_exact_zero_retry_provider_evidence(
+    tmp_path: Path,
+) -> None:
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            max_retries=1,
+        ),
+        tmp_path / "comparison",
+        skill_registry=SkillRegistry([]),
+    )
+
+    with pytest.raises(HarnessError, match="request retries"):
+        runner.preflight(_tasks(tmp_path))
+
+    assert not runner.manifest_path.exists()
+    assert not runner.results_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -393,10 +432,10 @@ def test_historical_terminal_policies_retain_tool_stage_text_fallback(
     [
         V26_COMPARISON_PROTOCOL_VERSION,
         V27_COMPARISON_PROTOCOL_VERSION,
-        COMPARISON_PROTOCOL_VERSION,
+        V28_COMPARISON_PROTOCOL_VERSION,
     ],
 )
-def test_v26_and_later_terminal_policy_require_submit_for_tool_stages(
+def test_v26_through_v28_terminal_policy_requires_submit_for_tool_stages(
     protocol_version: str,
 ) -> None:
     policy = _allowed_observed_terminals_policy(
@@ -421,6 +460,56 @@ def test_v26_and_later_terminal_policy_require_submit_for_tool_stages(
         "assistant_text",
         "budget_exhausted",
     ]
+
+
+def test_v29_terminal_policy_adds_generic_output_limit_to_every_stage() -> None:
+    policy = _allowed_observed_terminals_policy(
+        {
+            "bare": {"solve": 2},
+            "paper": {"reconcile": 1, "solve": 2},
+        },
+        protocol_version=COMPARISON_PROTOCOL_VERSION,
+    )
+
+    assert policy["bare"]["solve"] == [
+        "submit_result",
+        "submit_result_length",
+        "model_response_length",
+        "budget_exhausted",
+    ]
+    assert policy["paper"]["solve"] == [
+        "submit_result",
+        "submit_result_length",
+        "model_response_length",
+        "budget_exhausted",
+    ]
+    assert policy["paper"]["reconcile"] == [
+        "assistant_text",
+        "model_response_length",
+        "budget_exhausted",
+    ]
+
+
+def test_v28_policies_do_not_retroactively_accept_generic_output_limits() -> None:
+    assert V28_COMPARISON_CONFIGURATION_POLICIES["model_execution_failure_reasons"] == [
+        "budget_exhausted",
+        "edit_recovery_exhausted",
+        "terminal_submission_invalid",
+        "terminal_submission_truncated",
+        "workbook_unchanged",
+    ]
+    assert (
+        "model_response_truncated"
+        not in V28_COMPARISON_CONFIGURATION_POLICIES["model_execution_failure_reasons"]
+    )
+    for key in (
+        "model_response_truncation_policy",
+        "model_response_truncation_observed_terminal",
+        "provider_failure_policy",
+        "provider_no_score_categories",
+        "provider_request_audit_policy",
+    ):
+        assert key not in V28_COMPARISON_CONFIGURATION_POLICIES
 
 
 def test_optional_ablation_arms_are_available_without_changing_default_manifest(
@@ -539,9 +628,7 @@ def test_comparison_manifest_and_rows_bind_split_provenance(tmp_path: Path) -> N
     provenance = {
         "manifest_id": "test-derivative-split-v2",
         "schema_version": "spreadsheetbench-trace2skill-derivative-v2",
-        "manifest_sha256": (
-            "f29d6e5627161b355c24acfbda6c5dcc250d12b5f4933d3c3fb0c50a8bac39b3"
-        ),
+        "manifest_sha256": ("f29d6e5627161b355c24acfbda6c5dcc250d12b5f4933d3c3fb0c50a8bac39b3"),
         "task_count": 2,
         "task_ids_sha256": hashlib.sha256(b"cell-1\nsheet-1\n").hexdigest(),
         "dataset_json_sha256": "3" * 64,
@@ -641,9 +728,7 @@ def test_split_manifest_rejects_task_id_selectors(
         "load_and_verify_trace2skill_split_manifest",
         lambda *_: {"valid": True, "task_ids": ["cell-1"]},
     )
-    args = parser.parse_args(
-        ["benchmark", "compare", "--split-manifest", str(split), *selector]
-    )
+    args = parser.parse_args(["benchmark", "compare", "--split-manifest", str(split), *selector])
 
     with pytest.raises(HarnessError, match="derivative manifest"):
         cli_module.cmd_benchmark_compare(args)
@@ -829,7 +914,12 @@ def _generic_journal_runner(
 ) -> tuple[ComparisonBenchmarkRunner, list[SpreadsheetTask]]:
     tasks = _tasks(tmp_path)[:1]
     runner = ComparisonBenchmarkRunner(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            max_retries=0,
+        ),
         tmp_path / "journal-output",
         skill_registry=SkillRegistry([]),
         arms=("bare", "ours"),
@@ -849,9 +939,7 @@ def _generic_journal_runner(
 
 
 def test_pilot_run_spec_rejects_noncanonical_bytes(tmp_path: Path) -> None:
-    source = Path(
-        "benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json"
-    )
+    source = Path("benchmarks/protocols/qwen35-trace2skill-local-pilot16-run-spec-v1.json")
     target = tmp_path / source.name
     target.write_bytes(source.read_bytes() + b"\n")
 
@@ -943,10 +1031,7 @@ def test_v25_source_contract_remains_pinned_to_historical_source() -> None:
 
 
 def test_v26_confirmation_run_spec_is_historical_and_read_only() -> None:
-    path = Path(
-        "benchmarks/protocols/"
-        "qwen35-trace2skill-local-v26-confirm16-run-spec-v1.json"
-    )
+    path = Path("benchmarks/protocols/qwen35-trace2skill-local-v26-confirm16-run-spec-v1.json")
     document, provenance, _ = load_pilot_run_spec(path)
 
     with pytest.raises(HarnessError, match="read-only"):
@@ -995,16 +1080,11 @@ def test_v26_source_contract_remains_pinned_to_historical_source() -> None:
     assert manifest_execution_contract(historical_manifest)["source_contract"] == (
         V26_RUN_SPEC_SOURCE_CONTRACT
     )
-    assert V26_RUN_SPEC_SOURCE_CONTRACT != (
-        benchmark_module._run_spec_source_fingerprint()
-    )
+    assert V26_RUN_SPEC_SOURCE_CONTRACT != (benchmark_module._run_spec_source_fingerprint())
 
 
 def test_v27_reserve79_run_spec_anchor_is_historical_and_read_only() -> None:
-    path = Path(
-        "benchmarks/protocols/"
-        "qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json"
-    )
+    path = Path("benchmarks/protocols/qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json")
     document, provenance, _ = load_pilot_run_spec(path)
     with pytest.raises(HarnessError, match="read-only"):
         require_launchable_run_spec(provenance)
@@ -1033,10 +1113,7 @@ def test_v27_reserve79_run_spec_anchor_is_historical_and_read_only() -> None:
 
 def test_v27_source_contract_remains_pinned_to_historical_source() -> None:
     document, _, _ = load_pilot_run_spec(
-        Path(
-            "benchmarks/protocols/"
-            "qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json"
-        )
+        Path("benchmarks/protocols/qwen35-trace2skill-local-v27-reserve79-run-spec-v1.json")
     )
     historical_manifest = {
         "schema_version": V27_COMPARISON_MANIFEST_SCHEMA_VERSION,
@@ -1048,9 +1125,48 @@ def test_v27_source_contract_remains_pinned_to_historical_source() -> None:
     assert manifest_execution_contract(historical_manifest)["source_contract"] == (
         V27_RUN_SPEC_SOURCE_CONTRACT
     )
-    assert V27_RUN_SPEC_SOURCE_CONTRACT != (
-        benchmark_module._run_spec_source_fingerprint()
+    assert V27_RUN_SPEC_SOURCE_CONTRACT != (benchmark_module._run_spec_source_fingerprint())
+
+
+def test_v28_source_contract_remains_pinned_to_historical_source() -> None:
+    historical_manifest = {
+        "schema_version": V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "comparison_protocol_version": V28_COMPARISON_PROTOCOL_VERSION,
+        "configuration": {},
+    }
+
+    assert V28_RUN_SPEC_SOURCE_CONTRACT == {
+        "schema_version": 1,
+        "policy": "python-package-pyproject-normalized-run-spec-anchor-sha-v1",
+        "sha256": ("f282ee00d271eba52dd81cb8b388124cb01d6c3fa45111eb2aa2d0d5a654d650"),
+        "file_count": 23,
+    }
+    assert manifest_execution_contract(historical_manifest)["source_contract"] == (
+        V28_RUN_SPEC_SOURCE_CONTRACT
     )
+    assert V28_RUN_SPEC_SOURCE_CONTRACT != (benchmark_module._run_spec_source_fingerprint())
+
+
+def test_current_manifest_contract_uses_live_source_fingerprint(
+    monkeypatch: Any,
+) -> None:
+    current_source = {
+        "schema_version": 1,
+        "policy": "test-live-source",
+        "sha256": "9" * 64,
+        "file_count": 99,
+    }
+    monkeypatch.setattr(
+        "spreadsheet_harness.comparison._run_spec_source_fingerprint",
+        lambda: current_source,
+    )
+    manifest = {
+        "schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
+        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+        "configuration": {},
+    }
+
+    assert manifest_execution_contract(manifest)["source_contract"] == current_source
 
 
 def test_v25_preflight_rejects_historical_run_before_isolation(
@@ -1250,10 +1366,9 @@ def test_pilot_run_spec_runner_rejects_resolved_contract_mismatch(
         lambda _: document["execution"]["split_provenance"]["dataset_json_sha256"],
     )
     pilot_ids = json.loads(
-        Path(
-            "benchmarks/protocols/"
-            "qwen35-trace2skill-local-unattempted-pilot16-v2.json"
-        ).read_text(encoding="utf-8")
+        Path("benchmarks/protocols/qwen35-trace2skill-local-unattempted-pilot16-v2.json").read_text(
+            encoding="utf-8"
+        )
     )["task_ids"]
     source = tasks[0]
     tasks = [
@@ -1437,9 +1552,7 @@ def test_interrupted_seals_reject_extra_document_fields(
     )
 
     with pytest.raises(HarnessError, match="document is invalid"):
-        runner._validate_interrupted_seals(
-            tasks, comparison_manifest_sha256=manifest_sha
-        )
+        runner._validate_interrupted_seals(tasks, comparison_manifest_sha256=manifest_sha)
 
 
 def test_comparison_summary_uses_end_to_end_denominator_and_pairing(tmp_path: Path) -> None:
@@ -1450,9 +1563,7 @@ def test_comparison_summary_uses_end_to_end_denominator_and_pairing(tmp_path: Pa
             "arm": arm,
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "status": "completed",
-            "passed": (
-                arm == "ours" or (arm == "paper" and task.task_id == "cell-1")
-            ),
+            "passed": (arm == "ours" or (arm == "paper" and task.task_id == "cell-1")),
             "elapsed_seconds": 10,
             "budget": {
                 "used": {"model_calls": 2, "total_tokens": 120},
@@ -1511,30 +1622,20 @@ def test_comparison_summary_counts_known_model_failure_as_complete_nonbreaker(
             "arm": arm,
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
             "status": "completed",
-            "outcome_kind": (
-                "model_execution_failure" if arm == "ours" else "scored"
-            ),
+            "outcome_kind": ("model_execution_failure" if arm == "ours" else "scored"),
             "passed": arm == "bare",
-            "error_category": (
-                "model_execution_failure" if arm == "ours" else None
-            ),
-            "model_failure_reason": (
-                "edit_recovery_exhausted" if arm == "ours" else None
-            ),
+            "error_category": ("model_execution_failure" if arm == "ours" else None),
+            "model_failure_reason": ("edit_recovery_exhausted" if arm == "ours" else None),
             "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
             "agent": {
                 "usage": {"total_tokens": 1},
-                "request_timings": [
-                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
-                ],
+                "request_timings": [{"turn": 1, "attempts": 1, "attempt_history": [{}]}],
             },
         }
         for arm in ("bare", "ours")
     ]
     results = tmp_path / "known-model-failure-summary.jsonl"
-    results.write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
-    )
+    results.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     summary = comparison_summary(results, [task], arms=("bare", "ours"))
 
@@ -1564,33 +1665,23 @@ def test_comparison_summary_does_not_count_recalculation_failure_as_scored_false
             "outcome_kind": "infrastructure_failure" if arm == "bare" else "scored",
             "score_available": False if arm == "bare" else True,
             "passed": arm == "ours",
-            "error_category": (
-                "recalculation_infrastructure" if arm == "bare" else None
-            ),
-            "recalculation_failure_reason": (
-                "sheet_inventory_changed" if arm == "bare" else None
-            ),
+            "error_category": ("recalculation_infrastructure" if arm == "bare" else None),
+            "recalculation_failure_reason": ("sheet_inventory_changed" if arm == "bare" else None),
             "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
             "agent": {
                 "usage": {"total_tokens": 1},
-                "request_timings": [
-                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
-                ],
+                "request_timings": [{"turn": 1, "attempts": 1, "attempt_history": [{}]}],
             },
         }
         for arm in ("bare", "ours")
     ]
     results = tmp_path / "recalculation-infrastructure-summary.jsonl"
-    results.write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
-    )
+    results.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     summary = comparison_summary(results, [task], arms=("bare", "ours"))
 
     assert summary["inference_valid"] is False
-    assert "recalculation_infrastructure_failures" in summary[
-        "inference_invalid_reasons"
-    ]
+    assert "recalculation_infrastructure_failures" in summary["inference_invalid_reasons"]
     assert summary["known_infrastructure_failure_arm_tasks"] == 1
     assert summary["arms"]["bare"]["end_to_end_accuracy"] is None
     assert summary["arms"]["bare"]["wilson_95"] is None
@@ -1599,9 +1690,115 @@ def test_comparison_summary_does_not_count_recalculation_failure_as_scored_false
     pairwise = summary["pairwise"]["bare_vs_ours"]
     assert pairwise["accuracy_delta_right_minus_left"] is None
     assert pairwise["known_outcome_descriptive"]["pairs"] == 0
-    assert "collection_integrity:recalculation_infrastructure_failures" in pairwise[
-        "inference_invalid_reasons"
+    assert (
+        "collection_integrity:recalculation_infrastructure_failures"
+        in pairwise["inference_invalid_reasons"]
+    )
+
+
+def test_comparison_summary_keeps_provider_no_score_out_of_primary_inference(
+    tmp_path: Path,
+) -> None:
+    tasks = _tasks(tmp_path)
+
+    def completed(task: SpreadsheetTask, arm: str, passed: bool) -> dict[str, Any]:
+        return {
+            "task_id": task.task_id,
+            "arm": arm,
+            "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+            "status": "completed",
+            "outcome_kind": "scored",
+            "passed": passed,
+            "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
+            "agent": {
+                "usage": {"total_tokens": 1},
+                "request_timings": [{"turn": 1, "attempts": 1, "attempt_history": [{}]}],
+            },
+        }
+
+    failed_attempt = {
+        "attempt": 1,
+        "outcome": "error",
+        "retryable": True,
+        "safe_to_retry": False,
+        "safe_retry_reason": None,
+        "automatic_retry_scheduled": False,
+        "delivery_state": "ambiguous_post_send",
+        "api_protocol": "chat-completions",
+        "endpoint": "/chat/completions",
+    }
+    provider_no_score = {
+        "task_id": tasks[0].task_id,
+        "arm": "ours",
+        "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
+        "status": "error",
+        "outcome_kind": "infrastructure_failure",
+        "score_available": False,
+        "passed": False,
+        "error_category": "provider_transient",
+        "infrastructure_failure_stage": "provider",
+        "provider_failure_reason": "provider_transient",
+        "budget": {"used": {"model_calls": 2, "total_tokens": 3}},
+        "provider_error": {
+            "attempts": 1,
+            "attempt_history": [failed_attempt],
+        },
+        "provider_request_audit": {
+            "schema_version": 1,
+            "request_retries": 0,
+            "successful_model_calls": 2,
+            "failed_attempts": 1,
+            "known_http_attempts": 3,
+            "exact": True,
+        },
+    }
+    rows = [
+        completed(tasks[0], "bare", True),
+        provider_no_score,
+        completed(tasks[1], "bare", False),
+        completed(tasks[1], "ours", True),
     ]
+    results = tmp_path / "provider-no-score-summary.jsonl"
+    results.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    summary = comparison_summary(results, tasks, arms=("bare", "ours"))
+
+    assert summary["inference_valid"] is False
+    assert "provider_infrastructure_failures" in summary["inference_invalid_reasons"]
+    assert "errored_arm_tasks" not in summary["inference_invalid_reasons"]
+    assert "request_attempt_audit_incomplete" not in summary["inference_invalid_reasons"]
+    assert summary["errored_arm_tasks"] == 1
+    assert summary["unclassified_error_arm_tasks"] == 0
+    assert summary["known_provider_infrastructure_failure_arm_tasks"] == 1
+    assert summary["provider_infrastructure_failure_reasons"] == {"provider_transient": 1}
+    for arm in ("bare", "ours"):
+        assert summary["arms"][arm]["end_to_end_accuracy"] is None
+        assert summary["arms"][arm]["wilson_95"] is None
+    ours = summary["arms"]["ours"]
+    assert ours["known_provider_infrastructure_failures"] == 1
+    assert ours["provider_infrastructure_failure_reasons"] == {"provider_transient": 1}
+    assert ours["provider_infrastructure_failures"] == 1
+    assert ours["known_outcome_descriptive"]["tasks"] == 1
+    assert ours["known_outcome_descriptive"]["accuracy"] == 1.0
+    pair = summary["pairwise"]["bare_vs_ours"]
+    assert pair["inference_valid"] is False
+    for field in (
+        "accuracy_delta_right_minus_left",
+        "stratified_bootstrap_95",
+        "mcnemar_exact_p",
+        "holm_adjusted_p",
+    ):
+        assert pair[field] is None
+    assert pair["left_only_passes"] == 0
+    assert pair["right_only_passes"] == 1
+    assert pair["known_outcome_descriptive"] == {
+        "pairs": 1,
+        "accuracy_delta_right_minus_left": 1.0,
+        "primary": False,
+    }
 
 
 def test_comparison_summary_keeps_post_breaker_missing_rows_out_of_descriptive_scores(
@@ -1625,9 +1822,7 @@ def test_comparison_summary_keeps_post_breaker_missing_rows_out_of_descriptive_s
                 "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
                 "agent": {
                     "usage": {"total_tokens": 1},
-                    "request_timings": [
-                        {"turn": 1, "attempts": 1, "attempt_history": [{}]}
-                    ],
+                    "request_timings": [{"turn": 1, "attempts": 1, "attempt_history": [{}]}],
                 },
             }
         )
@@ -1662,15 +1857,11 @@ def test_comparison_summary_keeps_scoring_infrastructure_separate_from_recalcula
             "score_available": False if arm == "bare" else True,
             "passed": arm == "ours",
             "error_category": "scoring_infrastructure" if arm == "bare" else None,
-            "scoring_failure_reason": (
-                "worksheet_scorer_unsupported" if arm == "bare" else None
-            ),
+            "scoring_failure_reason": ("worksheet_scorer_unsupported" if arm == "bare" else None),
             "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
             "agent": {
                 "usage": {"total_tokens": 1},
-                "request_timings": [
-                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
-                ],
+                "request_timings": [{"turn": 1, "attempts": 1, "attempt_history": [{}]}],
             },
         }
         for arm in ("bare", "ours")
@@ -1685,26 +1876,23 @@ def test_comparison_summary_keeps_scoring_infrastructure_separate_from_recalcula
 
     assert summary["inference_valid"] is False
     assert "scoring_infrastructure_failures" in summary["inference_invalid_reasons"]
-    assert "recalculation_infrastructure_failures" not in summary[
-        "inference_invalid_reasons"
-    ]
+    assert "recalculation_infrastructure_failures" not in summary["inference_invalid_reasons"]
     assert summary["known_scoring_infrastructure_failure_arm_tasks"] == 1
     assert summary["known_recalculation_infrastructure_failure_arm_tasks"] == 0
     bare = summary["arms"]["bare"]
     assert bare["scoring_infrastructure_failures"] == 1
     assert bare["recalculation_infrastructure_failures"] == 0
-    assert bare["infrastructure_failure_reasons"] == {
-        "worksheet_scorer_unsupported": 1
-    }
+    assert bare["infrastructure_failure_reasons"] == {"worksheet_scorer_unsupported": 1}
     assert bare["cell_level"]["scoring_infrastructure_failures"] == 1
     assert bare["cell_level"]["recalculation_infrastructure_failures"] == 0
     pair = summary["pairwise"]["bare_vs_ours"]
-    assert "collection_integrity:scoring_infrastructure_failures" in pair[
-        "inference_invalid_reasons"
-    ]
-    assert "collection_integrity:recalculation_infrastructure_failures" not in pair[
-        "inference_invalid_reasons"
-    ]
+    assert (
+        "collection_integrity:scoring_infrastructure_failures" in pair["inference_invalid_reasons"]
+    )
+    assert (
+        "collection_integrity:recalculation_infrastructure_failures"
+        not in pair["inference_invalid_reasons"]
+    )
 
 
 def test_comparison_summary_treats_sealed_unknown_as_nonprimary_not_missing(
@@ -1842,9 +2030,7 @@ def test_comparison_request_attempt_audit_is_incomplete_when_expected_rows_are_m
             "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
             "agent": {
                 "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
-                "request_timings": [
-                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
-                ],
+                "request_timings": [{"turn": 1, "attempts": 1, "attempt_history": [{}]}],
             },
         }
         for task in tasks[:present_rows]
@@ -1878,9 +2064,7 @@ def test_comparison_summary_rejects_inexact_request_attempt_history(
         "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
         "agent": {
             "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
-            "request_timings": [
-                {"turn": 1, "attempts": 2, "attempt_history": [{}]}
-            ],
+            "request_timings": [{"turn": 1, "attempts": 2, "attempt_history": [{}]}],
         },
     }
     results = tmp_path / "inexact-attempt-results.jsonl"
@@ -1905,9 +2089,7 @@ def test_comparison_summary_audits_unexpected_rows_and_disables_inference(
             "passed": True,
             "calculation_backend": backend,
         }
-        for task, backend in zip(
-            tasks, ("libreoffice", "not_recalculated"), strict=True
-        )
+        for task, backend in zip(tasks, ("libreoffice", "not_recalculated"), strict=True)
     ]
     rows = [
         *expected_rows,
@@ -1997,9 +2179,7 @@ def test_comparison_summary_clears_pairwise_inference_on_collection_pollution(
         assert pair["stratified_bootstrap_95"] is None
         assert pair["mcnemar_exact_p"] is None
         assert pair["holm_adjusted_p"] is None
-        assert "collection_integrity:duplicate_arm_tasks" in pair[
-            "inference_invalid_reasons"
-        ]
+        assert "collection_integrity:duplicate_arm_tasks" in pair["inference_invalid_reasons"]
         for stratum in pair["strata"].values():
             assert stratum["inference_valid"] is False
             assert stratum["stratified_bootstrap_95"] is None
@@ -2021,9 +2201,7 @@ def test_comparison_summary_supports_preregistered_analysis_subset(
             "budget": {"used": {"model_calls": 1, "total_tokens": 1}},
             "agent": {
                 "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
-                "request_timings": [
-                    {"turn": 1, "attempts": 1, "attempt_history": [{}]}
-                ],
+                "request_timings": [{"turn": 1, "attempts": 1, "attempt_history": [{}]}],
             },
         }
         for task in tasks
@@ -2109,7 +2287,12 @@ def test_comparison_runner_refuses_protocol_mismatched_resume(
 ) -> None:
     tasks = _tasks(tmp_path)
     runner = ComparisonBenchmarkRunner(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            max_retries=0,
+        ),
         tmp_path / "mismatched-resume",
         skill_registry=SkillRegistry([]),
         arms=("bare",),
@@ -2145,7 +2328,12 @@ def test_comparison_runner_refuses_split_provenance_mismatched_resume(
 ) -> None:
     tasks = _tasks(tmp_path)
     runner = ComparisonBenchmarkRunner(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            max_retries=0,
+        ),
         tmp_path / "split-mismatched-resume",
         skill_registry=SkillRegistry([]),
         arms=("bare",),
@@ -2205,7 +2393,12 @@ def test_comparison_resume_fails_closed_on_damaged_journal_without_mutation(
 ) -> None:
     tasks = _tasks(tmp_path)
     runner = ComparisonBenchmarkRunner(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            max_retries=0,
+        ),
         tmp_path / "damaged-resume",
         skill_registry=SkillRegistry([]),
         arms=("bare",),
@@ -2235,7 +2428,12 @@ def test_comparison_resume_fails_closed_on_invalid_utf8_without_sampling(
 ) -> None:
     tasks = _tasks(tmp_path)
     runner = ComparisonBenchmarkRunner(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            max_retries=0,
+        ),
         tmp_path / "invalid-utf8-resume",
         skill_registry=SkillRegistry([]),
         arms=("bare",),
@@ -2318,9 +2516,7 @@ def test_comparison_runner_calls_arm_without_answer_metadata(
     assert evaluation[0]["payload"]["passed"] is False
     assert evaluation[0]["payload"]["arm"] == "bare"
     assert evaluation[0]["payload"]["difference_count"] == 1
-    assert evaluation[0]["payload"]["difference_categories"] == {
-        "metadata_or_structure": 1
-    }
+    assert evaluation[0]["payload"]["difference_categories"] == {"metadata_or_structure": 1}
 
 
 def test_comparison_recalculation_sheet_drift_is_persisted_without_scoring(
@@ -2385,18 +2581,12 @@ def test_comparison_recalculation_sheet_drift_is_persisted_without_scoring(
     assert "comparison" not in row
     assert "artifact_score_passed" not in row
     assert Path(row["recalculation"]["failure_artifact_path"]).is_file()
-    run_manifest = json.loads(
-        (Path(row["run_dir"]) / "run.json").read_text(encoding="utf-8")
-    )
+    run_manifest = json.loads((Path(row["run_dir"]) / "run.json").read_text(encoding="utf-8"))
     assert run_manifest["result"]["recalculation"] == row["recalculation"]
     trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
     assert not any(item["event"] == "benchmark.evaluated" for item in trajectory)
-    not_evaluated = [
-        item for item in trajectory if item["event"] == "benchmark.not_evaluated"
-    ]
-    assert not_evaluated[0]["payload"]["error_category"] == (
-        "recalculation_infrastructure"
-    )
+    not_evaluated = [item for item in trajectory if item["event"] == "benchmark.not_evaluated"]
+    assert not_evaluated[0]["payload"]["error_category"] == ("recalculation_infrastructure")
     assert not_evaluated[0]["payload"]["recalculation"] == row["recalculation"]
 
 
@@ -2472,16 +2662,12 @@ def test_comparison_persists_agent_tool_recalculation_failure_without_scoring(
     assert "comparison" not in row
     assert "artifact_score_passed" not in row
     trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
-    not_evaluated = [
-        item for item in trajectory if item["event"] == "benchmark.not_evaluated"
-    ]
+    not_evaluated = [item for item in trajectory if item["event"] == "benchmark.not_evaluated"]
     assert not_evaluated[0]["payload"]["infrastructure_failure_stage"] == (
         "agent_tool_recalculation"
     )
     assert not_evaluated[0]["payload"]["agent_failure_stage"] == "solve"
-    assert not_evaluated[0]["payload"]["infrastructure_failure_tool"] == (
-        "recalculate_and_read"
-    )
+    assert not_evaluated[0]["payload"]["infrastructure_failure_tool"] == ("recalculate_and_read")
 
 
 def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
@@ -2569,9 +2755,7 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
                 ],
                 text="",
                 usage={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
-                attempt_history=[
-                    {"api_protocol": "responses", "endpoint": "/responses"}
-                ],
+                attempt_history=[{"api_protocol": "responses", "endpoint": "/responses"}],
             )
 
     monkeypatch.setattr(
@@ -2658,9 +2842,7 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
         "type": "function",
         "name": "recalculate_and_read",
     }
-    assert [tool["name"] for tool in requests[2]["tools"]] == [
-        "recalculate_and_read"
-    ]
+    assert [tool["name"] for tool in requests[2]["tools"]] == ["recalculate_and_read"]
 
     trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
     formula_changes = [
@@ -2670,8 +2852,7 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
     sparse_calls = [
         item
         for item in trajectory
-        if item["event"] == "tool.called"
-        and item["payload"]["name"] == "recalculate_and_read"
+        if item["event"] == "tool.called" and item["payload"]["name"] == "recalculate_and_read"
     ]
     assert sparse_calls[-1]["payload"]["arguments"] == {
         "validation_scope": "pending_formula_changes"
@@ -2712,9 +2893,7 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
     assert tampered["audit_valid"] is False
     assert tampered["rows"][0]["audit_valid"] is False
     assert "agent_observed_terminal_invalid:solve" in tampered["rows"][0]["reasons"]
-    assert "accepted_terminal_response_evidence_invalid" in tampered["rows"][0][
-        "reasons"
-    ]
+    assert "accepted_terminal_response_evidence_invalid" in tampered["rows"][0]["reasons"]
 
 
 def test_comparison_classifies_unsupported_scorer_as_infrastructure_no_score(
@@ -2762,7 +2941,12 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
 ) -> None:
     tasks = _tasks(tmp_path)[:1]
     runner = ComparisonBenchmarkRunner(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            max_retries=0,
+        ),
         tmp_path / "manifest-bound",
         skill_registry=SkillRegistry([]),
         arms=("bare",),
@@ -2788,9 +2972,7 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                 "turn": 1,
                 "stage": "solve",
                 "attempts": 1,
-                "attempt_history": [
-                    {"api_protocol": "responses", "endpoint": "/responses"}
-                ],
+                "attempt_history": [{"api_protocol": "responses", "endpoint": "/responses"}],
                 "input_tokens": 2,
                 "output_tokens": 0,
                 "total_tokens": 2,
@@ -2799,9 +2981,7 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                 "turn": 2,
                 "stage": "solve",
                 "attempts": 1,
-                "attempt_history": [
-                    {"api_protocol": "responses", "endpoint": "/responses"}
-                ],
+                "attempt_history": [{"api_protocol": "responses", "endpoint": "/responses"}],
                 "input_tokens": 2,
                 "output_tokens": 0,
                 "total_tokens": 2,
@@ -2810,9 +2990,7 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                 "turn": 3,
                 "stage": "solve",
                 "attempts": 1,
-                "attempt_history": [
-                    {"api_protocol": "responses", "endpoint": "/responses"}
-                ],
+                "attempt_history": [{"api_protocol": "responses", "endpoint": "/responses"}],
                 "input_tokens": 4,
                 "output_tokens": 2,
                 "total_tokens": 6,
@@ -2850,9 +3028,7 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
             "instruction_type": task.instruction_type,
             "model": "test-model",
             "api_protocol": "responses",
-            "requested_reasoning_effort": manifest["configuration"][
-                "requested_reasoning_effort"
-            ],
+            "requested_reasoning_effort": manifest["configuration"]["requested_reasoning_effort"],
             "reasoning_effort": manifest["configuration"]["reasoning_effort"],
             "request_interval_seconds": 0.0,
             "litellm_timeout_seconds": None,
@@ -2878,9 +3054,7 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
                 "tool_calls": 2,
                 "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
                 "request_timings": timings,
-                "tool_trace": [
-                    {"stage": "solve", **item} for item in tool_trace
-                ],
+                "tool_trace": [{"stage": "solve", **item} for item in tool_trace],
                 "terminal_submissions": 1,
                 "function_calls_total": 3,
                 "post_prefix_tool_choice": "auto",
@@ -2953,9 +3127,7 @@ def test_comparison_run_binds_result_row_to_exact_manifest(
     assert "comparison_audit_failed" in rerun["inference_invalid_reasons"]
 
 
-def test_comparison_classifies_paper_stage_validation(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_comparison_classifies_paper_stage_validation(tmp_path: Path, monkeypatch: Any) -> None:
     task = _tasks(tmp_path)[0]
 
     def fail_paper(**_: Any) -> AgentResult:
@@ -2977,9 +3149,7 @@ def test_comparison_classifies_paper_stage_validation(
     assert row["paper_stage_reason"] == "view_image was not attached"
 
 
-def test_comparison_classifies_required_routing_failure(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_comparison_classifies_required_routing_failure(tmp_path: Path, monkeypatch: Any) -> None:
     task = _tasks(tmp_path)[0]
 
     def fail_routing(**_: Any) -> AgentResult:
@@ -2999,9 +3169,7 @@ def test_comparison_classifies_required_routing_failure(
     assert row["error_category"] == "routing_protocol"
 
 
-@pytest.mark.parametrize(
-    "reason", ["workbook_unchanged", "edit_recovery_exhausted"]
-)
+@pytest.mark.parametrize("reason", ["workbook_unchanged", "edit_recovery_exhausted"])
 def test_comparison_scores_known_model_execution_failure_as_completed_false(
     tmp_path: Path,
     monkeypatch: Any,
@@ -3014,10 +3182,7 @@ def test_comparison_scores_known_model_execution_failure_as_completed_false(
         0,
         {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
         "response-2",
-        request_timings=[
-            {"turn": turn, "attempts": 1, "attempt_history": [{}]}
-            for turn in (1, 2)
-        ],
+        request_timings=[{"turn": turn, "attempts": 1, "attempt_history": [{}]} for turn in (1, 2)],
     )
 
     def fail_execution(**_: Any) -> AgentResult:
@@ -3165,9 +3330,7 @@ def test_known_model_execution_failure_row_passes_full_audit(
                     "total_tokens": 10,
                 },
                 "request_timings": self.timings,
-                "tool_trace": [
-                    {"stage": "solve", **item} for item in tool_trace
-                ],
+                "tool_trace": [{"stage": "solve", **item} for item in tool_trace],
                 "terminal_submissions": 1,
                 "function_calls_total": 3,
                 "budget": budget,
@@ -3230,9 +3393,7 @@ def test_known_model_execution_failure_row_passes_full_audit(
                     "turn": turn,
                     "stage": "solve",
                     "attempts": 1,
-                    "attempt_history": [
-                        {"api_protocol": "responses", "endpoint": "/responses"}
-                    ],
+                    "attempt_history": [{"api_protocol": "responses", "endpoint": "/responses"}],
                     "input_tokens": 4,
                     "output_tokens": 1,
                     "total_tokens": 5,
@@ -3244,14 +3405,10 @@ def test_known_model_execution_failure_row_passes_full_audit(
             agent_result=AuditableFailureEvidence(budget, timings),
         )
 
-    monkeypatch.setattr(
-        "spreadsheet_harness.comparison.run_arm", fail_with_auditable_evidence
-    )
+    monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", fail_with_auditable_evidence)
     runner._prepare_manifest([task])
     manifest_sha256 = hashlib.sha256(runner.manifest_path.read_bytes()).hexdigest()
-    row = runner._run_one(
-        task, "bare", comparison_manifest_sha256=manifest_sha256
-    )
+    row = runner._run_one(task, "bare", comparison_manifest_sha256=manifest_sha256)
     runner._append(row)
 
     report = audit_comparison(runner.output_dir, [task], arms=("bare",))
@@ -3261,12 +3418,8 @@ def test_known_model_execution_failure_row_passes_full_audit(
     assert report["known_failed_rows"] == 1
     assert report["known_model_execution_failure_rows"] == 1
 
-    monkeypatch.setattr(
-        render_module, "find_libreoffice", lambda explicit=None: "/fake/soffice"
-    )
-    monkeypatch.setattr(
-        render_module, "libreoffice_version", lambda binary: "LibreOffice test"
-    )
+    monkeypatch.setattr(render_module, "find_libreoffice", lambda explicit=None: "/fake/soffice")
+    monkeypatch.setattr(render_module, "libreoffice_version", lambda binary: "LibreOffice test")
 
     def fake_convert(source_copy: Path, output_dir: Path, **_: object) -> Path:
         output_dir.mkdir(parents=True)
@@ -3292,17 +3445,13 @@ def test_known_model_execution_failure_row_passes_full_audit(
         recalculate=True,
     )
     drift_runner._prepare_manifest([task])
-    drift_manifest_sha256 = hashlib.sha256(
-        drift_runner.manifest_path.read_bytes()
-    ).hexdigest()
+    drift_manifest_sha256 = hashlib.sha256(drift_runner.manifest_path.read_bytes()).hexdigest()
     drift_row = drift_runner._run_one(
         task, "bare", comparison_manifest_sha256=drift_manifest_sha256
     )
     drift_runner._append(drift_row)
 
-    drift_report = audit_comparison(
-        drift_runner.output_dir, [task], arms=("bare",)
-    )
+    drift_report = audit_comparison(drift_runner.output_dir, [task], arms=("bare",))
 
     assert drift_row["outcome_kind"] == "infrastructure_failure"
     assert drift_row["score_available"] is False
@@ -3320,19 +3469,42 @@ def test_comparison_counts_ambiguous_delivery_as_transient_but_not_retryable(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     task = _tasks(tmp_path)[0]
+    attempt = {
+        "attempt": 1,
+        "outcome": "error",
+        "error_type": "_AbsoluteRequestDeadlineExpired",
+        "phase": "total",
+        "status_code": None,
+        "retryable": True,
+        "safe_to_retry": False,
+        "safe_retry_reason": None,
+        "automatic_retry_scheduled": False,
+        "delivery_state": "ambiguous_post_send",
+        "api_protocol": "chat-completions",
+        "endpoint": "/chat/completions",
+    }
 
     def fail_ambiguous(**_: Any) -> AgentResult:
         raise ProviderError(
-            "Responses request timed out during read",
+            "Chat Completions request exceeded its absolute 700-second deadline",
             retryable=True,
             safe_to_retry=False,
-            phase="read",
+            phase="total",
             delivery_state="ambiguous_post_send",
+            attempts=1,
+            elapsed_seconds=700.0,
+            attempt_history=[attempt],
         )
 
     monkeypatch.setattr("spreadsheet_harness.comparison.run_arm", fail_ambiguous)
     runner = ComparisonBenchmarkRunner(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            api_protocol="chat-completions",
+            max_retries=0,
+        ),
         tmp_path / "ambiguous-delivery",
         skill_registry=SkillRegistry([]),
         recalculate=False,
@@ -3341,10 +3513,26 @@ def test_comparison_counts_ambiguous_delivery_as_transient_but_not_retryable(
     row = runner._run_one(task, "bare", comparison_manifest_sha256="a" * 64)
 
     assert row["status"] == "error"
+    assert row["outcome_kind"] == "infrastructure_failure"
+    assert row["score_available"] is False
+    assert row["infrastructure_failure_stage"] == "provider"
+    assert row["provider_failure_reason"] == "provider_transient"
+    assert row["replay_permitted"] is False
     assert row["error_category"] == "provider_transient"
     assert row["error_retryable"] is False
+    assert row["provider_error"]["status_code"] is None
+    assert row["provider_error"]["phase"] == "total"
+    assert row["provider_error"]["attempts"] == 1
     assert row["provider_error"]["safe_to_retry"] is False
     assert row["provider_error"]["delivery_state"] == "ambiguous_post_send"
+    assert row["provider_request_audit"] == {
+        "schema_version": 1,
+        "request_retries": 0,
+        "successful_model_calls": 0,
+        "failed_attempts": 1,
+        "known_http_attempts": 1,
+        "exact": True,
+    }
 
 
 def test_resume_preserves_historical_provider_circuit_breaker(
@@ -3356,6 +3544,7 @@ def test_resume_preserves_historical_provider_circuit_breaker(
             "https://example.test/v1",
             "not-a-real-key",
             "test-model",
+            max_retries=0,
             request_interval_seconds=20.0,
         ),
         tmp_path / "resume-breaker",
@@ -3395,9 +3584,7 @@ def test_resume_preserves_historical_provider_circuit_breaker(
     assert summary["attempted_arm_tasks"] == 1
 
 
-def test_end_to_end_deadline_covers_scoring(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_end_to_end_deadline_covers_scoring(tmp_path: Path, monkeypatch: Any) -> None:
     task = _tasks(tmp_path)[0]
     now = [100.0]
     monkeypatch.setattr("spreadsheet_harness.comparison.monotonic", lambda: now[0])
@@ -3500,6 +3687,7 @@ def test_comparison_fails_before_writes_when_strict_isolation_is_unavailable(
             "https://example.test/v1",
             "not-a-real-key",
             "test-model",
+            max_retries=0,
             request_interval_seconds=20.0,
         ),
         output,
