@@ -23,8 +23,8 @@ markers, interrupted seals, structured run records, preregistrations, and
 code-owned protected or quarantined cohorts. A task is exposed when it appears
 in any such source, even if its arm-task did not complete.
 
-At preregistration time the expected inventory for raw rows `[100, 200)` is 31
-exposed tasks (21 Cell, 10 Sheet) and 69 eligible tasks (54 Cell, 15 Sheet).
+At preregistration time after commit `db413df`, the expected inventory for raw
+rows `[100, 200)` is 19 exposed tasks and 81 eligible tasks (58 Cell, 23 Sheet).
 Freeze the first 24 eligible `Cell-Level Manipulation` tasks and the first eight
 eligible `Sheet-Level Manipulation` tasks in original dataset order. Selection
 may use only raw row order, instruction type, and exposure membership. It must
