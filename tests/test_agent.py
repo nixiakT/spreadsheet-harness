@@ -510,6 +510,55 @@ def test_agent_rejects_unchanged_workbook_submit(
     assert caught.value.agent_result.turns == 2
 
 
+def test_agent_can_accept_unchanged_terminal_for_scored_baseline(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class UnchangedBaselineClient:
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> UnchangedBaselineClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **_: Any) -> ResponseTurn:
+            self.turn += 1
+            name = "list_sheets" if self.turn == 1 else "submit_result"
+            return ResponseTurn(
+                f"resp-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", UnchangedBaselineClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "unchanged-baseline")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    config = ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model")
+
+    result = SpreadsheetAgent(
+        config,
+        tools,
+        forced_tool_prefix=("list_sheets",),
+        required_tool_termination=True,
+        require_workbook_change=True,
+        allow_unchanged_terminal=True,
+        max_turns=2,
+    ).run("Edit the workbook")
+
+    assert result.observed_terminal_tool == "submit_result"
+    assert result.terminal_submissions == 1
+
+
 def test_agent_sanitizes_no_arg_tool_arguments_before_replay(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -983,6 +1032,77 @@ def test_agent_forced_turn_rejects_extra_calls_before_tool_execution(
     assert invocations == 0
 
 
+def test_agent_forced_turn_accepts_repeated_expected_calls_serially(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class RepeatedExpectedClient:
+        calls = 0
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> RepeatedExpectedClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, _: dict[str, Any], **__: Any) -> ResponseTurn:
+            type(self).calls += 1
+            if type(self).calls == 1:
+                return ResponseTurn(
+                    "response-batch",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-first",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": "call-second",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        },
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", RepeatedExpectedClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "repeated-forced-run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,
+        max_turns=3,
+        forced_tool_prefix=("list_sheets",),
+        required_tool_termination=True,
+    ).run("inspect")
+
+    assert result.observed_forced_tool_prefix == ["list_sheets"]
+    assert result.tool_calls == 2
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "agent.parallel_tool_batch.accepted" for event in events)
+
+
 def test_agent_required_tool_termination_uses_required_and_submit_result(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -1253,12 +1373,13 @@ def test_agent_forces_code_recovery_after_stalled_edit(
         required_tool_termination=True,
         require_workbook_change=True,
         force_code_on_stalled_edit=True,
+        max_read_only_code_calls_before_edit=3,
         max_turns=6,
     ).run("Edit the workbook")
 
     assert result.final_text == "Spreadsheet task completed."
-    assert result.tool_trace[3] == {"name": "code_interpreter", "ok": True}
-    assert len(tools.invocations) == 5
+    assert result.tool_trace[3] == {"name": "code_interpreter", "ok": False}
+    assert len(tools.invocations) == 4
     assert tools.invocations[-1]["arguments"]["code"].count("save_workbook") == 1
     events = [
         json.loads(line)
@@ -1271,7 +1392,11 @@ def test_agent_forces_code_recovery_after_stalled_edit(
     continued = [
         event for event in events if event["event"] == "agent.unchanged_workbook_recovery_continued"
     ]
-    assert continued[0]["payload"]["turn"] == 4
+    assert continued[0]["payload"]["turn"] == 3
+    deadline_events = [
+        event for event in events if event["event"] == "agent.read_only_code_deadline_rejected"
+    ]
+    assert deadline_events[0]["payload"]["prior_read_only_code_calls"] == 3
 
 
 def test_agent_forces_penultimate_recovery_and_reserves_final_submit_after_rollback(
@@ -3502,7 +3627,7 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
         "type": "function",
         "name": "submit_result",
     }
-    assert FinalTurnClient.requests[1]["max_output_tokens"] == 128
+    assert FinalTurnClient.requests[1]["max_output_tokens"] == 512
 
 
 def test_required_tool_termination_rejects_unadvanced_prefix_on_final_turn(
@@ -3780,7 +3905,7 @@ def test_reserved_submit_only_output_limit_is_auditable_execution_failure(
         "type": "function",
         "name": "submit_result",
     }
-    assert request["max_output_tokens"] == 128
+    assert request["max_output_tokens"] == 512
     assert len(request["tools"]) == 1
     assert request["tools"][0]["name"] == "submit_result"
     assert request["tools"][0]["parameters"] == {
@@ -3879,6 +4004,109 @@ def test_first_turn_output_limit_is_auditable_execution_failure(
     assert budget.to_dict()["used"]["model_calls"] == 1
     assert budget.to_dict()["used"]["total_tokens"] == 12
     assert budget.to_dict()["termination"] is None
+
+
+def test_opt_in_output_limit_recovery_retries_with_code_then_submits(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class RecoveringOutputLimitClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> RecoveringOutputLimitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                raise _output_limit_error()
+            if self.turn == 2:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
+                recovery_prompts = [
+                    part.get("text", "")
+                    for item in payload["input"]
+                    if item.get("role") == "user"
+                    for part in item.get("content", [])
+                    if isinstance(part, dict)
+                ]
+                assert any(
+                    "exceeded the provider output limit" in text for text in recovery_prompts
+                )
+                return ResponseTurn(
+                    "response-edit",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-edit",
+                            "name": "code_interpreter",
+                            "arguments": json.dumps(
+                                {
+                                    "code": (
+                                        "import sheet_harness\n"
+                                        "wb = sheet_harness.load_workbook()\n"
+                                        "wb.active['A1'] = 'recovered'\n"
+                                        "sheet_harness.save_workbook(wb)\n"
+                                    )
+                                }
+                            ),
+                        }
+                    ],
+                    "",
+                    {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+                )
+            assert payload["tool_choice"] == {
+                "type": "function",
+                "name": "submit_result",
+            }
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", RecoveringOutputLimitClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "output-limit-recovery")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        SpreadsheetToolRegistry(session, enable_code=True),
+        max_turns=3,
+        budget=RunBudget(max_model_calls=3, max_total_tokens=100),
+        forced_tool_prefix=("code_interpreter",),
+        required_tool_termination=True,
+        require_workbook_change=True,
+        recover_output_limit=True,
+    ).run("edit")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert result.turns == 3
+    assert result.tool_calls == 1
+    assert result.usage["total_tokens"] == 20
+    assert result.observed_forced_tool_prefix == ["code_interpreter"]
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    recoveries = [
+        event for event in events if event["event"] == "agent.output_limit_recovery_requested"
+    ]
+    assert len(recoveries) == 1
 
 
 def test_output_limit_after_prior_tool_preserves_partial_agent_evidence(
@@ -4650,7 +4878,7 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
     config = ProviderConfig(
         "https://example.test/v1",
         "not-a-real-key",
-        "test-model",
+        "DeepSeek-V4-Flash",
         api_protocol="chat-completions",
         max_retries=0,
         temperature=1.0,
@@ -4709,6 +4937,7 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
                         "message": {
                             "role": "assistant",
                             "content": "Done",
+                            "reasoning_content": "The inspection is complete.",
                         },
                         "finish_reason": "stop",
                     }
@@ -4776,6 +5005,18 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
                 "max_output_tokens": 64,
             }
         )
+        third = client.create(
+            {
+                "model": config.model,
+                "input": [
+                    *second.output,
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Confirm."}],
+                    },
+                ],
+            }
+        )
     finally:
         client.close()
 
@@ -4786,13 +5027,27 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
             "call_id": "tool-call-1",
             "name": "list_sheets",
             "arguments": "{}",
+            "provider_reasoning_content": "",
         }
     ]
     assert first.usage == {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
     assert second.text == "Done"
+    assert second.output == [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Done"}],
+            "provider_reasoning_content": "The inspection is complete.",
+        }
+    ]
+    assert third.text == "Done"
     assert second.usage == {"input_tokens": 20, "output_tokens": 3, "total_tokens": 23}
-    assert [headers["x-litellm-timeout"] for headers in seen_headers] == ["600", "600"]
-    first_wire, second_wire = seen
+    assert [headers["x-litellm-timeout"] for headers in seen_headers] == [
+        "600",
+        "600",
+        "600",
+    ]
+    first_wire, second_wire, third_wire = seen
     assert first_wire["messages"] == [
         {"role": "system", "content": "Use tools."},
         {"role": "user", "content": "Inspect."},
@@ -4825,6 +5080,7 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
         {
             "role": "assistant",
             "content": "",
+            "reasoning_content": "",
             "tool_calls": [
                 {
                     "id": "tool-call-1",
@@ -4834,6 +5090,14 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
             ],
         },
         {"role": "tool", "tool_call_id": "tool-call-1", "content": '{"ok":true}'},
+    ]
+    assert third_wire["messages"] == [
+        {
+            "role": "assistant",
+            "content": "Done",
+            "reasoning_content": "The inspection is complete.",
+        },
+        {"role": "user", "content": "Confirm."},
     ]
     assert first.attempt_history[0]["endpoint"] == "/chat/completions"
     assert first.terminal_event == "chat.completion"

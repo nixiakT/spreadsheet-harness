@@ -4,9 +4,12 @@ import json
 import warnings
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 from openpyxl import Workbook, load_workbook
+from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.worksheet.formula import DataTableFormula
 from PIL import Image
 
 import spreadsheet_harness.render as render_module
@@ -45,6 +48,178 @@ def _save_workbook(path: Path, *, two_sheets: bool = True) -> None:
         second["B1"] = "=Data!B4"
     workbook.save(path)
     workbook.close()
+
+
+def test_restore_ooxml_data_tables_recovers_libreoffice_destroyed_region(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.xlsx"
+    converted = tmp_path / "converted.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["C1"] = 0.1
+    sheet["C2"] = 0.2
+    sheet["A1"] = DataTableFormula(
+        ref="A1:B2",
+        dt2D=True,
+        r1="C1",
+        r2="C2",
+    )
+    sheet["B1"] = 11.0
+    sheet["A2"] = 12.0
+    sheet["B2"] = 13.0
+    workbook.save(source)
+    workbook.close()
+
+    workbook = load_workbook(source, data_only=False)
+    sheet = workbook["Model"]
+    for coordinate in ("A1", "B1", "A2", "B2"):
+        sheet[coordinate] = "=TABLE($C$1,$C$2)"
+    workbook.save(converted)
+    workbook.close()
+
+    report = render_module._restore_ooxml_data_tables(source, converted)
+    workbook = load_workbook(converted, data_only=False)
+    sheet = workbook["Model"]
+    assert isinstance(sheet["A1"].value, DataTableFormula)
+    assert sheet["B1"].value == 11.0
+    assert sheet["A2"].value == 12.0
+    assert sheet["B2"].value == 13.0
+    workbook.close()
+    assert report == {"regions": 1, "cells": 4}
+
+
+def test_patch_font_colors_ooxml_preserves_unrelated_package_parts(
+    tmp_path: Path,
+) -> None:
+    from openpyxl.styles import Font
+
+    path = tmp_path / "color-only.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["A1"] = 10
+    worksheet["B2"] = "=A1+1"
+    worksheet["B3"] = "=A1+2"
+    worksheet["B2"].font = Font(name="Arial", color="FF000000")
+    worksheet["B3"].font = Font(name="Arial", color="FF000000")
+    workbook.create_sheet("Untouched")["A1"] = "keep"
+    workbook.save(path)
+    workbook.close()
+
+    with zipfile.ZipFile(path) as package:
+        before = {member.filename: package.read(member) for member in package.infolist()}
+        model_part = render_module._worksheet_parts_by_name(package)["Model"]
+
+    patched = render_module.patch_font_colors_ooxml(
+        path,
+        {("Model", "B2"): "00B050", ("Model", "$B$3"): "FF00B050"},
+    )
+
+    with zipfile.ZipFile(path) as package:
+        after = {member.filename: package.read(member) for member in package.infolist()}
+    allowed_changes = {"xl/styles.xml", model_part}
+    assert patched == 2
+    assert before.keys() == after.keys()
+    assert {
+        name for name in before if before[name] != after[name]
+    } == allowed_changes
+    output = load_workbook(path, data_only=False)
+    assert output["Model"]["B2"].value == "=A1+1"
+    assert output["Model"]["B3"].value == "=A1+2"
+    assert output["Model"]["B2"].font.color.rgb == "FF00B050"
+    assert output["Model"]["B3"].font.color.rgb == "FF00B050"
+    assert output["Untouched"]["A1"].value == "keep"
+    output.close()
+
+
+def test_restore_ooxml_cell_contents_preserves_target_font_style(
+    tmp_path: Path,
+) -> None:
+    from openpyxl.styles import Font
+
+    source = tmp_path / "source.xlsx"
+    target = tmp_path / "target.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["A1"] = 10
+    worksheet["B2"] = "=A1+1"
+    workbook.save(source)
+    workbook.close()
+    target.write_bytes(source.read_bytes())
+    mutated = load_workbook(target, data_only=False)
+    mutated["Model"]["A1"] = 99
+    mutated["Model"]["B2"] = "=A1+2"
+    mutated["Model"]["B2"].font = Font(color="FFFF0000")
+    mutated.save(target)
+    mutated.close()
+
+    restored = render_module.restore_ooxml_cell_contents(
+        source,
+        target,
+        minimum_changes=2,
+    )
+
+    assert restored == 2
+    output = load_workbook(target, data_only=False)
+    assert output["Model"]["A1"].value == 10
+    assert output["Model"]["B2"].value == "=A1+1"
+    assert output["Model"]["B2"].font.color.rgb == "FFFF0000"
+    output.close()
+
+
+def test_transplant_formula_caches_preserves_formula_and_font_style(
+    tmp_path: Path,
+) -> None:
+    from openpyxl.styles import Font
+
+    target = tmp_path / "target.xlsx"
+    recalculated = tmp_path / "recalculated.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["A1"] = 2
+    worksheet["B1"] = "=A1*3"
+    worksheet["B1"].font = Font(color="FFFF0000")
+    workbook.save(target)
+    workbook.close()
+    recalculated.write_bytes(target.read_bytes())
+    with zipfile.ZipFile(recalculated) as package:
+        part = render_module._worksheet_parts_by_name(package)["Model"]
+        root = render_module._parse_inventory_xml(
+            package.read(part),
+            label="test recalculated worksheet",
+        )
+    namespace = render_module._xml_namespace(root.tag)
+    cell_tag = f"{{{namespace}}}c"
+    value_tag = f"{{{namespace}}}v"
+    formula_cell = next(
+        cell for cell in root.iter(cell_tag) if cell.attrib.get("r") == "B1"
+    )
+    value = formula_cell.find(value_tag)
+    assert value is not None
+    value.text = "6"
+    ElementTree.register_namespace("", namespace)
+    render_module._replace_ooxml_parts(
+        recalculated,
+        {part: ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)},
+    )
+
+    transplanted = render_module.transplant_ooxml_formula_cached_values(
+        recalculated,
+        target,
+    )
+
+    assert transplanted == 1
+    formula_workbook = load_workbook(target, data_only=False)
+    assert formula_workbook["Model"]["B1"].value == "=A1*3"
+    assert formula_workbook["Model"]["B1"].font.color.rgb == "FFFF0000"
+    formula_workbook.close()
+    value_workbook = load_workbook(target, data_only=True)
+    assert value_workbook["Model"]["B1"].value == 6
+    value_workbook.close()
 
 
 def _minimal_workbook_xml(
@@ -129,6 +304,25 @@ def test_isolated_user_profile_is_unique_and_removed() -> None:
 
     assert paths[0] != paths[1]
     assert uris[0] != uris[1]
+
+
+def test_iterative_profile_and_workbook_flag_detection(tmp_path: Path) -> None:
+    workbook_path = tmp_path / "circular.xlsx"
+    workbook = Workbook()
+    workbook.active.title = "Model"
+    workbook.active["A1"] = 1
+    workbook.defined_names.add(DefinedName("circ", attr_text="Model!$A$1"))
+    workbook.calculation.iterate = True
+    workbook.save(workbook_path)
+    workbook.close()
+
+    assert render_module._requires_iterative_calculation(workbook_path)
+    with isolated_user_profile(iterative_calculation=True) as (profile, _):
+        registry = profile / "user" / "registrymodifications.xcu"
+        assert registry.is_file()
+        contents = registry.read_text(encoding="utf-8")
+        assert "IterativeReference" in contents
+        assert "<value>true</value>" in contents
 
 
 def test_libreoffice_command_contains_private_profile(tmp_path: Path) -> None:

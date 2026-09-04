@@ -76,6 +76,16 @@ def test_run_budget_accepts_exact_token_boundary_then_blocks_another_call() -> N
     assert caught.value.budget["termination"]["stage"] == "solve"
 
 
+def test_run_budget_reports_remaining_total_tokens() -> None:
+    assert RunBudget().remaining_total_tokens() is None
+
+    budget = RunBudget(max_total_tokens=10)
+    assert budget.remaining_total_tokens() == 10
+    reservation = budget.begin_model_call(stage="solve")
+    budget.record_response(reservation, {"total_tokens": 7}, stage="solve")
+    assert budget.remaining_total_tokens() == 3
+
+
 def test_run_budget_records_single_response_token_overage() -> None:
     budget = RunBudget(max_model_calls=3, max_total_tokens=10)
     reservation = budget.begin_model_call(stage="solve")
@@ -168,9 +178,7 @@ def test_agent_records_response_before_raising_token_budget(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
     FinalResponsesClient.requests = []
-    FinalResponsesClient.usages = [
-        {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}
-    ]
+    FinalResponsesClient.usages = [{"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}]
     monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", FinalResponsesClient)
     session = WorkbookSession.create(sample_workbook, tmp_path / "token-budget")
     budget = RunBudget(max_model_calls=2, max_total_tokens=10)
@@ -187,9 +195,7 @@ def test_agent_records_response_before_raising_token_budget(
     assert caught.value.agent_result.turns == 1
     assert caught.value.agent_result.usage["total_tokens"] == 11
     assert caught.value.agent_result.request_timings[0]["total_tokens"] == 11
-    assert caught.value.agent_result.budget["termination"]["reason"] == (
-        "max_total_tokens"
-    )
+    assert caught.value.agent_result.budget["termination"]["reason"] == ("max_total_tokens")
     assert budget.to_dict()["used"]["model_calls"] == 1
     assert budget.to_dict()["used"]["total_tokens"] == 11
     trajectory = session.paths.trajectory.read_text(encoding="utf-8")
@@ -217,30 +223,32 @@ def test_forced_prefix_token_overage_preserves_observed_prefix(
             }
             return ResponseTurn(
                 "response-forced-overage",
-                [{
-                    "type": "function_call",
-                    "call_id": "call-list-sheets",
-                    "name": "list_sheets",
-                    "arguments": "{}",
-                }],
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-list-sheets",
+                        "name": "list_sheets",
+                        "arguments": "{}",
+                    }
+                ],
                 "",
                 {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
             )
 
-    monkeypatch.setattr(
-        "spreadsheet_harness.agent.ResponsesClient", ForcedToolOverageClient
-    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ForcedToolOverageClient)
     session = WorkbookSession.create(sample_workbook, tmp_path / "forced-overage")
     tools = type(
         "ListSheetsTools",
         (),
         {
             "session": session,
-            "schemas": [{
-                "type": "function",
-                "name": "list_sheets",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            }],
+            "schemas": [
+                {
+                    "type": "function",
+                    "name": "list_sheets",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                }
+            ],
         },
     )()
 

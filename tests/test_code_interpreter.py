@@ -221,6 +221,10 @@ ws = wb["Sales"]
 overview = sheet_harness.workbook_overview(wb)
 assert isinstance(overview, list)
 assert all(isinstance(item, dict) for item in overview)
+assert overview[0]["counts"]["nonempty_cells"] >= 1
+assert overview[0]["counts"]["formulas"] >= 1
+assert overview[0]["sheet"] == overview[0]["name"]
+assert overview[0]["title"] == overview[0]["name"]
 print(overview[0]["name"])
 print(sheet_harness.table_refs(ws))
 print(sheet_harness.defined_name_refs(wb))
@@ -284,7 +288,7 @@ verified.close()
     workbook.close()
 
 
-def test_code_interpreter_openpyxl_compat_shim_exposes_read_only_formula_and_merge_aliases(
+def test_code_interpreter_openpyxl_compat_shim_exposes_formula_and_worksheet_aliases(
     sample_workbook: Path,
     tmp_path: Path,
 ) -> None:
@@ -297,16 +301,27 @@ def test_code_interpreter_openpyxl_compat_shim_exposes_read_only_formula_and_mer
 
     result = interpreter.run(
         """
+import copy as std_copy_module
+
+from openpyxl import copy as openpyxl_copy
+
 wb = sheet_harness.load_workbook()
 ws = wb["Sales"]
 assert ws.merged_ranges is ws.merged_cells.ranges
 assert sorted(str(item) for item in ws.merged_ranges) == ["A5:B5"]
+assert ws.dimension == ws.dimensions
+ws.close()
+assert ws.auto_filter.mode is None
 assert ws["D2"].formula == "=B2*C2"
 assert ws["A2"].formula is None
+assert ws["B5"].formula is None
+assert openpyxl_copy is std_copy_module
 
 for owner, attribute, replacement in (
     (ws, "merged_ranges", ()),
+    (ws, "dimension", "A1:A1"),
     (ws["D2"], "formula", "=1+1"),
+    (ws["B5"], "formula", "=1+1"),
 ):
     try:
         setattr(owner, attribute, replacement)
@@ -323,6 +338,89 @@ wb.close()
     assert result["ok"] is True, result
     assert result["workbook_changed"] is False
     assert "compat aliases ok" in result["stdout"]
+
+
+def test_code_interpreter_helper_exposes_list_sheets_and_inspect_range(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "inspect-helper-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+wb = sheet_harness.load_workbook()
+inventory = sheet_harness.list_sheets(wb)
+assert inventory["ok"] is True
+assert inventory["sheets"][0]["name"] == "Sales"
+assert isinstance(inventory["sheets"][0]["tables"], list)
+assert inventory["names"] == ["Sales", "Lookup"]
+assert list(inventory["sheets"].keys()) == ["Sales", "Lookup"]
+assert inventory["sheets"]["sheets"][0]["name"] == "Sales"
+assert inventory["by_name"]["Sales"]["dimension"] == "A1:D5"
+
+inspected = sheet_harness.inspect_range("Sales", "A1:D3", wb)
+assert inspected["ok"] is True
+assert inspected["sheet"] == "Sales"
+assert inspected["range"] == "A1:D3"
+assert inspected["region"] == "A1:D3"
+assert inspected["row_count"] == 3
+assert inspected["column_count"] == 4
+assert inspected["cell_count"] == 12
+assert inspected["matrix"][0] == ["Item", "Qty", "Price", "Total"]
+assert inspected["cells"]["D3"]["coordinate"] == "D3"
+assert inspected["cells"]["D3"]["formula"] == "=B3*C3"
+assert inspected["cell_list"][-1]["coordinate"] == "D3"
+assert sheet_harness.column_name(4) == "D"
+print("inspect helper ok")
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert result["workbook_changed"] is False
+    assert "inspect helper ok" in result["stdout"]
+
+
+def test_code_interpreter_helper_clear_range_clears_existing_values(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "clear-range-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run(
+        """
+wb = sheet_harness.load_workbook()
+ws = wb["Sales"]
+cleared = sheet_harness.clear_range(ws, "A2:B3")
+assert cleared["ok"] is True
+assert cleared["cells_cleared"] == 4
+assert ws["A2"].value is None
+assert ws["B3"].value is None
+sheet_harness.save_workbook(wb)
+wb.close()
+
+verified = sheet_harness.load_workbook()
+vws = verified["Sales"]
+assert vws["A2"].value is None
+assert vws["B3"].value is None
+verified.close()
+print("clear range ok")
+"""
+    )
+
+    assert result["ok"] is True, result
+    assert result["workbook_changed"] is True
+    assert "clear range ok" in result["stdout"]
 
 
 def test_code_interpreter_reports_failed_managed_save_attempt(
@@ -365,6 +463,24 @@ def test_code_interpreter_failed_inspection_has_no_mutation_signal(
     assert result["ok"] is False
     assert result["workbook_changed"] is False
     assert result["managed_mutation_attempted"] is False
+
+
+def test_code_interpreter_syntax_error_returns_generic_unchanged_message(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "syntax-error-run")
+    interpreter = LocalCodeInterpreter(
+        session.workspace,
+        session.workbook_path,
+        require_isolation=False,
+    )
+
+    result = interpreter.run("print('oops'\n")
+
+    assert result["ok"] is False
+    assert result["workbook_changed"] is False
+    assert "Workbook did not change" in result["message"]
 
 
 def test_code_interpreter_starts_each_call_in_a_fresh_process(
@@ -1134,6 +1250,7 @@ import os
 from openpyxl import load_workbook
 
 path = os.environ["SHEET_WORKBOOK"]
+print(sheet_harness.workbook_overview(path)[0]["sheet"])
 print(sheet_harness.workbook_overview(path)[0]["name"])
 wb = load_workbook(path)
 cell = wb["Sales"]["D2"]

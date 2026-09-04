@@ -15,6 +15,22 @@ from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import HarnessError
 
 
+def test_benchmark_compare_parses_plugin_composition_override() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "compare",
+            "--arm",
+            "ours",
+            "--composition",
+            "ours=plugevolve-seed",
+        ]
+    )
+
+    assert args.arm == ["ours"]
+    assert args.composition == ["ours=plugevolve-seed"]
+
+
 def test_cmd_run_passes_provider_key_to_registry_redaction(
     sample_workbook: Path,
     tmp_path: Path,
@@ -522,8 +538,8 @@ def test_historical_v24_contract_is_parseable_but_current_runner_differs(
     )
 
     assert actual != document["execution"]
-    assert actual["comparison_protocol_version"] == "resource_matched_multi_arm_v29"
-    assert actual["comparison_manifest_schema_version"] == 18
+    assert actual["comparison_protocol_version"] == "resource_matched_multi_arm_v31"
+    assert actual["comparison_manifest_schema_version"] == 20
 
 
 def test_documented_v25_confirmation_command_is_historical_and_read_only(

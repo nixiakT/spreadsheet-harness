@@ -85,7 +85,11 @@ class _FormulaTextCandidate:
 
 
 _OPENPYXL_COMPAT_SHIM = r"""
+import copy as _sheet_harness_stdlib_copy_module
+
+import openpyxl as _sheet_harness_openpyxl
 from openpyxl.chartsheet import Chartsheet as _SheetHarnessChartsheet
+from openpyxl.cell.cell import Cell as _SheetHarnessCell, MergedCell as _SheetHarnessMergedCell
 from openpyxl.drawing.spreadsheet_drawing import (
     SpreadsheetDrawing as _SheetHarnessSpreadsheetDrawing,
 )
@@ -95,6 +99,8 @@ from openpyxl.packaging.relationship import (
 )
 from openpyxl.reader.drawings import find_images as _sheet_harness_find_images
 from openpyxl.reader.excel import ExcelReader as _SheetHarnessExcelReader
+from openpyxl.worksheet.filters import AutoFilter as _SheetHarnessAutoFilter
+from openpyxl.worksheet.worksheet import Worksheet as _SheetHarnessWorksheet
 from openpyxl.xml.functions import fromstring as _sheet_harness_fromstring
 
 
@@ -171,27 +177,38 @@ def _sheet_harness_install_openpyxl_compat():
             Workbook._duplicate_name = _duplicate_name
             Workbook._sheet_harness_duplicate_name_compat = True
 
-        from openpyxl.worksheet.worksheet import Worksheet
-        if not hasattr(Worksheet, "_tableparts"):
-            Worksheet._tableparts = property(
+        if not hasattr(_SheetHarnessWorksheet, "_tableparts"):
+            _SheetHarnessWorksheet._tableparts = property(
                 lambda self: list(getattr(self, "tables", {}).values())
             )
-        if not hasattr(Worksheet, "merged_ranges"):
-            Worksheet.merged_ranges = property(
+        if not hasattr(_SheetHarnessWorksheet, "merged_ranges"):
+            _SheetHarnessWorksheet.merged_ranges = property(
                 lambda self: self.merged_cells.ranges
             )
+        if not hasattr(_SheetHarnessWorksheet, "dimension"):
+            _SheetHarnessWorksheet.dimension = property(lambda self: self.dimensions)
+        if not hasattr(_SheetHarnessWorksheet, "close"):
+            _SheetHarnessWorksheet.close = lambda self: None
+        if not hasattr(_SheetHarnessAutoFilter, "mode"):
+            _SheetHarnessAutoFilter.mode = property(lambda self: None)
 
-        from openpyxl.cell.cell import Cell
-        if not hasattr(Cell, "dtype"):
-            Cell.dtype = property(
+        if not hasattr(_SheetHarnessCell, "dtype"):
+            _SheetHarnessCell.dtype = property(
                 lambda self: "formula" if getattr(self, "data_type", None) == "f" else self.data_type
             )
-        if not hasattr(Cell, "formula"):
-            Cell.formula = property(
+        if not hasattr(_SheetHarnessCell, "formula"):
+            _SheetHarnessCell.formula = property(
                 lambda self: self.value
                 if getattr(self, "data_type", None) == "f"
                 else None
             )
+        if not hasattr(_SheetHarnessMergedCell, "formula"):
+            _SheetHarnessMergedCell.formula = property(lambda self: None)
+        if not hasattr(_SheetHarnessMergedCell, "dtype"):
+            _SheetHarnessMergedCell.dtype = property(lambda self: self.data_type)
+
+        if not hasattr(_sheet_harness_openpyxl, "copy"):
+            _sheet_harness_openpyxl.copy = _sheet_harness_stdlib_copy_module
     except Exception as exc:
         import sys
         print(
@@ -215,6 +232,7 @@ import os
 import re
 from contextlib import contextmanager
 from copy import copy
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -256,6 +274,24 @@ def load_workbook(path: str | Path | None = None, *, data_only: bool = False, **
     kwargs.setdefault("keep_vba", target.suffix.lower() == ".xlsm")
     kwargs.setdefault("keep_links", True)
     return _sheet_harness_load_workbook(target, data_only=data_only, **kwargs)
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    return str(value)
+
+
+class _AttrDict(dict):
+    """Dictionary that also exposes keys as attributes for workbook inspection helpers."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
 
 
 def table_map(worksheet: Any) -> dict[str, Any]:
@@ -315,13 +351,29 @@ def workbook_overview(workbook: Any | None = None) -> list[dict[str, Any]]:
     overview: list[dict[str, Any]] = []
     try:
         for index, worksheet in enumerate(workbook.worksheets):
+            raw_cells = getattr(worksheet, "_cells", {})
+            if isinstance(raw_cells, dict):
+                populated_cells = list(raw_cells.values())
+                counts = {
+                    "nonempty_cells": sum(
+                        1 for cell in populated_cells if getattr(cell, "value", None) is not None
+                    ),
+                    "formulas": sum(
+                        1 for cell in populated_cells if getattr(cell, "data_type", None) == "f"
+                    ),
+                }
+            else:
+                counts = {"nonempty_cells": None, "formulas": None}
             overview.append(
                 {
                     "index": index,
+                    "sheet": worksheet.title,
                     "name": worksheet.title,
+                    "title": worksheet.title,
                     "dimension": worksheet.calculate_dimension(),
                     "max_row": worksheet.max_row,
                     "max_column": worksheet.max_column,
+                    "counts": counts,
                     "tables": table_refs(worksheet),
                     "merged_ranges": [str(item) for item in worksheet.merged_cells.ranges],
                 }
@@ -330,6 +382,183 @@ def workbook_overview(workbook: Any | None = None) -> list[dict[str, Any]]:
     finally:
         if should_close:
             workbook.close()
+
+
+def _intersects(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
+    l_min_col, l_min_row, l_max_col, l_max_row = left
+    r_min_col, r_min_row, r_max_col, r_max_row = right
+    return not (
+        l_max_col < r_min_col
+        or r_max_col < l_min_col
+        or l_max_row < r_min_row
+        or r_max_row < l_min_row
+    )
+
+
+class _SheetInventory(list[dict[str, Any]]):
+    """List-like sheet metadata with compatibility helpers for model-written code."""
+
+    def keys(self) -> list[str]:
+        return [
+            str(item.get("name"))
+            for item in self
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ]
+
+    def by_name(self) -> dict[str, dict[str, Any]]:
+        return {
+            str(item["name"]): item
+            for item in self
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except (KeyError, TypeError):
+            return default
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            if key == "sheets":
+                return list(self)
+            if key == "names":
+                return self.keys()
+            if key == "by_name":
+                return self.by_name()
+            raise KeyError(key)
+        return super().__getitem__(key)
+
+
+def list_sheets(workbook: Any | None = None) -> dict[str, Any]:
+    """Return compact workbook inventory similar to the native list_sheets tool."""
+
+    workbook, should_close = _load_if_path(workbook)
+    try:
+        sheets = []
+        for index, worksheet in enumerate(workbook.worksheets):
+            sheets.append(
+                {
+                    "index": index,
+                    "name": worksheet.title,
+                    "state": getattr(worksheet, "sheet_state", "visible"),
+                    "dimension": worksheet.calculate_dimension(),
+                    "max_row": worksheet.max_row,
+                    "max_column": worksheet.max_column,
+                    "merged_ranges": len(worksheet.merged_cells.ranges),
+                    "tables": sorted(table_map(worksheet).keys()),
+                }
+            )
+        active = getattr(getattr(workbook, "active", None), "title", None)
+        inventory = _SheetInventory(sheets)
+        return {
+            "ok": True,
+            "sheets": inventory,
+            "names": inventory.keys(),
+            "by_name": inventory.by_name(),
+            "active": active,
+        }
+    finally:
+        if should_close:
+            workbook.close()
+
+
+def inspect_range(
+    sheet: str,
+    range_ref: str,
+    workbook: Any | None = None,
+    *,
+    include_styles: bool = False,
+    max_cells: int = 500,
+) -> dict[str, Any]:
+    """Inspect one bounded A1 range similarly to the native inspect_range tool."""
+
+    bounds = range_boundaries(range_ref.replace("$", ""))
+    min_col, min_row, max_col, max_row = bounds
+    if not all(isinstance(item, int) and item >= 1 for item in bounds):
+        raise ValueError(f"Range must be bounded: {range_ref!r}")
+    count = (max_col - min_col + 1) * (max_row - min_row + 1)
+    if count > max_cells:
+        raise ValueError(f"Range contains {count} cells; limit is {max_cells}")
+
+    formula_book, should_close_formula = _load_if_path(workbook, data_only=False)
+    if should_close_formula:
+        value_book = load_workbook(data_only=True)
+        should_close_value = True
+    else:
+        value_book = formula_book
+        should_close_value = False
+    try:
+        formula_sheet = formula_book[sheet]
+        value_sheet = value_book[sheet]
+        matrix: list[list[Any]] = []
+        cells: list[dict[str, Any]] = []
+        cell_map: dict[str, dict[str, Any]] = {}
+        for row in range(min_row, max_row + 1):
+            matrix_row: list[Any] = []
+            for column in range(min_col, max_col + 1):
+                cell = formula_sheet.cell(row, column)
+                cached_cell = value_sheet.cell(row, column)
+                cached = cached_cell.value
+                raw = cell.value
+                display = raw if isinstance(raw, str) and raw.startswith("=") else cached
+                if display is None:
+                    display = raw
+                matrix_row.append(_json_value(display))
+                if raw is not None or cached is not None or cell.has_style:
+                    item: dict[str, Any] = {
+                        "coordinate": cell.coordinate,
+                        "value": _json_value(cached if cached is not None else raw),
+                        "formula": raw
+                        if isinstance(raw, str) and raw.startswith("=")
+                        else None,
+                        "data_type": cell.data_type,
+                        "cached_data_type": cached_cell.data_type,
+                    }
+                    if include_styles:
+                        item["style"] = {
+                            "style_id": cell.style_id,
+                            "number_format": cell.number_format,
+                        }
+                    cells.append(item)
+                    cell_map[cell.coordinate] = _AttrDict(item)
+            matrix.append(matrix_row)
+
+        merged = [
+            str(item)
+            for item in formula_sheet.merged_cells.ranges
+            if _intersects(bounds, range_boundaries(str(item)))
+        ]
+        tables = []
+        for name, table in table_map(formula_sheet).items():
+            ref = str(getattr(table, "ref", table))
+            if _intersects(bounds, range_boundaries(ref)):
+                tables.append({"name": name, "ref": ref})
+        return {
+            "ok": True,
+            "sheet": sheet,
+            "range": (
+                f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+            ),
+            # Keep a legacy-friendly alias for models that expect inspect tools to
+            # expose the selected region under `region`.
+            "region": (
+                f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+            ),
+            "row_count": max_row - min_row + 1,
+            "column_count": max_col - min_col + 1,
+            "cell_count": count,
+            "matrix": matrix,
+            "cells": cell_map,
+            "cell_list": cells,
+            "merged_ranges": merged,
+            "tables": tables,
+        }
+    finally:
+        if should_close_formula:
+            formula_book.close()
+        if should_close_value:
+            value_book.close()
 
 
 def copy_cell_format(source: Any, target: Any) -> None:
@@ -341,6 +570,28 @@ def copy_cell_format(source: Any, target: Any) -> None:
         target.alignment = copy(source.alignment)
     if source.protection:
         target.protection = copy(source.protection)
+
+
+def clear_range(worksheet: Any, range_ref: str) -> dict[str, Any]:
+    min_col, min_row, max_col, max_row = range_boundaries(range_ref.replace("$", ""))
+    count = 0
+    for row in range(min_row, max_row + 1):
+        for column in range(min_col, max_col + 1):
+            worksheet.cell(row=row, column=column).value = None
+            count += 1
+    return {
+        "ok": True,
+        "worksheet": getattr(worksheet, "title", None),
+        "range": range_ref,
+        "cells_cleared": count,
+    }
+
+
+def column_name(column_index: int) -> str:
+    index = int(column_index)
+    if index < 1:
+        raise ValueError("column_index must be >= 1")
+    return get_column_letter(index)
 
 
 def _cell_ref_parts(ref: str) -> dict[str, Any] | None:
@@ -636,6 +887,10 @@ def _runtime_roots(workspace: Path) -> list[Path]:
             f"Active Python executable is outside the allowlisted runtime roots: {executable}"
         )
     return roots
+
+
+def _unchanged_workbook_message(*, exit_code: int, stderr: str) -> str:
+    return "Workbook did not change. If this was meant to edit, save changes back to SHEET_WORKBOOK before submitting."
 
 
 def _parent_directories(paths: list[Path]) -> list[Path]:
@@ -1513,14 +1768,17 @@ runpy.run_path(
                 "helper_module": _RUNTIME_HELPER_NAME,
                 "message": (
                     "Workbook changed. If your script already reopened or inspected the exact "
-                    "target range and stdout shows the expected state, finish now; otherwise run "
-                    "one narrow verification or correction."
+                    "target range and stdout shows the expected state, submit_result next; "
+                    "otherwise run one narrow verification or correction only. Do not dump whole "
+                    "sheets or re-derive the full task after a successful save."
                     if before_sha256 is not None
                     and after_sha256 is not None
                     and before_sha256 != after_sha256
                     else (
-                        "Workbook did not change. If this was meant to edit, save changes "
-                        "back to SHEET_WORKBOOK before submitting."
+                        _unchanged_workbook_message(
+                            exit_code=completed.returncode,
+                            stderr=stderr,
+                        )
                     )
                 ),
             }

@@ -8,7 +8,7 @@ import re
 import shutil
 import threading
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from copy import copy
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -25,7 +25,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from .code_interpreter import validate_formula_transaction
 from .errors import RecalculationIntegrityError, ToolInputError, WorkbookValidationError
-from .openpyxl_compat import load_workbook
+from .openpyxl_compat import load_workbook, repair_workbook_archive_in_place
 from .trajectory import TrajectoryRecorder
 
 SUPPORTED_EDIT_FORMATS = {".xlsx", ".xlsm"}
@@ -264,6 +264,8 @@ class WorkbookSession:
         workbook_copy = artifacts / f"output{source_path.suffix.lower()}"
         shutil.copy2(source_path, input_copy)
         shutil.copy2(source_path, workbook_copy)
+        repair_workbook_archive_in_place(input_copy)
+        repair_workbook_archive_in_place(workbook_copy)
         paths = SessionPaths(
             root=root,
             input=input_copy,
@@ -456,74 +458,102 @@ class WorkbookSession:
         include_styles: bool = True,
         max_cells: int = 500,
     ) -> dict[str, Any]:
-        bounds = self._bounds(range_ref, max_cells=max_cells)
-        min_col, min_row, max_col, max_row = bounds
+        return self.inspect_ranges(
+            ((sheet, range_ref),),
+            include_styles=include_styles,
+            max_cells=max_cells,
+        )[0]
+
+    def inspect_ranges(
+        self,
+        ranges: Sequence[tuple[str, str]],
+        *,
+        include_styles: bool = True,
+        max_cells: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Inspect several ranges while loading each workbook view only once."""
+
+        requested = [
+            (sheet, range_ref, self._bounds(range_ref, max_cells=max_cells))
+            for sheet, range_ref in ranges
+        ]
+        if not requested:
+            return []
         formula_book = self._load(data_only=False)
         value_book = self._load(data_only=True)
         try:
-            formula_sheet = self._sheet(formula_book, sheet)
-            value_sheet = self._sheet(value_book, sheet)
-            matrix: list[list[Any]] = []
-            cells: list[dict[str, Any]] = []
-            for row in range(min_row, max_row + 1):
-                matrix_row: list[Any] = []
-                for column in range(min_col, max_col + 1):
-                    cell = formula_sheet.cell(row, column)
-                    cached_cell = value_sheet.cell(row, column)
-                    cached = cached_cell.value
-                    raw = cell.value
-                    display = raw if isinstance(raw, str) and raw.startswith("=") else cached
-                    if display is None:
-                        display = raw
-                    matrix_row.append(_json_value(display))
-                    if raw is not None or cached is not None or cell.has_style:
-                        item: dict[str, Any] = {
-                            "coordinate": cell.coordinate,
-                            "value": _json_value(cached if cached is not None else raw),
-                            "formula": raw
-                            if isinstance(raw, str) and raw.startswith("=")
-                            else None,
-                            "data_type": cell.data_type,
-                            "cached_data_type": cached_cell.data_type,
-                        }
-                        if include_styles:
-                            item["style"] = {
-                                "style_id": cell.style_id,
-                                "number_format": cell.number_format,
-                                "font": {
-                                    "bold": bool(cell.font.bold),
-                                    "italic": bool(cell.font.italic),
-                                    "color": _color_value(cell.font.color),
-                                },
-                                "fill": _color_value(cell.fill.fgColor),
-                                "alignment": {
-                                    "horizontal": cell.alignment.horizontal,
-                                    "vertical": cell.alignment.vertical,
-                                    "wrap_text": cell.alignment.wrap_text,
-                                },
+            results: list[dict[str, Any]] = []
+            for sheet, _range_ref, bounds in requested:
+                min_col, min_row, max_col, max_row = bounds
+                formula_sheet = self._sheet(formula_book, sheet)
+                value_sheet = self._sheet(value_book, sheet)
+                matrix: list[list[Any]] = []
+                cells: list[dict[str, Any]] = []
+                for row in range(min_row, max_row + 1):
+                    matrix_row: list[Any] = []
+                    for column in range(min_col, max_col + 1):
+                        cell = formula_sheet.cell(row, column)
+                        cached_cell = value_sheet.cell(row, column)
+                        cached = cached_cell.value
+                        raw = cell.value
+                        display = raw if isinstance(raw, str) and raw.startswith("=") else cached
+                        if display is None:
+                            display = raw
+                        matrix_row.append(_json_value(display))
+                        if raw is not None or cached is not None or cell.has_style:
+                            item: dict[str, Any] = {
+                                "coordinate": cell.coordinate,
+                                "value": _json_value(cached if cached is not None else raw),
+                                "formula": raw
+                                if isinstance(raw, str) and raw.startswith("=")
+                                else None,
+                                "data_type": cell.data_type,
+                                "cached_data_type": cached_cell.data_type,
                             }
-                        cells.append(item)
-                matrix.append(matrix_row)
+                            if include_styles:
+                                item["style"] = {
+                                    "style_id": cell.style_id,
+                                    "number_format": cell.number_format,
+                                    "font": {
+                                        "bold": bool(cell.font.bold),
+                                        "italic": bool(cell.font.italic),
+                                        "color": _color_value(cell.font.color),
+                                    },
+                                    "fill": _color_value(cell.fill.fgColor),
+                                    "alignment": {
+                                        "horizontal": cell.alignment.horizontal,
+                                        "vertical": cell.alignment.vertical,
+                                        "wrap_text": cell.alignment.wrap_text,
+                                    },
+                                }
+                            cells.append(item)
+                    matrix.append(matrix_row)
 
-            merged = [
-                str(item)
-                for item in formula_sheet.merged_cells.ranges
-                if _intersects(bounds, range_boundaries(str(item)))
-            ]
-            tables = []
-            for name in formula_sheet.tables.keys():
-                ref = _table_ref(formula_sheet.tables[name])
-                if _intersects(bounds, range_boundaries(ref)):
-                    tables.append({"name": name, "ref": ref})
-            return {
-                "ok": True,
-                "sheet": sheet,
-                "range": f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}",
-                "matrix": matrix,
-                "cells": cells,
-                "merged_ranges": merged,
-                "tables": tables,
-            }
+                merged = [
+                    str(item)
+                    for item in formula_sheet.merged_cells.ranges
+                    if _intersects(bounds, range_boundaries(str(item)))
+                ]
+                tables = []
+                for name in formula_sheet.tables.keys():
+                    ref = _table_ref(formula_sheet.tables[name])
+                    if _intersects(bounds, range_boundaries(ref)):
+                        tables.append({"name": name, "ref": ref})
+                results.append(
+                    {
+                        "ok": True,
+                        "sheet": sheet,
+                        "range": (
+                            f"{get_column_letter(min_col)}{min_row}:"
+                            f"{get_column_letter(max_col)}{max_row}"
+                        ),
+                        "matrix": matrix,
+                        "cells": cells,
+                        "merged_ranges": merged,
+                        "tables": tables,
+                    }
+                )
+            return results
         finally:
             formula_book.close()
             value_book.close()

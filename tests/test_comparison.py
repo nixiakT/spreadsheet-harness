@@ -142,9 +142,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     encoded = json.dumps(manifest)
 
     assert manifest["task_count"] == 2
-    assert manifest["schema_version"] == 18
-    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 18
-    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v29"
+    assert manifest["schema_version"] == 20
+    assert COMPARISON_MANIFEST_SCHEMA_VERSION == 20
+    assert COMPARISON_PROTOCOL_VERSION == "resource_matched_multi_arm_v31"
     assert manifest["comparison_protocol_version"] == COMPARISON_PROTOCOL_VERSION
     assert manifest["configuration"]["code_workbook_formula_gate"] == (
         "rollback-new-invalid-a1-or-high-confidence-unprefixed-formula-text-v2"
@@ -166,12 +166,21 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     )
 
 
-    assert manifest["configuration"]["ours_tool_policy"] == ("fixed-six-code-first-v1")
+    assert manifest["configuration"]["ours_tool_policy"] == ("code-interpreter-only-v1")
     assert manifest["configuration"]["deterministic_profile_policy"] == (
-        "representative-evidence-12k-v1"
+        "compact-routing-hint-4k-v1"
     )
     assert manifest["configuration"]["formula_verification_skill_policy"] == (
-        "trajectory-local-transfer-gate-v1"
+        "disabled-in-default-ours-v1"
+    )
+    assert manifest["configuration"]["plugin_composition_policy"] == (
+        "service-seam-spreadsheet-capability-bank-v2"
+    )
+    assert manifest["configuration"]["plugin_failure_attribution_policy"] == (
+        "infrastructure-composition-gap-capability-routing-v1"
+    )
+    assert manifest["configuration"]["plugin_lifecycle_policy"] == (
+        "ephemeral-replay-transfer-regression-persistent-v1"
     )
     assert manifest["configuration"]["recalculation_integrity_policy"] == (
         "exact-ordered-sheet-kind-name-visibility-v2"
@@ -191,7 +200,12 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert manifest["configuration"]["formula_runtime_gate"] == (
         "raw-ooxml-dirty-formula-scope-complete-clean-calc-v1"
     )
-    assert manifest["configuration"]["formula_runtime_gate_arms"] == ["ours"]
+    assert manifest["configuration"]["formula_runtime_gate_arms"] == []
+    assert manifest["configuration"]["plugin_skill_selection"] == {
+        "bare": [],
+        "paper": [],
+        "ours": [],
+    }
     assert manifest["configuration"]["formula_runtime_validation_scope"] == (
         "range-or-single-recalc-sparse-pending-formulas-v1"
     )
@@ -233,7 +247,10 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
             "reconcile": [],
             "solve": ["code_interpreter", "code_interpreter"],
         },
-        "ours": {"solve": ["code_interpreter", "code_interpreter"]},
+        "ours": {
+            "plan": [],
+            "execute": ["code_interpreter"],
+        },
     }
     assert manifest["post_prefix_routing"] == {
         "tool_choice": "auto",
@@ -251,6 +268,29 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
             "solve": ["code_interpreter"],
         },
         "ours": {
+            "plan": [],
+            "execute": ["code_interpreter"],
+        },
+    }
+    assert set(manifest["plugin_compositions"]) == set(COMPARISON_ARMS)
+    ours_composition = manifest["plugin_compositions"]["ours"]
+    assert len(ours_composition["composition_sha256"]) == 64
+    assert [
+        plugin["name"] for plugin in ours_composition["composition"]["plugins"]
+    ] == [
+        "runtime-code-interpreter",
+        "profile-deterministic-compact",
+        "policy-ours",
+        "repair-date-text",
+    ]
+    assert manifest["configuration"]["skills_for_ours_only"] == []
+    assert _stage_allowed_tools_policy(
+        ("ours",), protocol_version=V25_COMPARISON_PROTOCOL_VERSION
+    ) == {"ours": {"solve": "all"}}
+    assert _stage_allowed_tools_policy(
+        ("ours",), protocol_version=V28_COMPARISON_PROTOCOL_VERSION
+    ) == {
+        "ours": {
             "solve": [
                 "code_interpreter",
                 "fill_formula",
@@ -259,17 +299,14 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
                 "render_workbook",
                 "view_image",
             ]
-        },
+        }
     }
-    assert _stage_allowed_tools_policy(
-        ("ours",), protocol_version=V25_COMPARISON_PROTOCOL_VERSION
-    ) == {"ours": {"solve": "all"}}
     assert manifest["allowed_observed_terminals"]["paper"]["reconcile"] == [
         "assistant_text",
         "model_response_length",
         "budget_exhausted",
     ]
-    assert manifest["allowed_observed_terminals"]["ours"]["solve"] == [
+    assert manifest["allowed_observed_terminals"]["ours"]["execute"] == [
         "submit_result",
         "submit_result_length",
         "model_response_length",
@@ -301,7 +338,7 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
             "reconcile": 1,
             "solve": 7,
         },
-        "ours": {"solve": 20},
+        "ours": {"plan": 1, "execute": 19},
     }
     assert manifest["turn_cap_policy"]["version"] == "per_arm_turn_cap_v2"
     assert manifest["turn_cap_policy"]["max_turns_per_arm"] == 20
@@ -382,7 +419,45 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     ]
 
 
-def test_v29_preflight_requires_exact_zero_retry_provider_evidence(
+def test_comparison_manifest_binds_plugevolve_seed_override(tmp_path: Path) -> None:
+    from spreadsheet_harness.plugins import PLUGEOLVE_SEED_COMPOSITION
+
+    runner = ComparisonBenchmarkRunner(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tmp_path / "plugevolve-comparison",
+        skill_registry=SkillRegistry([Path(__file__).parents[1] / "skills"]),
+        arms=("ours",),
+        composition_overrides={"ours": PLUGEOLVE_SEED_COMPOSITION},
+    )
+
+    manifest = runner._manifest(_tasks(tmp_path))
+    composition = manifest["plugin_compositions"]["ours"]
+
+    assert composition["composition"]["name"] == "plugevolve-seed"
+    assert len(composition["composition_sha256"]) == 64
+    assert manifest["configuration"]["formula_runtime_gate_arms"] == ["ours"]
+    assert manifest["configuration"]["formula_verification_skill_policy"] == (
+        "composition-selected-capability-bank-v1"
+    )
+    assert manifest["configuration"]["plugin_skill_selection"]["ours"] == [
+            "spreadsheet-structure",
+            "spreadsheet-formula",
+            "spreadsheet-financial-model",
+            "spreadsheet-manipulation",
+        "spreadsheet-analysis",
+        "visual-review",
+        "spreadsheet-verification",
+        "spreadsheet-memory",
+    ]
+    assert manifest["stage_allowed_tools"] == {
+        "ours": {
+            "plan": [],
+            "execute": ["code_interpreter", "recalculate_and_read"],
+        }
+    }
+
+
+def test_v30_preflight_requires_exact_zero_retry_provider_evidence(
     tmp_path: Path,
 ) -> None:
     runner = ComparisonBenchmarkRunner(
@@ -462,7 +537,7 @@ def test_v26_through_v28_terminal_policy_requires_submit_for_tool_stages(
     ]
 
 
-def test_v29_terminal_policy_adds_generic_output_limit_to_every_stage() -> None:
+def test_v30_terminal_policy_adds_generic_output_limit_to_every_stage() -> None:
     policy = _allowed_observed_terminals_policy(
         {
             "bare": {"solve": 2},
@@ -577,7 +652,7 @@ def test_comparison_manifest_records_custom_turn_caps_and_zero_pacing(
             "reconcile": 5,
             "solve": 35,
         },
-        "ours": {"solve": 100},
+        "ours": {"plan": 1, "execute": 99},
     }
 
 
@@ -810,6 +885,50 @@ def test_comparison_uses_verified_manifest_order_without_rereading(
         "task_ids_sha256": "2" * 64,
         "dataset_json_sha256": "3" * 64,
     }
+
+
+def test_comparison_preserves_task_id_file_order(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    ids = tmp_path / "ids.txt"
+    ids.write_text("sheet-1\ncell-1\n", encoding="utf-8")
+    tasks = _tasks(tmp_path)
+    parser = cli_module.build_parser()
+    monkeypatch.setattr(cli_module, "download_verified", lambda _: tmp_path / "dataset")
+    monkeypatch.setattr(cli_module, "load_verified_tasks", lambda _: tasks)
+    captured: dict[str, Any] = {}
+
+    class FakeRunner:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            return None
+
+        def run(self, selected: list[SpreadsheetTask]) -> dict[str, Any]:
+            captured["task_ids"] = [task.task_id for task in selected]
+            return {
+                "missing_arm_tasks": 0,
+                "arms": {"bare": {"errors": 0}, "ours": {"errors": 0}},
+            }
+
+    monkeypatch.setattr(cli_module, "ComparisonBenchmarkRunner", FakeRunner)
+    monkeypatch.setattr(
+        cli_module,
+        "_provider",
+        lambda _: ProviderConfig("https://example.test/v1", "key", "model"),
+    )
+    args = parser.parse_args(
+        [
+            "benchmark",
+            "compare",
+            "--task-id-file",
+            str(ids),
+            "--output",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    assert cli_module.cmd_benchmark_compare(args) == 0
+    assert captured["task_ids"] == ["sheet-1", "cell-1"]
 
 
 def test_comparison_rejects_unreachable_turn_ceiling(tmp_path: Path) -> None:
@@ -2670,7 +2789,7 @@ def test_comparison_persists_agent_tool_recalculation_failure_without_scoring(
     assert not_evaluated[0]["payload"]["infrastructure_failure_tool"] == ("recalculate_and_read")
 
 
-def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
+def test_current_ours_uses_postprocess_recalculation_without_formula_plugin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2689,10 +2808,10 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         nonlocal code_calls
-        del code, timeout_seconds
+        del timeout_seconds
         code_calls += 1
         before = hashlib.sha256(interpreter.workbook.read_bytes()).hexdigest()
-        if code_calls == 1:
+        if code == "write_formula":
             workbook = load_workbook(interpreter.workbook)
             try:
                 workbook.active["B1"] = "=1+1"
@@ -2710,7 +2829,7 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
             "workbook_sha256_before": before,
             "workbook_sha256_after": after,
             "workbook_changed": before != after,
-            "managed_mutation_attempted": code_calls == 1,
+            "managed_mutation_attempted": code == "write_formula",
         }
 
     monkeypatch.setattr(
@@ -2718,19 +2837,12 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
         fake_code_run,
     )
 
-    steps = [
-        ("code_interpreter", {"code": "write_formula"}),
-        ("code_interpreter", {"code": "verify_formula"}),
-        (
-            "recalculate_and_read",
-            {"validation_scope": "pending_formula_changes"},
-        ),
-    ]
     requests: list[dict[str, Any]] = []
 
     class SequenceClient:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             self.turn = 0
+            self.stage: str | None = None
 
         def __enter__(self) -> SequenceClient:
             return self
@@ -2740,7 +2852,37 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
 
         def create(self, payload: dict[str, Any], **_kwargs: Any) -> ResponseTurn:
             requests.append(deepcopy(payload))
-            name, arguments = steps[self.turn]
+            if self.stage is None:
+                encoded = json.dumps(payload)
+                self.stage = (
+                    "inspect"
+                    if "read-only inspector" in encoded
+                    else "plan"
+                    if "Using the user task and captured" in encoded
+                    else "execute"
+                )
+            if self.stage == "plan":
+                self.turn += 1
+                return ResponseTurn(
+                    response_id=f"response-{self.turn}",
+                    output=[],
+                    text=(
+                        "actions:\n- target: Sheet!B1\n  write: '=1+1'\n"
+                        "checks:\n- verify: Sheet!B1\n"
+                        "provenance:\n- sheet: Sheet\n  range: A1:B1"
+                    ),
+                    usage={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                    attempt_history=[{"api_protocol": "responses", "endpoint": "/responses"}],
+                )
+            if self.stage == "inspect" and self.turn < 3:
+                name = "code_interpreter"
+                arguments = {"code": "inspect"}
+            elif self.stage == "execute" and self.turn == 0:
+                name = "code_interpreter"
+                arguments = {"code": "write_formula"}
+            else:
+                name = "submit_result"
+                arguments = {}
             self.turn += 1
             return ResponseTurn(
                 response_id=f"response-{self.turn}",
@@ -2787,7 +2929,7 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
         return converted
 
     def must_not_score(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("agent-tool recalculation drift must stop before scoring")
+        raise AssertionError("postprocess recalculation drift must stop before scoring")
 
     monkeypatch.setattr(render_module, "_convert_with_libreoffice", fake_convert)
     monkeypatch.setattr(
@@ -2800,8 +2942,8 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
         tmp_path / "pending-formula-recalculation-drift",
         skill_registry=SkillRegistry([]),
         arms=("ours",),
-        max_model_calls=4,
-        max_turns_per_arm=4,
+        max_model_calls=7,
+        max_turns_per_arm=7,
         max_total_tokens=1_000,
         max_output_tokens=64,
         task_timeout_seconds=30,
@@ -2820,44 +2962,30 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
     assert row["outcome_kind"] == "infrastructure_failure"
     assert row["score_available"] is False
     assert row["error_category"] == "recalculation_infrastructure"
-    assert row["infrastructure_failure_stage"] == "agent_tool_recalculation"
-    assert row["agent_failure_stage"] == "solve"
-    assert row["infrastructure_failure_tool"] == "recalculate_and_read"
+    assert row["infrastructure_failure_stage"] == "recalculation"
+    assert "agent_failure_stage" not in row
+    assert "infrastructure_failure_tool" not in row
     assert "comparison" not in row
     assert "artifact_score_passed" not in row
     stage = row["agent"]["stages"][-1]
-    expected_failure = {
-        "name": "recalculate_and_read",
-        "ok": False,
-        "error_type": "RecalculationIntegrityError",
-        "failure_category": "recalculation_infrastructure",
-    }
-    assert stage["tool_trace"][-1] == expected_failure
-    assert stage["observed_terminal_tool"] is None
-    assert stage["agent"]["observed_terminal_tool"] is None
-    assert stage["agent"]["terminal_submissions"] == 0
-    assert row["agent"]["observed_terminal_tool"] is None
-    assert row["agent"]["terminal_submissions"] == 0
-    assert requests[2]["tool_choice"] == {
+    assert stage["tool_trace"] == [
+        {"name": "code_interpreter", "ok": True},
+    ]
+    assert stage["observed_terminal_tool"] == "submit_result"
+    assert row["agent"]["terminal_submissions"] == 1
+    assert requests[1]["tool_choice"] == {
         "type": "function",
-        "name": "recalculate_and_read",
+        "name": "code_interpreter",
     }
-    assert [tool["name"] for tool in requests[2]["tools"]] == ["recalculate_and_read"]
+    assert [tool["name"] for tool in requests[1]["tools"]] == ["code_interpreter"]
 
     trajectory = read_trajectory(Path(row["run_dir"]) / "trajectory.jsonl")
-    formula_changes = [
-        item for item in trajectory if item["event"] == "agent.formula_state_changed"
-    ]
-    assert formula_changes[0]["payload"]["pending"]["coordinate_count"] == 1
-    sparse_calls = [
-        item
+    assert not any(item["event"] == "agent.formula_state_changed" for item in trajectory)
+    assert not any(
+        item["event"] == "tool.called"
+        and item["payload"]["name"] == "recalculate_and_read"
         for item in trajectory
-        if item["event"] == "tool.called" and item["payload"]["name"] == "recalculate_and_read"
-    ]
-    assert sparse_calls[-1]["payload"]["arguments"] == {
-        "validation_scope": "pending_formula_changes"
-    }
-    assert any(item["event"] == "agent.infrastructure_failed" for item in trajectory)
+    )
     assert not any(item["event"] == "benchmark.evaluated" for item in trajectory)
 
     runner.results_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -2866,34 +2994,6 @@ def test_pending_sparse_recalculation_failure_round_trips_runner_and_audit(
     assert summary["audit_valid"] is True
     assert summary["rows"][0]["audit_valid"] is True
     assert summary["known_recalculation_infrastructure_failure_rows"] == 1
-
-    tampered_row = deepcopy(row)
-    tampered_stage = tampered_row["agent"]["stages"][-1]
-    terminal_response = {
-        "status": "accepted",
-        "response_id": tampered_stage["agent"]["response_id"],
-        "acknowledgement": {},
-    }
-    tampered_stage["observed_terminal_tool"] = "submit_result"
-    tampered_stage["agent"]["observed_terminal_tool"] = "submit_result"
-    tampered_stage["agent"]["terminal_submissions"] = 1
-    tampered_stage["agent"]["function_calls_total"] = 4
-    tampered_stage["agent"]["terminal_response"] = terminal_response
-    tampered_row["agent"]["observed_terminal_tool"] = "submit_result"
-    tampered_row["agent"]["terminal_submissions"] = 1
-    tampered_row["agent"]["function_calls_total"] = 4
-    tampered_row["agent"]["terminal_response"] = terminal_response
-    runner.results_path.write_text(
-        json.dumps(tampered_row) + "\n",
-        encoding="utf-8",
-    )
-
-    tampered = audit_comparison(runner.output_dir, [task])
-
-    assert tampered["audit_valid"] is False
-    assert tampered["rows"][0]["audit_valid"] is False
-    assert "agent_observed_terminal_invalid:solve" in tampered["rows"][0]["reasons"]
-    assert "accepted_terminal_response_evidence_invalid" in tampered["rows"][0]["reasons"]
 
 
 def test_comparison_classifies_unsupported_scorer_as_infrastructure_no_score(

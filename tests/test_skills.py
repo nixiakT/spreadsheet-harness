@@ -20,6 +20,21 @@ def test_frozen_skill_registry_keeps_original_prompt(tmp_path: Path) -> None:
     assert manifest[0]["name"] == "example"
 
 
+def test_plugin_selected_skill_subset_is_exact_and_ordered(tmp_path: Path) -> None:
+    for name in ("structure", "formula"):
+        skill_dir = tmp_path / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\n---\n{name} procedure\n", encoding="utf-8"
+        )
+
+    selected = SkillRegistry([tmp_path]).select(("formula", "structure"))
+    rendered, manifest = selected.render_for_prompt()
+
+    assert [item["name"] for item in manifest] == ["formula", "structure"]
+    assert rendered.index("formula procedure") < rendered.index("structure procedure")
+
+
 def test_spreadsheet_core_skill_keeps_task_independent_workflow() -> None:
     skill = (
         Path(__file__).parents[1] / "skills" / "spreadsheet-core" / "SKILL.md"

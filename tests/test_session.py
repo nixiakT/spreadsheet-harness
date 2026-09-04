@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -11,6 +14,18 @@ from spreadsheet_harness.errors import ToolInputError
 from spreadsheet_harness.openpyxl_compat import load_workbook as compat_load_workbook
 from spreadsheet_harness.render import sheet_inventory_identity
 from spreadsheet_harness.session import WorkbookSession
+
+
+def _rewrite_zip_member(path: Path, member_name: str, callback) -> None:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(path) as source:
+        with zipfile.ZipFile(buffer, "w") as target:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                if info.filename == member_name:
+                    payload = callback(payload)
+                target.writestr(info, payload)
+    path.write_bytes(buffer.getvalue())
 
 
 def test_inspect_write_fill_format_and_undo(sample_workbook: Path, tmp_path: Path) -> None:
@@ -71,6 +86,40 @@ def test_session_create_and_mutations_preserve_empty_chartsheet(
     workbook.close()
 
 
+def test_session_create_repairs_unbound_prefix_core_metadata(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    broken = tmp_path / "broken-core.xlsx"
+    broken.write_bytes(sample_workbook.read_bytes())
+
+    def _break_core(payload: bytes) -> bytes:
+        text = payload.decode("utf-8")
+        return text.replace(' xmlns:dc="http://purl.org/dc/elements/1.1/"', "", 1).encode(
+            "utf-8"
+        )
+
+    _rewrite_zip_member(broken, "docProps/core.xml", _break_core)
+
+    with zipfile.ZipFile(broken) as archive:
+        broken_core = archive.read("docProps/core.xml")
+    with pytest.raises(ET.ParseError, match="unbound prefix"):
+        ET.fromstring(broken_core)
+
+    workbook = compat_load_workbook(broken, read_only=True)
+    assert workbook.sheetnames == ["Sales", "Lookup"]
+    workbook.close()
+
+    session = WorkbookSession.create(broken, tmp_path / "broken-run")
+    with zipfile.ZipFile(session.paths.input) as archive:
+        repaired_core = archive.read("docProps/core.xml").decode("utf-8")
+    assert 'xmlns:dc="http://purl.org/dc/elements/1.1/"' in repaired_core
+
+    with zipfile.ZipFile(broken) as archive:
+        original_core = archive.read("docProps/core.xml").decode("utf-8")
+    assert 'xmlns:dc="http://purl.org/dc/elements/1.1/"' not in original_core
+
+
 def test_range_limits(sample_workbook: Path, tmp_path: Path) -> None:
     session = WorkbookSession.create(sample_workbook, tmp_path / "run")
     with pytest.raises(ToolInputError, match="limit"):
@@ -127,6 +176,22 @@ def test_inspect_range_reports_tables(sample_workbook: Path, tmp_path: Path) -> 
     inspected = session.inspect_range("Sales", "A1:D3")
 
     assert inspected["tables"] == [{"name": "SalesTable", "ref": "A1:D3"}]
+
+
+def test_inspect_ranges_matches_individual_inspections(
+    sample_workbook: Path, tmp_path: Path
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "batch-inspect")
+
+    batched = session.inspect_ranges(
+        (("Sales", "A1:D3"), ("Lookup", "A1:B3")),
+        include_styles=False,
+    )
+
+    assert batched == [
+        session.inspect_range("Sales", "A1:D3", include_styles=False),
+        session.inspect_range("Lookup", "A1:B3", include_styles=False),
+    ]
 
 
 def test_fill_formula_reports_sample_formulas_and_drifting_ranges(

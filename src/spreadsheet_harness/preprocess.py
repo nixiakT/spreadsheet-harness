@@ -9,7 +9,7 @@ import math
 import re
 import tempfile
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -135,6 +135,7 @@ def _open_workbooks(
     *,
     libreoffice_binary: str | Path | None,
     timeout_seconds: float,
+    include_cached_formula_values: bool = True,
 ) -> Iterator[_LoadedWorkbooks]:
     suffix = source.suffix.lower()
     formulas: Workbook | None = None
@@ -181,13 +182,14 @@ def _open_workbooks(
                 keep_vba=keep_vba,
                 keep_links=True,
             )
-            values = load_workbook(
-                load_path,
-                read_only=False,
-                data_only=True,
-                keep_vba=keep_vba,
-                keep_links=True,
-            )
+            if include_cached_formula_values:
+                values = load_workbook(
+                    load_path,
+                    read_only=False,
+                    data_only=True,
+                    keep_vba=keep_vba,
+                    keep_links=True,
+                )
             backend = {
                 "reader": "openpyxl",
                 "version": openpyxl.__version__,
@@ -529,6 +531,9 @@ def build_preprocess_view(
     max_cells_per_sheet: int = 5000,
     libreoffice_binary: str | Path | None = None,
     timeout_seconds: float = 120.0,
+    _include_cached_formula_values: bool = True,
+    _preferred_sheet_names: Sequence[str] = (),
+    _max_sheets: int | None = None,
 ) -> dict[str, Any]:
     """Build a serializable workbook view without writing output artifacts."""
 
@@ -543,15 +548,35 @@ def build_preprocess_view(
         source_path,
         libreoffice_binary=libreoffice_binary,
         timeout_seconds=timeout_seconds,
+        include_cached_formula_values=_include_cached_formula_values,
     ) as loaded:
         unknown_sheets = set(regions or {}).difference(loaded.formulas.sheetnames)
         if unknown_sheets:
             names = ", ".join(sorted(unknown_sheets))
             raise PreprocessError(f"Requested regions refer to unknown sheets: {names}")
 
+        worksheets = list(loaded.formulas.worksheets)
+        source_sheet_count = len(worksheets)
+        if _max_sheets is not None:
+            if _max_sheets <= 0:
+                raise PreprocessError("_max_sheets must be positive")
+            preferred_order = {
+                name.casefold(): index
+                for index, name in enumerate(_preferred_sheet_names)
+            }
+            worksheets.sort(
+                key=lambda worksheet: (
+                    0 if worksheet.title.casefold() in preferred_order else 1,
+                    preferred_order.get(worksheet.title.casefold(), len(preferred_order)),
+                    loaded.formulas.sheetnames.index(worksheet.title),
+                )
+            )
+            worksheets = worksheets[:_max_sheets]
+
         sheet_views: list[dict[str, Any]] = []
         inventory: list[dict[str, Any]] = []
-        for sheet_index, worksheet in enumerate(loaded.formulas.worksheets, start=1):
+        for worksheet in worksheets:
+            sheet_index = loaded.formulas.sheetnames.index(worksheet.title) + 1
             value_worksheet = None
             if loaded.values is not None and worksheet.title in loaded.values.sheetnames:
                 value_worksheet = loaded.values[worksheet.title]
@@ -574,7 +599,8 @@ def build_preprocess_view(
             },
             "backend": loaded.backend,
             "inventory": {
-                "sheet_count": len(inventory),
+                "sheet_count": source_sheet_count,
+                "profiled_sheet_count": len(inventory),
                 "sheets": inventory,
             },
             "sheets": sheet_views,
@@ -959,6 +985,7 @@ def build_deterministic_profile(
     source: str | Path,
     *,
     bounds: Mapping[str, int] | None = None,
+    preferred_sheet_names: Iterable[str] = (),
     libreoffice_binary: str | Path | None = None,
     timeout_seconds: float = 120.0,
 ) -> dict[str, Any]:
@@ -972,15 +999,28 @@ def build_deterministic_profile(
         effective.update({key: int(value) for key, value in bounds.items()})
     if any(value <= 0 for value in effective.values()):
         raise PreprocessError("Deterministic profile bounds must be positive")
+    preferred = tuple(dict.fromkeys(str(name) for name in preferred_sheet_names if str(name)))
     view = build_preprocess_view(
         source,
         max_cells_per_sheet=effective["max_cells_per_sheet"],
         libreoffice_binary=libreoffice_binary,
         timeout_seconds=timeout_seconds,
+        _include_cached_formula_values=False,
+        _preferred_sheet_names=preferred,
+        _max_sheets=effective["max_sheets"],
     )
     sheet_limit = effective["max_sheets"]
-    inventories = view["inventory"]["sheets"][:sheet_limit]
-    sheets = view["sheets"][:sheet_limit]
+    preferred_order = {name.casefold(): index for index, name in enumerate(preferred)}
+    indexed = list(zip(view["sheets"], view["inventory"]["sheets"], strict=True))
+    indexed.sort(
+        key=lambda pair: (
+            0 if str(pair[0].get("name", "")).casefold() in preferred_order else 1,
+            preferred_order.get(str(pair[0].get("name", "")).casefold(), len(preferred_order)),
+        )
+    )
+    selected = indexed[:sheet_limit]
+    sheets = [pair[0] for pair in selected]
+    inventories = [pair[1] for pair in selected]
     profile = {
         "schema_version": DETERMINISTIC_PROFILE_SCHEMA_VERSION,
         "bounds": effective,
@@ -989,13 +1029,17 @@ def build_deterministic_profile(
             "sha256": view["source"]["sha256"],
         },
         "backend": view["backend"],
-        "task_independent": True,
+        "task_independent": not preferred,
+        "routing": {
+            "policy": "instruction-named-sheets-first-v1" if preferred else "workbook-order-v1",
+            "preferred_sheet_names": list(preferred),
+        },
         "sheets": [
             _profile_sheet(sheet, inventory, bounds=effective)
             for sheet, inventory in zip(sheets, inventories, strict=True)
         ],
         "truncation": {
-            "sheets": len(view["sheets"]) > sheet_limit,
+            "sheets": view["inventory"]["sheet_count"] > len(view["sheets"]),
             "rendered": False,
         },
     }

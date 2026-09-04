@@ -33,9 +33,7 @@ def _optional_non_negative_float(value: float | None, name: str) -> float | None
 def _usage_total_tokens(usage: Mapping[str, Any]) -> int:
     raw_total = usage.get("total_tokens")
     if raw_total is None:
-        raw_total = int(usage.get("input_tokens", 0) or 0) + int(
-            usage.get("output_tokens", 0) or 0
-        )
+        raw_total = int(usage.get("input_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0)
     try:
         tokens = int(raw_total or 0)
     except (TypeError, ValueError) as exc:
@@ -60,12 +58,8 @@ class RunBudget:
         max_total_tokens: int | None = None,
         max_elapsed_seconds: float | None = None,
     ) -> None:
-        self.max_model_calls = _optional_non_negative_int(
-            max_model_calls, "max_model_calls"
-        )
-        self.max_total_tokens = _optional_non_negative_int(
-            max_total_tokens, "max_total_tokens"
-        )
+        self.max_model_calls = _optional_non_negative_int(max_model_calls, "max_model_calls")
+        self.max_total_tokens = _optional_non_negative_int(max_total_tokens, "max_total_tokens")
         self.max_elapsed_seconds = _optional_non_negative_float(
             max_elapsed_seconds, "max_elapsed_seconds"
         )
@@ -117,6 +111,19 @@ class RunBudget:
                 self.max_model_calls - self._model_calls - len(self._reservations),
                 0,
             )
+
+    def remaining_total_tokens(self) -> int | None:
+        """Return provider-reported tokens left, or ``None`` for an unlimited budget.
+
+        In-flight reservations are excluded because their usage is unknown until the provider
+        responds. Agents use this snapshot only to reserve a concise terminal response before
+        another normal request can cross the hard token boundary.
+        """
+
+        with self._lock:
+            if self.max_total_tokens is None:
+                return None
+            return max(self.max_total_tokens - self._total_tokens, 0)
 
     def _terminate_locked(
         self,
@@ -173,16 +180,10 @@ class RunBudget:
         with self._lock:
             now = time.monotonic()
             self._check_wall_locked(now, stage=stage)
-            if (
-                self.max_total_tokens is not None
-                and self._total_tokens >= self.max_total_tokens
-            ):
+            if self.max_total_tokens is not None and self._total_tokens >= self.max_total_tokens:
                 self._terminate_locked(
                     "max_total_tokens",
-                    (
-                        "Run budget exhausted its "
-                        f"{self.max_total_tokens} total-token limit"
-                    ),
+                    (f"Run budget exhausted its {self.max_total_tokens} total-token limit"),
                     stage=stage,
                     now=now,
                 )
@@ -230,10 +231,7 @@ class RunBudget:
             now = time.monotonic()
             if self._termination is not None:
                 self._raise_if_terminated_locked(now)
-            if (
-                self.max_total_tokens is not None
-                and self._total_tokens > self.max_total_tokens
-            ):
+            if self.max_total_tokens is not None and self._total_tokens > self.max_total_tokens:
                 self._terminate_locked(
                     "max_total_tokens",
                     (

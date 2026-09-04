@@ -31,6 +31,20 @@ class SkillRegistry:
 
         return SkillRegistry((), frozen=self.discover())
 
+    def select(self, names: Iterable[str]) -> SkillRegistry:
+        """Freeze an exact plugin-selected skill subset in caller-provided order."""
+
+        requested = tuple(str(name).strip() for name in names)
+        if not requested or any(not name for name in requested):
+            raise ValueError("Skill selection requires non-empty names")
+        if len(requested) != len(set(requested)):
+            raise ValueError("Skill selection names must be unique")
+        discovered = {skill.name: skill for skill in self.discover()}
+        missing = [name for name in requested if name not in discovered]
+        if missing:
+            raise HarnessError("Unknown plugin-selected skills: " + ", ".join(missing))
+        return SkillRegistry((), frozen=(discovered[name] for name in requested))
+
     def discover(self) -> list[Skill]:
         if self._frozen is not None:
             return list(self._frozen)

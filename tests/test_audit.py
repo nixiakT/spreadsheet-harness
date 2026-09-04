@@ -44,6 +44,7 @@ from spreadsheet_harness.comparison import (
     V28_COMPARISON_PROTOCOL_VERSION,
     ComparisonBenchmarkRunner,
     _allowed_observed_terminals_policy,
+    _plugin_compositions_policy,
     _stage_allowed_tools_policy,
 )
 from spreadsheet_harness.config import ProviderConfig
@@ -165,10 +166,8 @@ def _fixture(
         },
         "termination": None,
     }
-    tool_trace = [
-        {"name": "code_interpreter", "ok": True},
-        {"name": "code_interpreter", "ok": True},
-    ]
+    forced_prefix = manifest["forced_tool_prefix_routing"][arm]["solve"]
+    tool_trace = [{"name": name, "ok": True} for name in forced_prefix]
     terminal_response = {
         "status": "accepted",
         "response_id": "response-final",
@@ -194,14 +193,14 @@ def _fixture(
         "name": "solve",
         "max_turns": 3,
         "allowed_tools": manifest["stage_allowed_tools"][arm]["solve"],
-        "first_tool_choice": "code_interpreter",
-        "observed_first_tool": "code_interpreter",
-        "forced_tool_prefix": ["code_interpreter", "code_interpreter"],
-        "observed_forced_tool_prefix": ["code_interpreter", "code_interpreter"],
+        "first_tool_choice": forced_prefix[0],
+        "observed_first_tool": forced_prefix[0],
+        "forced_tool_prefix": forced_prefix,
+        "observed_forced_tool_prefix": forced_prefix,
         "post_prefix_tool_choice": "auto",
         "terminal_tool": "submit_result",
         "observed_terminal_tool": "submit_result",
-        "tool_name_trace": ["code_interpreter", "code_interpreter"],
+        "tool_name_trace": forced_prefix,
         "tool_trace": tool_trace,
         "agent": stage_agent,
     }
@@ -229,6 +228,24 @@ def _fixture(
         "comparison": comparison.to_dict(),
         "agent": {
             "arm": arm,
+            "context_policy": {
+                "composition_name": manifest["plugin_compositions"][arm]["composition"][
+                    "name"
+                ],
+                "composition_sha256": manifest["plugin_compositions"][arm][
+                    "composition_sha256"
+                ],
+                "plugins": [
+                    {
+                        "name": plugin["name"],
+                        "version": plugin["version"],
+                        "manifest_sha256": plugin["manifest_sha256"],
+                    }
+                    for plugin in manifest["plugin_compositions"][arm]["composition"][
+                        "plugins"
+                    ]
+                ],
+            },
             "final_text": "Spreadsheet task completed.",
             "response_id": "response-final",
             "turns": 3,
@@ -453,6 +470,34 @@ def _set_recalculation_manifest(
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
     row["comparison_manifest_sha256"] = _sha256(manifest_path)
     row["calculation_backend"] = "libreoffice"
+
+
+def _set_v28_protocol(results: Path, row: dict[str, Any]) -> None:
+    """Bind synthetic six-tool agent evidence to its historical protocol."""
+
+    manifest_path = results / "comparison-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = V28_COMPARISON_MANIFEST_SCHEMA_VERSION
+    manifest["comparison_protocol_version"] = V28_COMPARISON_PROTOCOL_VERSION
+    manifest["configuration"].update(V28_COMPARISON_CONFIGURATION_POLICIES)
+    for field in set(COMPARISON_CONFIGURATION_POLICIES) - set(
+        V28_COMPARISON_CONFIGURATION_POLICIES
+    ):
+        manifest["configuration"].pop(field, None)
+    arms = tuple(manifest["arms"])
+    manifest["stage_allowed_tools"] = _stage_allowed_tools_policy(
+        arms,
+        protocol_version=V28_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
+        manifest["stage_turn_caps"],
+        protocol_version=V28_COMPARISON_PROTOCOL_VERSION,
+    )
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_protocol_version"] = V28_COMPARISON_PROTOCOL_VERSION
+    row["comparison_manifest_sha256"] = _sha256(manifest_path)
+    for stage in row["agent"]["stages"]:
+        stage["allowed_tools"] = manifest["stage_allowed_tools"][row["arm"]][stage["name"]]
 
 
 def _set_agent_tool_recalculation_failure(
@@ -819,6 +864,8 @@ def _paper_budget_fixture(
         }
     }
     manifest["stage_allowed_tools"] = _stage_allowed_tools_policy(("paper",))
+    manifest["plugin_compositions"] = _plugin_compositions_policy(("paper",))
+    manifest["configuration"]["plugin_skill_selection"] = {"paper": []}
     manifest["allowed_observed_terminals"] = _allowed_observed_terminals_policy(
         {"paper": caps}
     )
@@ -1473,13 +1520,13 @@ def test_v28_contract_does_not_retroactively_accept_provider_no_score() -> None:
     )
 
 
-def test_v29_contract_enables_new_failure_semantics_only_for_current_protocol() -> None:
-    assert audit_module._V29_AUDIT_CONTRACT.protocol_version == (
+def test_v31_contract_preserves_v29_failure_semantics_for_current_protocol() -> None:
+    assert audit_module._V31_AUDIT_CONTRACT.protocol_version == (
         COMPARISON_PROTOCOL_VERSION
     )
-    assert audit_module._V29_AUDIT_CONTRACT.allow_generic_response_truncation is True
+    assert audit_module._V31_AUDIT_CONTRACT.allow_generic_response_truncation is True
     assert (
-        audit_module._V29_AUDIT_CONTRACT.allow_provider_infrastructure_no_score
+        audit_module._V31_AUDIT_CONTRACT.allow_provider_infrastructure_no_score
         is True
     )
     assert audit_module._V28_AUDIT_CONTRACT.allow_generic_response_truncation is False
@@ -1678,11 +1725,11 @@ def test_audit_accepts_recalculation_identity_failure_but_invalidates_inference(
     assert "outcome_passed" not in summary["rows"][0]
 
 
-def test_audit_accepts_agent_tool_recalculation_failure_without_terminal(
+def test_v28_audit_accepts_agent_tool_recalculation_failure_without_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    results, task, row = _fixture(tmp_path, arm="ours")
+    results, task, row = _fixture(tmp_path, arm="native")
     output = Path(row["output_workbook"])
     recalculation = _mock_recalculation(
         output,
@@ -1690,6 +1737,7 @@ def test_audit_accepts_agent_tool_recalculation_failure_without_terminal(
         change_sheet_identity=True,
     )
     _set_recalculation_manifest(results, row)
+    _set_v28_protocol(results, row)
     _set_agent_tool_recalculation_failure(row, recalculation)
     row["output_sha256"] = _sha256(output)
     (results / "results.jsonl").write_text(
@@ -1729,7 +1777,7 @@ def test_audit_rejects_invalid_agent_tool_recalculation_evidence(
     monkeypatch: pytest.MonkeyPatch,
     tamper: str,
 ) -> None:
-    results, task, row = _fixture(tmp_path, arm="ours")
+    results, task, row = _fixture(tmp_path, arm="native")
     output = Path(row["output_workbook"])
     recalculation = _mock_recalculation(
         output,
@@ -1737,6 +1785,7 @@ def test_audit_rejects_invalid_agent_tool_recalculation_evidence(
         change_sheet_identity=True,
     )
     _set_recalculation_manifest(results, row)
+    _set_v28_protocol(results, row)
     _set_agent_tool_recalculation_failure(row, recalculation)
     row["output_sha256"] = _sha256(output)
     stage = row["agent"]["stages"][-1]
@@ -1826,7 +1875,7 @@ def test_audit_rejects_formula_runtime_gate_arm_policy_tampering(
     tamper: str,
     value: object,
 ) -> None:
-    results, task, row = _fixture(tmp_path, arm="ours")
+    results, task, row = _fixture(tmp_path)
     path = results / "comparison-manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if tamper == "missing":
@@ -1844,6 +1893,21 @@ def test_audit_rejects_formula_runtime_gate_arm_policy_tampering(
 
     assert summary["audit_valid"] is False
     assert "comparison_manifest_policy_mismatch" in summary["reasons"]
+
+
+def test_v30_audit_rejects_plugin_composition_tampering(tmp_path: Path) -> None:
+    results, task, row = _fixture(tmp_path)
+    path = results / "comparison-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["plugin_compositions"]["bare"]["composition_sha256"] = "0" * 64
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    row["comparison_manifest_sha256"] = _sha256(path)
+    (results / "results.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = audit_comparison(results, [task])
+
+    assert summary["audit_valid"] is False
+    assert "comparison_manifest_plugin_compositions_mismatch" in summary["reasons"]
 
 
 def test_live_v23_pilot_audit_has_no_version_drift_false_positives() -> None:
@@ -2453,7 +2517,7 @@ def test_v26_audit_accepts_exact_truncated_terminal_evidence(tmp_path: Path) -> 
     )
 
 
-def test_v29_audit_accepts_generic_output_limit_as_known_model_failure(
+def test_v30_audit_accepts_generic_output_limit_as_known_model_failure(
     tmp_path: Path,
 ) -> None:
     results, task, _ = _generic_truncated_response_fixture(tmp_path)
@@ -2480,7 +2544,7 @@ def test_v29_audit_accepts_generic_output_limit_as_known_model_failure(
         (("agent", "stages", 0, "agent", "terminal_submissions"), 1),
     ],
 )
-def test_v29_audit_rejects_tampered_generic_output_limit_evidence(
+def test_v30_audit_rejects_tampered_generic_output_limit_evidence(
     tmp_path: Path,
     path: tuple[str | int, ...],
     value: Any,
@@ -3379,7 +3443,7 @@ def test_audit_requires_frozen_manifest_provenance(
     assert any(expected_fragment in reason for reason in summary["reasons"])
 
 
-def test_v29_audit_requires_manifest_source_to_match_active_checkout(
+def test_v30_audit_requires_manifest_source_to_match_active_checkout(
     tmp_path: Path,
 ) -> None:
     results, task, row = _fixture(tmp_path)

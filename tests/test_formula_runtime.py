@@ -143,6 +143,47 @@ def test_formula_inventory_binds_shared_formula_followers_to_the_master(
         ("Data", "A3")
     ].formula_sha256
 
+    expanded = tmp_path / "shared-formula-expanded.xlsx"
+    with zipfile.ZipFile(workbook_path) as source, zipfile.ZipFile(expanded, "w") as destination:
+        for member in source.infolist():
+            payload = source.read(member)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                payload = payload.replace(
+                    b'<f t="shared" ref="A2:A3" si="0">A1+1</f>',
+                    b'<f aca="false">A1+1</f>',
+                ).replace(
+                    b'<f t="shared" si="0"></f>',
+                    b'<f aca="false">A2+1</f>',
+                )
+            destination.writestr(member, payload)
+
+    expanded_inventory = formula_inventory(expanded)
+    assert expanded_inventory.state_sha256 == inventory.state_sha256
+
+
+def test_formula_inventory_ignores_backend_formula_spelling_normalization(
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "formula-normalization.xlsx"
+    _save_formula_workbook(workbook_path, '=IF(TRUE,"Keep Case",FALSE)')
+    before = formula_inventory(workbook_path)
+
+    normalized = tmp_path / "formula-normalized.xlsx"
+    with zipfile.ZipFile(workbook_path) as source, zipfile.ZipFile(
+        normalized, "w"
+    ) as destination:
+        for member in source.infolist():
+            payload = source.read(member)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                payload = payload.replace(
+                    b'<f>IF(TRUE,"Keep Case",FALSE)</f>',
+                    b'<f aca="false">if(TRUE(),"Keep Case",false())</f>',
+                )
+            destination.writestr(member, payload)
+
+    after = formula_inventory(normalized)
+    assert after.state_sha256 == before.state_sha256
+
 
 def test_formula_runtime_report_marks_deleted_formula_coordinates_absent(
     tmp_path: Path,

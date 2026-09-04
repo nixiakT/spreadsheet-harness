@@ -18,13 +18,31 @@ The implementation is clean-room. It borrows architectural ideas—not source co
 ## Architecture
 
 ```text
-Dataset adapter -> isolated WorkbookSession -> tool/vision agent -> output workbook
-                         |                         |
-                         +-> snapshots             +-> redacted trajectory
-                         +-> LibreOffice backend    +-> candidate skill evolver
-                                                      |
-                                           validation-gated promotion
+fixed benchmark kernel
+  -> composition resolver (hash-bound plugin contracts)
+  -> observe / act / control / knowledge / verify / repair / workflow plugins
+  -> isolated WorkbookSession -> output workbook + redacted trajectory
+                                      |
+                         failure attribution + one-plugin candidate
+                                      |
+                         replay / transfer / regression gate
+                                      |
+                              promote, rollback, retire
 ```
+
+The paper-facing domain ablation is represented by two first-class compositions:
+`spreadsheet-harness-basic` and `spreadsheet-harness-financial`. They have the
+same runtime, profile, policy, generic plugins, verifier and repair; the latter
+adds exactly `skill-spreadsheet-financial-model`. Resolve and hash them with:
+
+```bash
+sheet-harness plugins resolve spreadsheet-harness-basic
+sheet-harness plugins resolve spreadsheet-harness-financial
+```
+
+The falsifiable claim/evidence matrix is maintained in
+[`RESEARCH_EVIDENCE.md`](RESEARCH_EVIDENCE.md). In particular, no pilot or
+partial-category result is called SOTA.
 
 LibreOffice is a practical Linux backend, not a bit-for-bit substitute for desktop Excel. Results always record the calculation engine and protocol. In particular, scores from Excel COM and LibreOffice, or `solution_once_apply_n` and `agent_per_workbook`, must not be presented as the same leaderboard setting.
 
@@ -247,6 +265,73 @@ sheet-harness evolve promote evolution/candidates/<id> \
   --validation-report validation.json \
   --min-delta 0.01
 ```
+
+## PlugEvolve compositions
+
+The historical comparison arms now resolve through immutable plugin contracts.
+The clean-room design follows DeepSeek Harness's public service/provider/
+consumer composition shape while preserving a fixed experimental kernel for
+benchmark selection, scoring, sandboxing, budgets, trajectories, and promotion.
+Structure, Formula, Manipulation, Analysis, Visualization, Verification, and
+Memory are independently selectable knowledge plugins with plugin-specific
+evidence, update operators, and cross-capability regression contexts.
+
+```bash
+sheet-harness plugins list
+sheet-harness plugins resolve ours
+sheet-harness plugins candidates ours
+sheet-harness plugins attribute runs/TASK/trajectory.jsonl \
+  --composition plugevolve-seed --task-type 'Formula'
+```
+
+See `PLUGEVOLVE.md` for the trust boundary, contracts, cross-context
+non-regression gate, and the separate research seed that explicitly enables
+the capability bank and formula-runtime verification. Run that seed through the
+official SpreadsheetBench adapter under a fresh result identity:
+
+```bash
+sheet-harness benchmark compare \
+  --dataset benchmarks/data/spreadsheetbench_verified_400 \
+  --task-id TASK_ID --arm ours \
+  --composition ours=plugevolve-seed \
+  --output benchmarks/results/plugevolve-seed-smoke \
+  --model MODEL --reasoning-effort low
+```
+
+### SpreadsheetBench-v2 paired evaluation
+
+The v2 adapter is separate from the historical v1 adapter. It pins
+`KAKA22/SpreadsheetBench-v2` revision
+`9dea60025792fbac5928ce9f44812362dccbeecd` (321 tasks) and invokes an
+unmodified vendored copy of the official evaluator. For Debugging,
+Financial_Model, and Template tasks, task accuracy is one only when both
+modification accuracy and regression accuracy are one. Visualization requires
+Windows Excel/WPS COM plus the benchmark's VLM path and is not evaluated by the
+current Linux runner.
+
+Run the same model against a paired bare baseline and PlugEvolve seed, then
+fresh-rescore both outputs:
+
+```bash
+sheet-harness benchmark v2-compare \
+  --dataset benchmarks/data/spreadsheetbench-v2 \
+  --category Template --task-id Template/06_05 \
+  --arm bare --arm ours --composition ours=plugevolve-seed \
+  --output benchmarks/results/v2-paired-smoke \
+  --api-key-file /path/to/provider.key \
+  --base-url PROVIDER_BASE_URL --model MODEL
+sheet-harness benchmark v2-audit benchmarks/results/v2-paired-smoke \
+  --dataset benchmarks/data/spreadsheetbench-v2
+```
+
+The 2026-08-20 development smoke on `Template/06_05` with
+`DeepSeek-V4-Flash` completed and passed both arms: bare used 6 model calls and
+26,521 tokens; `plugevolve-seed` used 5 calls and 47,680 tokens. Both had task,
+modification, and regression accuracy 1.0, so the paired accuracy delta was
+zero; independent fresh-rescore returned `audit_valid=true`. This is one
+development task, not a full-321 result or leaderboard claim. An earlier qwen
+attempt hit provider request deadlines in both arms and is intentionally
+reported as unscored, not as zero accuracy.
 
 ## Safety and fidelity boundaries
 

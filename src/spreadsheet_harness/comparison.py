@@ -12,7 +12,7 @@ import stat
 import subprocess
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +37,7 @@ from .arms import (
     COMPARISON_EDIT_RECOVERY_POLICY_VERSION,
     COMPARISON_FORCED_TOOL_PREFIX_POLICY,
     COMPARISON_TURN_CAP_POLICY_VERSION,
+    FORMULA_VALIDATED_CODE_TOOLS,
     OURS_TOOLS,
     PAPER_EXTRACTION_TOOLS,
     PAPER_LATEX_TOOLS,
@@ -65,6 +66,7 @@ from .benchmark import (
     verify_trace2skill_split_provenance,
 )
 from .budget import RunBudget
+from .capability_evolution import attribute_failure
 from .code_interpreter import STRICT_ISOLATION_POLICY, ensure_strict_code_isolation
 from .config import ProviderConfig
 from .errors import (
@@ -85,6 +87,7 @@ from .errors import (
     ScoringInfrastructureError,
 )
 from .pacing import PACING_POLICY, RelayPacer
+from .plugins import ARM_COMPOSITIONS, CompositionSpec, default_plugin_registry, execution_plan
 from .preprocess import (
     DETERMINISTIC_PROFILE_BOUNDS,
     DETERMINISTIC_PROFILE_SCHEMA_VERSION,
@@ -146,13 +149,26 @@ V28_RUN_SPEC_SOURCE_CONTRACT = {
     "sha256": "f282ee00d271eba52dd81cb8b388124cb01d6c3fa45111eb2aa2d0d5a654d650",
     "file_count": 23,
 }
-COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v29"
-COMPARISON_MANIFEST_SCHEMA_VERSION = 18
+V29_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v29"
+V29_COMPARISON_MANIFEST_SCHEMA_VERSION = 18
+V30_COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v30"
+V30_COMPARISON_MANIFEST_SCHEMA_VERSION = 19
+COMPARISON_PROTOCOL_VERSION = "resource_matched_multi_arm_v31"
+COMPARISON_MANIFEST_SCHEMA_VERSION = 20
 _V26_RUNTIME_PROTOCOL_VERSIONS = frozenset(
     {
         V26_COMPARISON_PROTOCOL_VERSION,
         V27_COMPARISON_PROTOCOL_VERSION,
         V28_COMPARISON_PROTOCOL_VERSION,
+        V29_COMPARISON_PROTOCOL_VERSION,
+        V30_COMPARISON_PROTOCOL_VERSION,
+        COMPARISON_PROTOCOL_VERSION,
+    }
+)
+_OUTPUT_LIMIT_PROTOCOL_VERSIONS = frozenset(
+    {
+        V29_COMPARISON_PROTOCOL_VERSION,
+        V30_COMPARISON_PROTOCOL_VERSION,
         COMPARISON_PROTOCOL_VERSION,
     }
 )
@@ -228,7 +244,7 @@ V28_COMPARISON_CONFIGURATION_POLICIES = {
 }
 # v29 records delivered output-limit responses as model failures and provider
 # delivery failures as audited infrastructure no-scores.
-COMPARISON_CONFIGURATION_POLICIES = {
+V29_COMPARISON_CONFIGURATION_POLICIES = {
     **V28_COMPARISON_CONFIGURATION_POLICIES,
     "model_execution_failure_reasons": sorted(AGENT_EXECUTION_FAILURE_REASONS),
     "model_response_truncation_policy": (
@@ -238,6 +254,25 @@ COMPARISON_CONFIGURATION_POLICIES = {
     "provider_failure_policy": "audited-infrastructure-error-no-score-v1",
     "provider_no_score_categories": sorted(PROVIDER_INFRASTRUCTURE_CATEGORIES),
     "provider_request_audit_policy": "exact-failed-request-attempt-history-v1",
+}
+# v30 freezes the optimized code-only arm as a contract-constrained plugin composition.
+V30_COMPARISON_CONFIGURATION_POLICIES = {
+    **V29_COMPARISON_CONFIGURATION_POLICIES,
+    "ours_tool_policy": "code-interpreter-only-v1",
+    "deterministic_profile_policy": "compact-routing-hint-4k-v1",
+    "formula_verification_skill_policy": "disabled-in-default-ours-v1",
+    "formula_runtime_gate_arms": [],
+    "plugin_composition_policy": "contract-constrained-single-slot-v1",
+}
+# v31 adds spreadsheet capability attribution/lifecycle contracts and auditable
+# built-in composition overrides without changing the default historical arms.
+COMPARISON_CONFIGURATION_POLICIES = {
+    **V30_COMPARISON_CONFIGURATION_POLICIES,
+    "plugin_composition_policy": "service-seam-spreadsheet-capability-bank-v2",
+    "plugin_failure_attribution_policy": (
+        "infrastructure-composition-gap-capability-routing-v1"
+    ),
+    "plugin_lifecycle_policy": "ephemeral-replay-transfer-regression-persistent-v1",
 }
 
 
@@ -639,9 +674,7 @@ def comparison_execution_contract(
             "circuit_breaker_threshold": circuit_breaker_threshold,
             "arm_order_seed": arm_order_seed,
         },
-        "skills_for_ours_only": [
-            {"name": skill.name, "sha256": skill.sha256} for skill in skills.discover()
-        ],
+        "skills_for_ours_only": [],
     }
 
 
@@ -694,7 +727,7 @@ def manifest_execution_contract(manifest: dict[str, Any]) -> dict[str, Any]:
         contract["source_contract"] = dict(V27_RUN_SPEC_SOURCE_CONTRACT)
     elif protocol_version == V28_COMPARISON_PROTOCOL_VERSION:
         contract["source_contract"] = dict(V28_RUN_SPEC_SOURCE_CONTRACT)
-    elif protocol_version == COMPARISON_PROTOCOL_VERSION:
+    elif protocol_version in _OUTPUT_LIMIT_PROTOCOL_VERSIONS:
         contract["source_contract"] = _run_spec_source_fingerprint()
     return contract
 
@@ -707,20 +740,52 @@ def _stage_allowed_tools_policy(
     arms: tuple[str, ...],
     *,
     protocol_version: str = COMPARISON_PROTOCOL_VERSION,
+    composition_overrides: Mapping[str, CompositionSpec] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    if protocol_version == COMPARISON_PROTOCOL_VERSION:
+        registry = default_plugin_registry()
+        overrides = dict(composition_overrides or {})
+        policies: dict[str, dict[str, Any]] = {}
+        for arm in arms:
+            if arm == "paper":
+                policies[arm] = {
+                    "extract": sorted(PAPER_EXTRACTION_TOOLS),
+                    "vision_verify": sorted(PAPER_VISION_TOOLS),
+                    "latex_verify": sorted(PAPER_LATEX_TOOLS),
+                    "reconcile": sorted(PAPER_RECONCILIATION_TOOLS),
+                    "solve": sorted(PAPER_SOLVER_TOOLS),
+                }
+                continue
+            plan = execution_plan(registry.resolve(overrides.get(arm, ARM_COMPOSITIONS[arm])))
+            if plan.tool_mode == "native":
+                solve_tools: Any = "all"
+            elif plan.tool_mode == "code-plus-formula-validation":
+                solve_tools = sorted(FORMULA_VALIDATED_CODE_TOOLS)
+            else:
+                solve_tools = sorted(BARE_TOOLS)
+            policies[arm] = (
+                {
+                    "plan": [],
+                    "execute": solve_tools,
+                }
+                if arm == "ours"
+                else {"solve": solve_tools}
+            )
+        return policies
+    ours_solve_tools: Any
+    if protocol_version == V30_COMPARISON_PROTOCOL_VERSION:
+        ours_solve_tools = sorted(BARE_TOOLS)
+    elif protocol_version in _V26_RUNTIME_PROTOCOL_VERSIONS:
+        ours_solve_tools = sorted(OURS_TOOLS)
+    else:
+        ours_solve_tools = "all"
     return {
         arm: (
             {"solve": sorted(BARE_TOOLS)}
             if arm in {"bare", "profile"}
             else {"solve": "all"}
             if arm == "native"
-            else {
-                "solve": (
-                    sorted(OURS_TOOLS)
-                    if protocol_version in _V26_RUNTIME_PROTOCOL_VERSIONS
-                    else "all"
-                )
-            }
+            else {"solve": ours_solve_tools}
             if arm == "ours"
             else {
                 "extract": sorted(PAPER_EXTRACTION_TOOLS),
@@ -732,6 +797,54 @@ def _stage_allowed_tools_policy(
         )
         for arm in arms
     }
+
+
+def _plugin_compositions_policy(
+    arms: tuple[str, ...],
+    composition_overrides: Mapping[str, CompositionSpec] | None = None,
+) -> dict[str, dict[str, Any]]:
+    registry = default_plugin_registry()
+    overrides = dict(composition_overrides or {})
+    if set(overrides) - set(arms):
+        raise ValueError("Plugin composition overrides must target selected arms")
+    compositions: dict[str, dict[str, Any]] = {}
+    for arm in arms:
+        resolved = registry.resolve(overrides.get(arm, ARM_COMPOSITIONS[arm]))
+        plan = execution_plan(resolved)
+        if (arm == "paper" and plan.workflow != "paper") or (
+            arm != "paper" and plan.policy != arm
+        ):
+            raise ValueError(
+                f"Composition {resolved.spec.name!r} is not execution-compatible with arm {arm!r}"
+            )
+        compositions[arm] = {
+            "composition_sha256": resolved.sha256,
+            "composition": resolved.to_dict(),
+        }
+    return compositions
+
+
+def _plugin_runtime_configuration_policy(
+    arms: tuple[str, ...],
+    composition_overrides: Mapping[str, CompositionSpec] | None = None,
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    registry = default_plugin_registry()
+    overrides = dict(composition_overrides or {})
+    policies = dict(COMPARISON_CONFIGURATION_POLICIES)
+    skill_selection: dict[str, list[str]] = {}
+    formula_gate_arms: list[str] = []
+    for arm in arms:
+        resolved = registry.resolve(overrides.get(arm, ARM_COMPOSITIONS[arm]))
+        plan = execution_plan(resolved)
+        skill_selection[arm] = list(plan.skill_names)
+        if plan.require_formula_runtime_validation:
+            formula_gate_arms.append(arm)
+    policies["formula_runtime_gate_arms"] = formula_gate_arms
+    if any(skill_selection.values()):
+        policies["formula_verification_skill_policy"] = (
+            "composition-selected-capability-bank-v1"
+        )
+    return policies, skill_selection
 
 
 def _allowed_observed_terminals_policy(
@@ -746,7 +859,7 @@ def _allowed_observed_terminals_policy(
                     ASSISTANT_TEXT_TERMINAL,
                     *(
                         [MODEL_RESPONSE_TRUNCATED_TERMINAL]
-                        if protocol_version == COMPARISON_PROTOCOL_VERSION
+                        if protocol_version in _OUTPUT_LIMIT_PROTOCOL_VERSIONS
                         else []
                     ),
                     *(
@@ -759,7 +872,8 @@ def _allowed_observed_terminals_policy(
                         else []
                     ),
                 ]
-                if arm == "paper" and stage == "reconcile"
+                if (arm == "paper" and stage == "reconcile")
+                or (arm == "ours" and stage == "plan")
                 else [
                     TERMINAL_TOOL_NAME,
                     *(
@@ -783,7 +897,7 @@ def _allowed_observed_terminals_policy(
                     ),
                     *(
                         [MODEL_RESPONSE_TRUNCATED_TERMINAL]
-                        if protocol_version == COMPARISON_PROTOCOL_VERSION
+                        if protocol_version in _OUTPUT_LIMIT_PROTOCOL_VERSIONS
                         else []
                     ),
                     *(
@@ -1713,6 +1827,7 @@ class ComparisonBenchmarkRunner:
         arm_order_seed: int = 20260811,
         circuit_breaker_threshold: int = 3,
         split_provenance: dict[str, Any] | None = None,
+        composition_overrides: Mapping[str, CompositionSpec] | None = None,
         run_spec_document: dict[str, Any] | None = None,
         run_spec_provenance: dict[str, str] | None = None,
         run_spec_bytes: bytes | None = None,
@@ -1748,6 +1863,10 @@ class ComparisonBenchmarkRunner:
         self.split_provenance = (
             json.loads(json.dumps(split_provenance)) if split_provenance is not None else None
         )
+        self.composition_overrides = dict(composition_overrides or {})
+        _plugin_compositions_policy(self.arms, self.composition_overrides)
+        if self.composition_overrides and run_spec_document is not None:
+            raise ValueError("Frozen run specs do not permit plugin composition overrides")
         self.repository_source_state: dict[str, Any] | None = None
         self.continuation_source_record: dict[str, Any] | None = None
         self.legacy_source_transition = False
@@ -1845,7 +1964,7 @@ class ComparisonBenchmarkRunner:
         )
         if self.config.max_retries != 0:
             raise HarnessError(
-                "v29 comparisons require request retries to be disabled so provider "
+                "v30 comparisons require request retries to be disabled so provider "
                 "no-score rows retain exact HTTP-attempt evidence"
             )
         self._manifest(tasks)
@@ -1906,6 +2025,9 @@ class ComparisonBenchmarkRunner:
             if {"profile", "ours"} & set(self.arms)
             else {}
         )
+        runtime_policies, plugin_skill_selection = _plugin_runtime_configuration_policy(
+            self.arms, self.composition_overrides
+        )
         return {
             "schema_version": COMPARISON_MANIFEST_SCHEMA_VERSION,
             "comparison_protocol_version": COMPARISON_PROTOCOL_VERSION,
@@ -1955,6 +2077,10 @@ class ComparisonBenchmarkRunner:
             "stage_allowed_tools": _stage_allowed_tools_policy(
                 self.arms,
                 protocol_version=COMPARISON_PROTOCOL_VERSION,
+                composition_overrides=self.composition_overrides,
+            ),
+            "plugin_compositions": _plugin_compositions_policy(
+                self.arms, self.composition_overrides
             ),
             "allowed_observed_terminals": _allowed_observed_terminals_policy(self.stage_turn_caps),
             "forced_prefix_wire_policy": {
@@ -2045,9 +2171,11 @@ class ComparisonBenchmarkRunner:
                     "provider_fatal",
                     "recalculation_infrastructure",
                 ],
-                "skills_for_ours_only": skills,
+                "skills_for_ours_only": [],
+                "plugin_skill_selection": plugin_skill_selection,
+                "available_skills": skills,
                 "code_isolation": STRICT_ISOLATION_POLICY,
-                **COMPARISON_CONFIGURATION_POLICIES,
+                **runtime_policies,
             },
         }
 
@@ -2477,6 +2605,24 @@ class ComparisonBenchmarkRunner:
         session: WorkbookSession | None = None
         result: Any | None = None
 
+        def record_failure_attribution(active_session: WorkbookSession) -> None:
+            registry = default_plugin_registry()
+            resolved = registry.resolve(
+                self.composition_overrides.get(arm, ARM_COMPOSITIONS[arm])
+            )
+            attribution = attribute_failure(
+                registry,
+                resolved,
+                evaluator_passed=False,
+                task_type=task.instruction_type,
+                evidence_text=(task.instruction, str(row.get("model_failure_reason", ""))),
+                error_categories=(str(row.get("error_category", "")),),
+                evidence_sha256=(_text_sha256(task.instruction),),
+            )
+            payload = attribution.to_dict()
+            row["capability_attribution"] = payload
+            active_session.recorder.record("harness.failure.attributed", payload)
+
         def remaining_seconds(stage: str) -> float:
             ensure_postprocess_time(stage)
             assert budget.deadline is not None
@@ -2524,13 +2670,14 @@ class ComparisonBenchmarkRunner:
                     arm=arm,
                     config=self.config,
                     session=session,
-                    skills=self.skill_registry if arm == "ours" else None,
+                    skills=self.skill_registry,
                     instruction=task.instruction,
                     max_output_tokens=self.max_output_tokens,
                     max_elapsed_seconds=self.task_timeout_seconds,
                     budget=budget,
                     pacer=self.relay_pacer,
                     max_turns_per_arm=self.max_turns_per_arm,
+                    composition=self.composition_overrides.get(arm),
                 )
             except AgentExecutionFailure as exc:
                 if exc.reason not in AGENT_EXECUTION_FAILURE_REASONS:
@@ -2755,6 +2902,11 @@ class ComparisonBenchmarkRunner:
             row["finished_at"] = datetime.now(timezone.utc).isoformat()
             row["elapsed_seconds"] = round(monotonic() - started_clock, 3)
             if session is not None:
+                if row.get("passed") is False and "capability_attribution" not in row:
+                    try:
+                        record_failure_attribution(session)
+                    except Exception as attribution_exc:
+                        row["capability_attribution_error"] = type(attribution_exc).__name__
                 if row.get("status") != "completed":
                     try:
                         session.recorder.record(

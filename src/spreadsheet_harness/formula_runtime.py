@@ -15,6 +15,8 @@ from typing import Any
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
+from openpyxl.formula.translate import Translator
+
 from .errors import WorkbookValidationError
 from .render import sha256_file, sheet_inventory_identity
 
@@ -258,6 +260,62 @@ def _canonical_formula_payload(formula: ElementTree.Element) -> dict[str, Any]:
     }
 
 
+def _canonical_formula_text(text: str) -> str:
+    """Normalize formula spelling without changing quoted string constants.
+
+    Excel formula identifiers, cell references, and sheet names are case-insensitive. LibreOffice
+    may also serialize boolean literals as ``TRUE()``/``FALSE()`` even when the OOXML source used
+    ``TRUE``/``FALSE``. Neither rewrite is a model-authored formula edit, so the runtime gate must
+    not add thousands of unchanged cells to its pending scope after recalculation.
+    """
+
+    pieces: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != '"':
+            end = text.find('"', index)
+            if end < 0:
+                end = len(text)
+            unquoted = text[index:end].upper()
+            unquoted = re.sub(r"\b(TRUE|FALSE)\(\)", r"\1", unquoted)
+            pieces.append(unquoted)
+            index = end
+            continue
+        end = index + 1
+        while end < len(text):
+            if text[end] != '"':
+                end += 1
+                continue
+            if end + 1 < len(text) and text[end + 1] == '"':
+                end += 2
+                continue
+            end += 1
+            break
+        pieces.append(text[index:end])
+        index = end
+    return "".join(pieces)
+
+
+def _translated_shared_formula(
+    *,
+    master_coordinate: str,
+    master_text: str,
+    coordinate: str,
+) -> str:
+    if coordinate == master_coordinate:
+        return master_text
+    try:
+        return Translator(
+            f"={master_text}",
+            origin=master_coordinate,
+        ).translate_formula(coordinate)[1:]
+    except Exception as exc:
+        raise WorkbookValidationError(
+            "OOXML formula inventory could not expand a shared formula at "
+            f"{coordinate}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def _sheet_formula_cells(raw: bytes, *, sheet: str) -> dict[FormulaCoordinate, FormulaCellState]:
     root = _parse_xml(raw, label=f"worksheet {sheet!r}")
     namespace = _namespace(root.tag)
@@ -271,7 +329,7 @@ def _sheet_formula_cells(raw: bytes, *, sheet: str) -> dict[FormulaCoordinate, F
     raw_formulas: list[
         tuple[str, dict[str, Any], str | None, str | None]
     ] = []
-    shared_masters: dict[str, dict[str, Any]] = {}
+    shared_masters: dict[str, tuple[str, dict[str, Any]]] = {}
     seen: set[str] = set()
     for cell in root.iter(cell_tag):
         coordinate = cell.attrib.get("r")
@@ -311,11 +369,12 @@ def _sheet_formula_cells(raw: bytes, *, sheet: str) -> dict[FormulaCoordinate, F
         shared_index = attributes.get("si") if attributes.get("t") == "shared" else None
         if shared_index is not None and payload["text"]:
             previous = shared_masters.get(shared_index)
-            if previous is not None and previous != payload:
+            master = (coordinate, payload)
+            if previous is not None and previous != master:
                 raise WorkbookValidationError(
                     "OOXML formula inventory encountered conflicting shared formula masters"
                 )
-            shared_masters[shared_index] = payload
+            shared_masters[shared_index] = master
         values = [child for child in cell if child.tag == value_tag]
         if len(values) > 1 or (values and list(values[0])):
             raise WorkbookValidationError(
@@ -338,13 +397,26 @@ def _sheet_formula_cells(raw: bytes, *, sheet: str) -> dict[FormulaCoordinate, F
             raise WorkbookValidationError(
                 "OOXML formula inventory encountered a shared formula without a master"
             )
+        if shared_index is not None:
+            master_coordinate, master_payload = shared_masters[shared_index]
+            formula_text = _translated_shared_formula(
+                master_coordinate=master_coordinate,
+                master_text=str(master_payload["text"]),
+                coordinate=coordinate,
+            )
+            meaningful_attributes: list[tuple[str, str]] = []
+        else:
+            formula_text = str(payload["text"])
+            # aca/ca are recalculation hints that LibreOffice commonly adds or removes. They do
+            # not alter the expression and therefore are not part of model-edit identity.
+            meaningful_attributes = [
+                (key, value)
+                for key, value in payload["attributes"]
+                if key not in {"aca", "ca"}
+            ]
         effective = {
-            "cell_formula": payload,
-            "shared_master": (
-                shared_masters.get(shared_index)
-                if shared_index is not None and not payload["text"]
-                else None
-            ),
+            "attributes": meaningful_attributes,
+            "text": _canonical_formula_text(formula_text),
         }
         formula_sha256 = hashlib.sha256(
             json.dumps(

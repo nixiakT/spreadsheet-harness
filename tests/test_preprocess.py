@@ -208,6 +208,48 @@ def test_deterministic_profile_is_stable_and_preserves_source(tmp_path: Path) ->
     assert source.read_bytes() == before
 
 
+def test_deterministic_profile_prioritizes_instruction_named_sheets(tmp_path: Path) -> None:
+    source = tmp_path / "features.xlsx"
+    _save_feature_workbook(source)
+
+    profile = build_deterministic_profile(
+        source,
+        bounds={"max_sheets": 1},
+        preferred_sheet_names=("Hidden",),
+    )
+
+    assert profile["task_independent"] is False
+    assert profile["routing"] == {
+        "policy": "instruction-named-sheets-first-v1",
+        "preferred_sheet_names": ["Hidden"],
+    }
+    assert [sheet["name"] for sheet in profile["sheets"]] == ["Hidden"]
+
+
+def test_deterministic_profile_avoids_second_cached_value_workbook_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import spreadsheet_harness.preprocess as preprocess_module
+
+    source = tmp_path / "features.xlsx"
+    _save_feature_workbook(source)
+    real_load_workbook = preprocess_module.load_workbook
+    data_only_calls: list[bool] = []
+
+    def recording_load_workbook(*args: object, **kwargs: object) -> Workbook:
+        data_only_calls.append(bool(kwargs.get("data_only")))
+        return real_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(preprocess_module, "load_workbook", recording_load_workbook)
+
+    profile = build_deterministic_profile(source, bounds={"max_sheets": 1})
+
+    assert data_only_calls == [False]
+    assert len(profile["sheets"]) == 1
+    assert profile["truncation"]["sheets"] is True
+
+
 def test_deterministic_profile_defaults_are_compact_but_keep_key_evidence(
     tmp_path: Path,
 ) -> None:

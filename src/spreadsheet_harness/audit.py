@@ -56,7 +56,15 @@ from .comparison import (
     V28_COMPARISON_CONFIGURATION_POLICIES,
     V28_COMPARISON_MANIFEST_SCHEMA_VERSION,
     V28_COMPARISON_PROTOCOL_VERSION,
+    V29_COMPARISON_CONFIGURATION_POLICIES,
+    V29_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V29_COMPARISON_PROTOCOL_VERSION,
+    V30_COMPARISON_CONFIGURATION_POLICIES,
+    V30_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    V30_COMPARISON_PROTOCOL_VERSION,
     _allowed_observed_terminals_policy,
+    _plugin_compositions_policy,
+    _plugin_runtime_configuration_policy,
     _request_attempt_audit,
     _stage_allowed_tools_policy,
     manifest_execution_contract,
@@ -74,6 +82,7 @@ from .errors import (
     RenderError,
     ScoringInfrastructureError,
 )
+from .plugins import ARM_COMPOSITIONS, BUILTIN_COMPOSITIONS, CompositionSpec
 from .render import (
     RECALCULATION_SHEET_INTEGRITY_POLICY,
     openpyxl_worksheet_view,
@@ -185,13 +194,45 @@ _V28_AUDIT_CONTRACT = _AuditProtocolContract(
     require_recalculation_integrity=True,
 )
 _V29_AUDIT_CONTRACT = _AuditProtocolContract(
-    protocol_version=COMPARISON_PROTOCOL_VERSION,
-    manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
-    configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    protocol_version=V29_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V29_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V29_COMPARISON_CONFIGURATION_POLICIES,
     allowed_model_failure_reasons=(
         _V28_AUDIT_CONTRACT.allowed_model_failure_reasons
         | {"model_response_truncated"}
     ),
+    require_v24_outcome_fields=True,
+    strict_current_source=False,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
+    require_truncated_terminal_evidence=True,
+    require_accepted_terminal_evidence=True,
+    require_recalculation_integrity=True,
+    allow_generic_response_truncation=True,
+    allow_provider_infrastructure_no_score=True,
+)
+_V30_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=V30_COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=V30_COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=V30_COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=_V29_AUDIT_CONTRACT.allowed_model_failure_reasons,
+    require_v24_outcome_fields=True,
+    strict_current_source=False,
+    allow_budget_exhaustion_evidence=True,
+    allow_final_response_token_overage=True,
+    require_exact_agent_evidence=True,
+    require_truncated_terminal_evidence=True,
+    require_accepted_terminal_evidence=True,
+    require_recalculation_integrity=True,
+    allow_generic_response_truncation=True,
+    allow_provider_infrastructure_no_score=True,
+)
+_V31_AUDIT_CONTRACT = _AuditProtocolContract(
+    protocol_version=COMPARISON_PROTOCOL_VERSION,
+    manifest_schema_version=COMPARISON_MANIFEST_SCHEMA_VERSION,
+    configuration_policies=COMPARISON_CONFIGURATION_POLICIES,
+    allowed_model_failure_reasons=_V29_AUDIT_CONTRACT.allowed_model_failure_reasons,
     require_v24_outcome_fields=True,
     strict_current_source=True,
     allow_budget_exhaustion_evidence=True,
@@ -214,6 +255,16 @@ def _select_audit_contract(
         manifest.get("comparison_protocol_version"),
         manifest.get("schema_version"),
     )
+    if identity == (
+        _V31_AUDIT_CONTRACT.protocol_version,
+        _V31_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V31_AUDIT_CONTRACT
+    if identity == (
+        _V30_AUDIT_CONTRACT.protocol_version,
+        _V30_AUDIT_CONTRACT.manifest_schema_version,
+    ):
+        return _V30_AUDIT_CONTRACT
     if identity == (
         _V29_AUDIT_CONTRACT.protocol_version,
         _V29_AUDIT_CONTRACT.manifest_schema_version,
@@ -260,6 +311,8 @@ def _select_audit_contract(
         _V27_AUDIT_CONTRACT.manifest_schema_version,
         _V28_AUDIT_CONTRACT.manifest_schema_version,
         _V29_AUDIT_CONTRACT.manifest_schema_version,
+        _V30_AUDIT_CONTRACT.manifest_schema_version,
+        _V31_AUDIT_CONTRACT.manifest_schema_version,
     }:
         _add_reason(reasons, "comparison_manifest_schema_mismatch")
     if manifest.get("comparison_protocol_version") not in {
@@ -270,6 +323,8 @@ def _select_audit_contract(
         _V27_AUDIT_CONTRACT.protocol_version,
         _V28_AUDIT_CONTRACT.protocol_version,
         _V29_AUDIT_CONTRACT.protocol_version,
+        _V30_AUDIT_CONTRACT.protocol_version,
+        _V31_AUDIT_CONTRACT.protocol_version,
     }:
         _add_reason(reasons, "comparison_manifest_protocol_mismatch")
     return None
@@ -1012,6 +1067,12 @@ _V26_PAPER_EVIDENCE_STAGES = frozenset(
 
 
 def _v26_stage_terminal_response_mode(arm: str, stage: str) -> str | None:
+    if arm == "ours":
+        if stage == "plan":
+            return "assistant_text"
+        if stage == "execute":
+            return "empty_ack"
+        return None
     if arm == "paper":
         if stage in _V26_PAPER_EVIDENCE_STAGES:
             return "evidence_result"
@@ -1758,11 +1819,18 @@ def _audit_manifest_contract(
         configuration
     ):
         _add_reason(reasons, "comparison_manifest_configuration_invalid")
-    elif contract is not None and any(
-        configuration.get(field) != expected
-        for field, expected in contract.configuration_policies.items()
-    ):
-        _add_reason(reasons, "comparison_manifest_policy_mismatch")
+    elif contract is not None:
+        dynamic_v30_fields = (
+            {"formula_runtime_gate_arms", "formula_verification_skill_policy"}
+            if contract is _V31_AUDIT_CONTRACT
+            else set()
+        )
+        if any(
+            configuration.get(field) != expected
+            for field, expected in contract.configuration_policies.items()
+            if field not in dynamic_v30_fields
+        ):
+            _add_reason(reasons, "comparison_manifest_policy_mismatch")
     if not _valid_source_fingerprint(manifest.get("harness_source")):
         _add_reason(reasons, "comparison_manifest_source_fingerprint_invalid")
     elif (
@@ -1859,6 +1927,43 @@ def _audit_manifest_contract(
         if not isinstance(value, dict) or set(value) != set(manifest.get("arms") or []):
             _add_reason(reasons, f"comparison_manifest_{field}_invalid")
     arms = tuple(str(arm) for arm in (manifest.get("arms") or []))
+    overrides: dict[str, CompositionSpec] = {}
+    if contract is _V31_AUDIT_CONTRACT:
+        try:
+            recorded_compositions = manifest.get("plugin_compositions")
+            if not isinstance(recorded_compositions, dict):
+                raise ValueError("Plugin compositions must be an object")
+            for arm in arms:
+                record = recorded_compositions.get(arm)
+                composition = record.get("composition") if isinstance(record, dict) else None
+                name = composition.get("name") if isinstance(composition, dict) else None
+                if not isinstance(name, str) or name not in BUILTIN_COMPOSITIONS:
+                    raise ValueError("Unknown recorded plugin composition")
+                spec = BUILTIN_COMPOSITIONS[name]
+                if spec != ARM_COMPOSITIONS[arm]:
+                    overrides[arm] = spec
+            expected_compositions = _plugin_compositions_policy(arms, overrides)
+        except (HarnessError, KeyError, TypeError, ValueError):
+            expected_compositions = None
+        if manifest.get("plugin_compositions") != expected_compositions:
+            _add_reason(reasons, "comparison_manifest_plugin_compositions_mismatch")
+        try:
+            expected_runtime_policies, expected_skill_selection = (
+                _plugin_runtime_configuration_policy(arms, overrides)
+            )
+        except (HarnessError, KeyError, TypeError, ValueError):
+            expected_runtime_policies = None
+            expected_skill_selection = None
+        if not isinstance(configuration, dict) or expected_runtime_policies is None or any(
+            configuration.get(field) != expected_runtime_policies[field]
+            for field in ("formula_runtime_gate_arms", "formula_verification_skill_policy")
+        ):
+            _add_reason(reasons, "comparison_manifest_policy_mismatch")
+            _add_reason(reasons, "comparison_manifest_plugin_runtime_policy_mismatch")
+        if not isinstance(configuration, dict) or configuration.get(
+            "plugin_skill_selection"
+        ) != expected_skill_selection:
+            _add_reason(reasons, "comparison_manifest_plugin_skill_selection_mismatch")
     max_turns = configuration.get("max_turns_per_arm") if isinstance(configuration, dict) else None
     try:
         expected_caps = comparison_stage_turn_caps(max_turns, arms)
@@ -1883,6 +1988,7 @@ def _audit_manifest_contract(
                 if contract is not None
                 else COMPARISON_PROTOCOL_VERSION
             ),
+            composition_overrides=(overrides if contract is _V31_AUDIT_CONTRACT else None),
         ):
             _add_reason(reasons, "comparison_manifest_stage_tools_mismatch")
         if manifest.get("allowed_observed_terminals") != (
@@ -1937,6 +2043,44 @@ def _audit_row_contract(
     for field, expected in expected_fields.items():
         if row.get(field) != expected:
             _add_reason(reasons, f"row_manifest_mismatch:{field}")
+    if (
+        contract is _V31_AUDIT_CONTRACT
+        and isinstance(row.get("agent"), dict)
+        and isinstance(row["agent"].get("context_policy"), dict)
+    ):
+        composition_record = (manifest.get("plugin_compositions") or {}).get(arm)
+        composition = (
+            composition_record.get("composition")
+            if isinstance(composition_record, dict)
+            else None
+        )
+        context_policy = row["agent"].get("context_policy")
+        expected_plugins = (
+            [
+                {
+                    "name": plugin.get("name"),
+                    "version": plugin.get("version"),
+                    "manifest_sha256": plugin.get("manifest_sha256"),
+                }
+                for plugin in composition.get("plugins", [])
+            ]
+            if isinstance(composition, dict)
+            else None
+        )
+        if not isinstance(context_policy, dict) or any(
+            context_policy.get(field) != expected
+            for field, expected in (
+                ("composition_name", composition.get("name") if composition else None),
+                (
+                    "composition_sha256",
+                    composition_record.get("composition_sha256")
+                    if isinstance(composition_record, dict)
+                    else None,
+                ),
+                ("plugins", expected_plugins),
+            )
+        ):
+            _add_reason(reasons, "row_manifest_mismatch:plugin_composition")
     budget = row.get("budget")
     limit = budget.get("limit") if isinstance(budget, dict) else None
     used = budget.get("used") if isinstance(budget, dict) else None
@@ -2119,7 +2263,8 @@ def _audit_completed_agent(
                 _add_reason(reasons, f"agent_first_tool_mismatch:{name}")
         expected_terminal = (
             "assistant_text"
-            if arm == "paper" and name == "reconcile"
+            if (arm == "paper" and name == "reconcile")
+            or (arm == "ours" and name == "plan")
             else (manifest.get("post_prefix_routing") or {}).get("terminal_tool")
         )
         budget_reconcile_terminal = bool(

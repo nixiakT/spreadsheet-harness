@@ -36,6 +36,11 @@ from .benchmark import (
     trace2skill_heldout_manifest,
     trace2skill_split_provenance,
 )
+from .capability_evolution import (
+    attribute_trajectory,
+    evaluate_candidate_lifecycle,
+    persistent_plugin_action,
+)
 from .comparison import (
     AVAILABLE_COMPARISON_ARMS,
     COMPARISON_ARMS,
@@ -51,6 +56,12 @@ from .comparison import (
 from .config import API_PROTOCOLS, REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
 from .errors import HarnessError
 from .evolution import generate_candidate, promote_candidate
+from .plugins import (
+    BUILTIN_COMPOSITIONS,
+    PluginMutation,
+    default_plugin_registry,
+    enumerate_single_plugin_candidates,
+)
 from .preprocess import preprocess_workbook
 from .provider_compat import check_tool_compatibility
 from .render import (
@@ -61,6 +72,24 @@ from .render import (
 )
 from .session import SUPPORTED_EDIT_FORMATS, WorkbookSession
 from .skills import SkillRegistry
+from .spreadsheetbench_v1 import (
+    audit_spreadsheetbench_v1_comparison,
+    load_spreadsheetbench_v1,
+    run_spreadsheetbench_v1_comparison,
+)
+from .spreadsheetbench_v2 import (
+    DEFAULT_V2_EVALUATOR,
+    SPREADSHEETBENCH_V2_CATEGORIES,
+    audit_spreadsheetbench_v2_comparison,
+    load_spreadsheetbench_v2_tasks,
+    run_spreadsheetbench_v2_comparison,
+    select_spreadsheetbench_v2_tasks,
+)
+from .synthetic_debugging import (
+    build_synthetic_debugging_corpus,
+    run_deterministic_debugging_repair,
+    score_synthetic_debugging_outputs,
+)
 from .tools import SpreadsheetToolRegistry
 
 
@@ -129,9 +158,7 @@ def _lexical_absolute(path: str | Path) -> Path:
     return Path(os.path.abspath(Path(path).expanduser()))
 
 
-def _reject_repository_path_symlinks(
-    repository_root: Path, target: Path, *, label: str
-) -> None:
+def _reject_repository_path_symlinks(repository_root: Path, target: Path, *, label: str) -> None:
     try:
         relative = target.relative_to(repository_root)
     except ValueError as exc:
@@ -154,9 +181,7 @@ def _reject_repository_path_symlinks(
             raise HarnessError(f"Pilot {label} path must not contain symlinks: {current}")
 
 
-def _repository_relative_pilot_path(
-    repository_root: Path, value: Any, *, label: str
-) -> Path:
+def _repository_relative_pilot_path(repository_root: Path, value: Any, *, label: str) -> Path:
     if not isinstance(value, str) or not value:
         raise HarnessError(f"Pilot run spec {label} path is invalid")
     relative = Path(value)
@@ -229,9 +254,7 @@ def _load_pilot_run_spec_from_repository(
     }
     if actual not in expected_paths:
         raise HarnessError("Run spec path is not a registered repository protocol")
-    _require_exact_pilot_cli_path(
-        actual, actual, repository_root=repository_root, label="run spec"
-    )
+    _require_exact_pilot_cli_path(actual, actual, repository_root=repository_root, label="run spec")
     return load_pilot_run_spec(actual)
 
 
@@ -313,9 +336,7 @@ def _claim_fresh_pilot_output(output: Path, run_spec_bytes: bytes) -> None:
     """Publish a complete copy-only pilot directory in one no-replace rename."""
 
     parent = output.parent
-    temporary = Path(
-        tempfile.mkdtemp(prefix=f".{output.name}.claim-", dir=parent)
-    )
+    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.claim-", dir=parent))
     claimed = False
     try:
         _write_private_bytes(temporary / RUN_SPEC_COPY_FILENAME, run_spec_bytes)
@@ -598,6 +619,18 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
     config: ProviderConfig | None = None
     skills: SkillRegistry | None = None
     arms = tuple(args.arm or COMPARISON_ARMS)
+    composition_overrides: dict[str, Any] = {}
+    for raw_override in args.composition or []:
+        arm, separator, composition_name = str(raw_override).partition("=")
+        if not separator or not arm or not composition_name:
+            raise HarnessError("--composition must use ARM=COMPOSITION syntax")
+        if arm not in arms:
+            raise HarnessError(f"Composition override targets unselected arm {arm!r}")
+        if arm in composition_overrides:
+            raise HarnessError(f"Duplicate composition override for arm {arm!r}")
+        composition_overrides[arm] = _named_composition(composition_name)
+    if args.run_spec and composition_overrides:
+        raise HarnessError("Frozen run specs do not permit --composition overrides")
     if args.run_spec:
         if args.api_key is not None or not args.api_key_file:
             raise HarnessError(
@@ -618,10 +651,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         skills = _skills(args).freeze()
     requested_ids = list(args.task_id or [])
     if args.split_manifest and (
-        args.offset != 0
-        or args.limit is not None
-        or requested_ids
-        or args.task_id_file
+        args.offset != 0 or args.limit is not None or requested_ids or args.task_id_file
     ):
         raise HarnessError(
             "--split-manifest selects a frozen task set; use a derivative manifest "
@@ -639,9 +669,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
     split_provenance: dict[str, Any] | None = None
     if args.split_manifest:
         split_path = (
-            pilot_split_path
-            if args.run_spec
-            else Path(args.split_manifest).expanduser().resolve()
+            pilot_split_path if args.run_spec else Path(args.split_manifest).expanduser().resolve()
         )
         split_report = load_and_verify_trace2skill_split_manifest(root, split_path)
         frozen_ids = [str(task_id) for task_id in split_report["task_ids"]]
@@ -663,11 +691,11 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
     elif requested_ids:
         if len(set(requested_ids)) != len(requested_ids):
             raise HarnessError("Comparison task IDs must be unique")
-        selected = set(requested_ids)
-        missing = sorted(selected - {task.task_id for task in tasks})
+        tasks_by_id = {task.task_id: task for task in tasks}
+        missing = [task_id for task_id in requested_ids if task_id not in tasks_by_id]
         if missing:
             raise HarnessError("Unknown comparison task IDs: " + ", ".join(missing))
-        tasks = [task for task in tasks if task.task_id in selected]
+        tasks = [tasks_by_id[task_id] for task_id in requested_ids]
     tasks = tasks[args.offset :]
     if args.limit is not None:
         tasks = tasks[: args.limit]
@@ -677,8 +705,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         (task.task_id for task in tasks),
         authorized_manifest_id=(
             split_provenance.get("manifest_id")
-            if run_spec_document is not None
-            and isinstance(split_provenance, dict)
+            if run_spec_document is not None and isinstance(split_provenance, dict)
             else None
         ),
     )
@@ -704,10 +731,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         verify_pilot_run_spec_contract(run_spec_document, actual_contract)
     elif args.resume:
         raise HarnessError("--resume is supported only with --run-spec")
-    elif (
-        split_provenance
-        and split_provenance.get("manifest_id") in protected_run_spec_split_ids()
-    ):
+    elif split_provenance and split_provenance.get("manifest_id") in protected_run_spec_split_ids():
         raise HarnessError("The frozen split requires its registered run spec")
     output = (
         pilot_output
@@ -744,6 +768,7 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         arm_order_seed=args.arm_order_seed,
         circuit_breaker_threshold=args.circuit_breaker,
         split_provenance=split_provenance,
+        composition_overrides=composition_overrides,
         run_spec_document=run_spec_document,
         run_spec_provenance=run_spec_provenance,
         run_spec_bytes=run_spec_bytes,
@@ -752,14 +777,149 @@ def cmd_benchmark_compare(args: argparse.Namespace) -> int:
         runner.preflight(tasks)
         if not args.resume:
             _claim_fresh_pilot_output(output, run_spec_bytes)
-    summary = (
-        runner.run(tasks, resume=args.resume)
-        if args.run_spec
-        else runner.run(tasks)
-    )
+    summary = runner.run(tasks, resume=args.resume) if args.run_spec else runner.run(tasks)
     _json_print(summary)
     errors = sum(int(item["errors"]) for item in summary["arms"].values())
     return 0 if summary["missing_arm_tasks"] == 0 and errors == 0 else 2
+
+
+def cmd_benchmark_v2_compare(args: argparse.Namespace) -> int:
+    arms = tuple(args.arm or ("bare", "ours"))
+    composition_overrides: dict[str, Any] = {}
+    for raw_override in args.composition or []:
+        arm, separator, composition_name = str(raw_override).partition("=")
+        if not separator or not arm or not composition_name:
+            raise HarnessError("--composition must use ARM=COMPOSITION syntax")
+        if arm not in arms:
+            raise HarnessError(f"Composition override targets unselected arm {arm!r}")
+        if arm in composition_overrides:
+            raise HarnessError(f"Duplicate composition override for arm {arm!r}")
+        composition_overrides[arm] = _named_composition(composition_name)
+    categories = tuple(args.category or ())
+    tasks = load_spreadsheetbench_v2_tasks(args.dataset, categories=categories)
+    selected = (
+        select_spreadsheetbench_v2_tasks(tasks, args.task_id)
+        if args.task_id
+        else tasks
+    )
+    output = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else Path("benchmarks/results") / ("spreadsheetbench-v2-paired-" + _now_id())
+    )
+    summary = run_spreadsheetbench_v2_comparison(
+        config=_provider(args),
+        dataset_root=args.dataset,
+        evaluator_path=args.official_evaluator,
+        output_dir=output,
+        skill_registry=_skills(args),
+        tasks=selected,
+        arms=arms,
+        composition_overrides=composition_overrides,
+        max_model_calls=args.max_model_calls,
+        max_turns_per_arm=args.max_turns_per_arm,
+        max_total_tokens=args.max_total_tokens,
+        max_output_tokens=args.max_output_tokens,
+        task_timeout_seconds=args.task_timeout,
+        arm_order_seed=args.arm_order_seed,
+        resume=args.resume,
+        seal_interrupted_current=args.seal_interrupted_current,
+    )
+    _json_print(summary)
+    return 0 if summary["study_complete"] else 2
+
+
+def cmd_benchmark_v2_visual_generate(args: argparse.Namespace) -> int:
+    arms = tuple(args.arm or ("ours",))
+    tasks = load_spreadsheetbench_v2_tasks(
+        args.dataset,
+        categories=("Visualization",),
+    )
+    selected = (
+        select_spreadsheetbench_v2_tasks(tasks, args.task_id)
+        if args.task_id
+        else tasks
+    )
+    summary = run_spreadsheetbench_v2_comparison(
+        config=_provider(args),
+        dataset_root=args.dataset,
+        evaluator_path=args.visual_evaluator,
+        output_dir=args.output,
+        skill_registry=_skills(args),
+        tasks=selected,
+        arms=arms,
+        max_model_calls=args.max_model_calls,
+        max_turns_per_arm=args.max_turns_per_arm,
+        max_total_tokens=args.max_total_tokens,
+        max_output_tokens=args.max_output_tokens,
+        task_timeout_seconds=args.task_timeout,
+        arm_order_seed=args.arm_order_seed,
+        resume=args.resume,
+        seal_interrupted_current=args.seal_interrupted_current,
+        visual_generation_only=True,
+    )
+    _json_print(summary)
+    return 0 if summary["generation_complete"] else 2
+
+
+def cmd_benchmark_v1_compare(args: argparse.Namespace) -> int:
+    arms = tuple(args.arm or ("ours",))
+    composition_overrides: dict[str, Any] = {}
+    for raw_override in args.composition or []:
+        arm, separator, composition_name = str(raw_override).partition("=")
+        if not separator or not arm or not composition_name:
+            raise HarnessError("--composition must use ARM=COMPOSITION syntax")
+        if arm not in arms:
+            raise HarnessError(f"Composition override targets unselected arm {arm!r}")
+        composition_overrides[arm] = _named_composition(composition_name)
+    tasks = load_spreadsheetbench_v1(args.dataset)
+    if args.task_id:
+        requested = list(args.task_id)
+        if len(set(requested)) != len(requested):
+            raise HarnessError("SpreadsheetBench v1 task IDs must be unique")
+        by_id = {task.task_id: task for task in tasks}
+        missing = [task_id for task_id in requested if task_id not in by_id]
+        if missing:
+            raise HarnessError("Unknown SpreadsheetBench v1 task IDs: " + ", ".join(missing))
+        tasks = [by_id[task_id] for task_id in requested]
+    summary = run_spreadsheetbench_v1_comparison(
+        config=_provider(args),
+        dataset_root=args.dataset,
+        output_dir=args.output,
+        skill_registry=_skills(args),
+        tasks=tasks,
+        arms=arms,
+        composition_overrides=composition_overrides,
+        max_model_calls=args.max_model_calls,
+        max_turns_per_arm=args.max_turns_per_arm,
+        max_total_tokens=args.max_total_tokens,
+        max_output_tokens=args.max_output_tokens,
+        task_timeout_seconds=args.task_timeout,
+        arm_order_seed=args.arm_order_seed,
+        resume=args.resume,
+        seal_interrupted_current=args.seal_interrupted_current,
+    )
+    _json_print(summary)
+    return 0 if summary["study_complete"] else 2
+
+
+def cmd_benchmark_v1_audit(args: argparse.Namespace) -> int:
+    report = audit_spreadsheetbench_v1_comparison(
+        args.results,
+        dataset_root=args.dataset,
+    )
+    _json_print(report)
+    return 0 if report["audit_valid"] else 2
+
+
+def cmd_benchmark_v2_audit(args: argparse.Namespace) -> int:
+    report = audit_spreadsheetbench_v2_comparison(
+        args.results,
+        dataset_root=args.dataset,
+        evaluator_path=args.official_evaluator,
+    )
+    _json_print(report)
+    return 0 if report["audit_valid"] else 2
 
 
 def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
@@ -767,8 +927,8 @@ def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
         raise HarnessError(
             "Pilot interruption sealing requires only --api-key-file for credentials"
         )
-    run_spec_document, run_spec_provenance, run_spec_bytes = (
-        _load_pilot_run_spec_from_repository(args.run_spec)
+    run_spec_document, run_spec_provenance, run_spec_bytes = _load_pilot_run_spec_from_repository(
+        args.run_spec
     )
     require_launchable_run_spec(
         run_spec_provenance,
@@ -783,14 +943,10 @@ def cmd_benchmark_seal_interrupted(args: argparse.Namespace) -> int:
     split_provenance = trace2skill_split_provenance(split_report)
     tasks_by_id = {task.task_id: task for task in load_verified_tasks(root)}
     missing = [
-        str(task_id)
-        for task_id in split_report["task_ids"]
-        if str(task_id) not in tasks_by_id
+        str(task_id) for task_id in split_report["task_ids"] if str(task_id) not in tasks_by_id
     ]
     if missing:
-        raise HarnessError(
-            "Verified split references unavailable task IDs: " + ", ".join(missing)
-        )
+        raise HarnessError("Verified split references unavailable task IDs: " + ", ".join(missing))
     tasks = [tasks_by_id[str(task_id)] for task_id in split_report["task_ids"]]
     config = _provider(args)
     skills = _skills(args).freeze()
@@ -894,6 +1050,149 @@ def cmd_evolve_promote(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_synthetic_build(args: argparse.Namespace) -> int:
+    manifest = build_synthetic_debugging_corpus(
+        args.archive,
+        args.output,
+        limit=args.limit,
+        seed=args.seed,
+        max_member_bytes=args.max_member_bytes,
+    )
+    _json_print(manifest["generation"])
+    return 0
+
+
+def cmd_synthetic_score(args: argparse.Namespace) -> int:
+    report = score_synthetic_debugging_outputs(args.manifest, args.output)
+    _json_print(report)
+    return 0
+
+
+def cmd_synthetic_repair(args: argparse.Namespace) -> int:
+    run = run_deterministic_debugging_repair(args.manifest, args.output)
+    _json_print({"case_count": run["case_count"], "output": str(args.output)})
+    return 0
+
+
+def _named_composition(name: str):
+    try:
+        return BUILTIN_COMPOSITIONS[name]
+    except KeyError as exc:
+        available = sorted(BUILTIN_COMPOSITIONS)
+        raise HarnessError(
+            f"Unknown composition {name!r}; available compositions: {available}"
+        ) from exc
+
+
+def cmd_plugins_list(_args: argparse.Namespace) -> int:
+    registry = default_plugin_registry()
+    _json_print(
+        {
+            "schema_version": "plugevolve-plugin-catalog-v1",
+            "plugins": [
+                {**contract.to_dict(), "manifest_sha256": contract.manifest_sha256}
+                for contract in registry.contracts()
+            ],
+            "compositions": {name: spec.to_dict() for name, spec in BUILTIN_COMPOSITIONS.items()},
+        }
+    )
+    return 0
+
+
+def cmd_plugins_resolve(args: argparse.Namespace) -> int:
+    resolved = default_plugin_registry().resolve(_named_composition(args.composition))
+    _json_print({**resolved.to_dict(), "composition_sha256": resolved.sha256})
+    return 0
+
+
+def cmd_plugins_candidates(args: argparse.Namespace) -> int:
+    registry = default_plugin_registry()
+    base_spec = _named_composition(args.composition)
+    base = registry.resolve(base_spec)
+    candidates = enumerate_single_plugin_candidates(registry, base_spec)
+    _json_print(
+        {
+            "schema_version": "plugevolve-composition-candidates-v1",
+            "base": {**base.to_dict(), "composition_sha256": base.sha256},
+            "candidate_count": len(candidates),
+            "candidates": [candidate.to_dict() for candidate in candidates],
+        }
+    )
+    return 0
+
+
+def cmd_plugins_attribute(args: argparse.Namespace) -> int:
+    registry = default_plugin_registry()
+    resolved = registry.resolve(_named_composition(args.composition))
+    attribution = attribute_trajectory(
+        args.trajectory,
+        registry,
+        resolved,
+        task_type=args.task_type,
+    )
+    _json_print(
+        {
+            **attribution.to_dict(),
+            "composition_name": resolved.spec.name,
+            "composition_sha256": resolved.sha256,
+        }
+    )
+    return 0
+
+
+def _json_object(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.expanduser().resolve().read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HarnessError(f"Invalid {label} JSON: {path}") from exc
+    if not isinstance(value, dict):
+        raise HarnessError(f"{label} must be a JSON object")
+    return value
+
+
+def _plugin_mutation_from_document(document: dict[str, Any]) -> PluginMutation:
+    return PluginMutation.create(
+        target_plugin=str(document.get("target_plugin", "")),
+        base_version=str(document.get("base_version", "")),
+        base_manifest_sha256=str(document.get("base_manifest_sha256", "")),
+        surface=document.get("surface"),
+        candidate_artifact_sha256=str(document.get("candidate_artifact_sha256", "")),
+        changed_paths=document.get("changed_paths") or (),
+        evidence_sha256=document.get("evidence_sha256") or (),
+        config_patch=document.get("config_patch") or None,
+    )
+
+
+def cmd_plugins_lifecycle(args: argparse.Namespace) -> int:
+    mutation = _plugin_mutation_from_document(
+        _json_object(args.mutation, label="plugin mutation")
+    )
+    mutation.validate(default_plugin_registry())
+    decision = evaluate_candidate_lifecycle(
+        mutation,
+        _json_object(args.validation_report, label="plugin validation report"),
+        min_mean_delta=args.min_delta,
+        max_context_regression=args.max_context_regression,
+    )
+    _json_print(decision.to_dict())
+    return 0 if decision.promoted else 2
+
+
+def cmd_plugins_maintain(args: argparse.Namespace) -> int:
+    _json_print(
+        {
+            "schema_version": "spreadsheet-plugin-bank-maintenance-v1",
+            "action": persistent_plugin_action(
+                usage_count=args.usage_count,
+                marginal_utility=args.marginal_utility,
+                redundancy=args.redundancy,
+                severe_regression=args.severe_regression,
+            ),
+        }
+    )
+    return 0
+
+
 def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", help="Provider API base URL ending in /v1")
     parser.add_argument("--api-key", help=argparse.SUPPRESS)
@@ -902,8 +1201,7 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
         type=Path,
         metavar="PATH",
         help=(
-            "Read one API key from an owner-only file; alternatively set "
-            "SHEET_AGENT_API_KEY_FILE"
+            "Read one API key from an owner-only file; alternatively set SHEET_AGENT_API_KEY_FILE"
         ),
     )
     parser.add_argument("--model")
@@ -1084,6 +1382,15 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--offset", type=int, default=0)
     compare.add_argument("--limit", type=int)
     compare.add_argument("--arm", action="append", choices=AVAILABLE_COMPARISON_ARMS)
+    compare.add_argument(
+        "--composition",
+        action="append",
+        metavar="ARM=COMPOSITION",
+        help=(
+            "Override one selected arm with a compatible built-in plugin composition; "
+            "for example ours=plugevolve-seed"
+        ),
+    )
     compare.add_argument("--no-recalculate", action="store_true")
     compare.add_argument("--skills", action="append", default=[], help="Additional skills root")
     compare.add_argument("--max-model-calls", type=int, default=20)
@@ -1100,6 +1407,148 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--circuit-breaker", type=int, default=3)
     _add_provider_flags(compare)
     compare.set_defaults(handler=cmd_benchmark_compare)
+
+    v1_compare = benchmark_commands.add_parser(
+        "v1-compare",
+        help="Run original SpreadsheetBench v1 with one case-1 solution replayed on siblings",
+    )
+    v1_compare.add_argument("--dataset", type=Path, required=True)
+    v1_compare.add_argument("--output", type=Path, required=True)
+    v1_compare.add_argument("--task-id", action="append")
+    v1_compare.add_argument(
+        "--arm",
+        action="append",
+        choices=(
+            "bare",
+            "ours",
+            "spreadsheet-harness-basic",
+            "spreadsheet-harness-financial",
+        ),
+    )
+    v1_compare.add_argument("--composition", action="append", metavar="ARM=COMPOSITION")
+    v1_compare.add_argument("--skills", action="append", default=[])
+    v1_compare.add_argument("--max-model-calls", type=int, default=20)
+    v1_compare.add_argument("--max-turns-per-arm", type=int, default=20)
+    v1_compare.add_argument("--max-total-tokens", type=int, default=200_000)
+    v1_compare.add_argument("--max-output-tokens", type=int, default=4_096)
+    v1_compare.add_argument("--task-timeout", type=float, default=1_800)
+    v1_compare.add_argument("--arm-order-seed", type=int, default=20_260_829)
+    v1_compare.add_argument("--resume", action="store_true")
+    v1_compare.add_argument("--seal-interrupted-current", action="store_true")
+    _add_provider_flags(v1_compare)
+    v1_compare.set_defaults(handler=cmd_benchmark_v1_compare)
+
+    v1_audit = benchmark_commands.add_parser(
+        "v1-audit",
+        help="Fresh-rescore SpreadsheetBench v1 sibling-replay artifacts",
+    )
+    v1_audit.add_argument("results", type=Path)
+    v1_audit.add_argument("--dataset", type=Path, required=True)
+    v1_audit.set_defaults(handler=cmd_benchmark_v1_audit)
+
+    v2_compare = benchmark_commands.add_parser(
+        "v2-compare",
+        help="Run paired bare versus plugin-harness SpreadsheetBench 2 tasks",
+    )
+    v2_compare.add_argument("--dataset", type=Path, required=True)
+    v2_compare.add_argument(
+        "--official-evaluator",
+        type=Path,
+        default=DEFAULT_V2_EVALUATOR,
+        help="Pinned unmodified SpreadsheetBench 2 evaluation.py",
+    )
+    v2_compare.add_argument(
+        "--category",
+        action="append",
+        choices=SPREADSHEETBENCH_V2_CATEGORIES,
+        required=True,
+    )
+    v2_compare.add_argument(
+        "--task-id",
+        action="append",
+        help=(
+            "Task ID; use CATEGORY/ID when more than one category is selected. "
+            "If omitted, run every task in the selected categories."
+        ),
+    )
+    v2_compare.add_argument("--output", type=Path)
+    v2_compare.add_argument(
+        "--arm",
+        action="append",
+        choices=(
+            "bare", "ours", "native", "paper",
+            "spreadsheet-rl-minimal", "spreadsheet-rl-native", "paper-vision",
+            "spreadsheet-harness-basic", "spreadsheet-harness-financial",
+        ),
+        help=(
+            "Comparison arm; spreadsheet-rl-minimal is the code+recalculate clean-room proxy, "
+            "spreadsheet-rl-native the comprehensive native-tools proxy, and paper-vision the "
+            "visual screenshot workflow"
+        ),
+    )
+    v2_compare.add_argument(
+        "--composition",
+        action="append",
+        metavar="ARM=COMPOSITION",
+        help="Override a selected arm composition; ours defaults to plugevolve-seed",
+    )
+    v2_compare.add_argument("--skills", action="append", default=[])
+    v2_compare.add_argument("--max-model-calls", type=int, default=20)
+    v2_compare.add_argument("--max-turns-per-arm", type=int, default=20)
+    v2_compare.add_argument("--max-total-tokens", type=int, default=200_000)
+    v2_compare.add_argument("--max-output-tokens", type=int, default=4_096)
+    v2_compare.add_argument("--task-timeout", type=float, default=1_800)
+    v2_compare.add_argument("--arm-order-seed", type=int, default=20_260_820)
+    v2_compare.add_argument("--resume", action="store_true")
+    v2_compare.add_argument(
+        "--seal-interrupted-current",
+        action="store_true",
+        help="On resume, seal the unresolved current arm as not_scored without replaying it",
+    )
+    _add_provider_flags(v2_compare)
+    v2_compare.set_defaults(handler=cmd_benchmark_v2_compare)
+
+    v2_visual_generate = benchmark_commands.add_parser(
+        "v2-visual-generate",
+        help="Generate v2 Visualization workbooks for official Windows COM evaluation",
+    )
+    v2_visual_generate.add_argument("--dataset", type=Path, required=True)
+    v2_visual_generate.add_argument("--visual-evaluator", type=Path, required=True)
+    v2_visual_generate.add_argument("--output", type=Path, required=True)
+    v2_visual_generate.add_argument("--task-id", action="append")
+    v2_visual_generate.add_argument(
+        "--arm",
+        action="append",
+        choices=(
+            "bare", "ours", "native", "paper",
+            "spreadsheet-rl-minimal", "spreadsheet-rl-native", "paper-vision",
+            "spreadsheet-harness-basic", "spreadsheet-harness-financial",
+        ),
+    )
+    v2_visual_generate.add_argument("--skills", action="append", default=[])
+    v2_visual_generate.add_argument("--max-model-calls", type=int, default=20)
+    v2_visual_generate.add_argument("--max-turns-per-arm", type=int, default=20)
+    v2_visual_generate.add_argument("--max-total-tokens", type=int, default=200_000)
+    v2_visual_generate.add_argument("--max-output-tokens", type=int, default=4_096)
+    v2_visual_generate.add_argument("--task-timeout", type=float, default=1_800)
+    v2_visual_generate.add_argument("--arm-order-seed", type=int, default=20_260_829)
+    v2_visual_generate.add_argument("--resume", action="store_true")
+    v2_visual_generate.add_argument("--seal-interrupted-current", action="store_true")
+    _add_provider_flags(v2_visual_generate)
+    v2_visual_generate.set_defaults(handler=cmd_benchmark_v2_visual_generate)
+
+    v2_audit = benchmark_commands.add_parser(
+        "v2-audit",
+        help="Fresh-rescore a paired SpreadsheetBench 2 result with the official evaluator",
+    )
+    v2_audit.add_argument("results", type=Path)
+    v2_audit.add_argument("--dataset", type=Path, required=True)
+    v2_audit.add_argument(
+        "--official-evaluator",
+        type=Path,
+        default=DEFAULT_V2_EVALUATOR,
+    )
+    v2_audit.set_defaults(handler=cmd_benchmark_v2_audit)
 
     seal_interrupted = benchmark_commands.add_parser(
         "seal-interrupted",
@@ -1141,6 +1590,76 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--validation-report", type=Path, required=True)
     promote.add_argument("--min-delta", type=float, default=0.0)
     promote.set_defaults(handler=cmd_evolve_promote)
+
+    synthetic = subparsers.add_parser(
+        "synthetic", help="Build and score exact-answer synthetic spreadsheet tasks"
+    )
+    synthetic_commands = synthetic.add_subparsers(dest="synthetic_command", required=True)
+    synthetic_build = synthetic_commands.add_parser(
+        "build-debugging", help="Inject recoverable formula defects into real workbooks"
+    )
+    synthetic_build.add_argument("archive", type=Path)
+    synthetic_build.add_argument("--output", type=Path, required=True)
+    synthetic_build.add_argument("--limit", type=int, default=100)
+    synthetic_build.add_argument("--seed", type=int, default=20_260_825)
+    synthetic_build.add_argument("--max-member-bytes", type=int, default=25 * 1024 * 1024)
+    synthetic_build.set_defaults(handler=cmd_synthetic_build)
+    synthetic_score = synthetic_commands.add_parser(
+        "score-debugging", help="Score synthetic output workbooks against exact originals"
+    )
+    synthetic_score.add_argument("manifest", type=Path)
+    synthetic_score.add_argument("--output", type=Path, action="append", required=True)
+    synthetic_score.set_defaults(handler=cmd_synthetic_score)
+    synthetic_repair = synthetic_commands.add_parser(
+        "repair-debugging",
+        help="Apply the production deterministic repair policy to synthetic cases",
+    )
+    synthetic_repair.add_argument("manifest", type=Path)
+    synthetic_repair.add_argument("--output", type=Path, required=True)
+    synthetic_repair.set_defaults(handler=cmd_synthetic_repair)
+
+    plugins = subparsers.add_parser(
+        "plugins", help="Inspect contract-constrained PlugEvolve compositions"
+    )
+    plugin_commands = plugins.add_subparsers(dest="plugin_command", required=True)
+    plugin_list = plugin_commands.add_parser("list", help="List immutable plugin contracts")
+    plugin_list.set_defaults(handler=cmd_plugins_list)
+    plugin_resolve = plugin_commands.add_parser(
+        "resolve", help="Resolve and validate a built-in composition"
+    )
+    plugin_resolve.add_argument("composition")
+    plugin_resolve.set_defaults(handler=cmd_plugins_resolve)
+    plugin_candidates = plugin_commands.add_parser(
+        "candidates", help="Enumerate valid one-slot composition mutations"
+    )
+    plugin_candidates.add_argument("composition")
+    plugin_candidates.set_defaults(handler=cmd_plugins_candidates)
+    plugin_attribute = plugin_commands.add_parser(
+        "attribute",
+        help="Attribute an evaluator-labeled failure to a spreadsheet capability plugin",
+    )
+    plugin_attribute.add_argument("trajectory", type=Path)
+    plugin_attribute.add_argument("--composition", default="plugevolve-seed")
+    plugin_attribute.add_argument("--task-type")
+    plugin_attribute.set_defaults(handler=cmd_plugins_attribute)
+    plugin_lifecycle = plugin_commands.add_parser(
+        "lifecycle",
+        help="Evaluate an ephemeral plugin mutation for persistent-bank promotion",
+    )
+    plugin_lifecycle.add_argument("mutation", type=Path)
+    plugin_lifecycle.add_argument("validation_report", type=Path)
+    plugin_lifecycle.add_argument("--min-delta", type=float, default=0.0)
+    plugin_lifecycle.add_argument("--max-context-regression", type=float, default=0.0)
+    plugin_lifecycle.set_defaults(handler=cmd_plugins_lifecycle)
+    plugin_maintain = plugin_commands.add_parser(
+        "maintain",
+        help="Choose retain/refine/merge/rollback/retire from plugin-bank telemetry",
+    )
+    plugin_maintain.add_argument("--usage-count", type=int, required=True)
+    plugin_maintain.add_argument("--marginal-utility", type=float, required=True)
+    plugin_maintain.add_argument("--redundancy", type=float, required=True)
+    plugin_maintain.add_argument("--severe-regression", action="store_true")
+    plugin_maintain.set_defaults(handler=cmd_plugins_maintain)
     return parser
 
 
