@@ -5104,6 +5104,129 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
     assert first.request_payload_sha256 is not None
 
 
+def test_chat_completions_client_uses_auto_tool_choice_for_minimax_models() -> None:
+    config = ProviderConfig(
+        "https://example.test/v1",
+        "not-a-real-key",
+        "MiniMax-M2.7",
+        api_protocol="chat-completions",
+        max_retries=0,
+        temperature=1.0,
+    )
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        if len(seen) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chat-first",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "tool-call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "list_sheets",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12,
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat-second",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Done",
+                            "reasoning_content": "",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 3,
+                    "total_tokens": 23,
+                },
+            },
+        )
+
+    client = ChatCompletionsClient(config)
+    headers = dict(client._client.headers)
+    client._client.close()
+    client._client = httpx.Client(transport=httpx.MockTransport(handler), headers=headers)
+    try:
+        first = client.create(
+            {
+                "model": config.model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Inspect."}],
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "list_sheets",
+                        "description": "List sheets.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+                "tool_choice": "auto",
+                "max_output_tokens": 64,
+            }
+        )
+        second = client.create(
+            {
+                "model": config.model,
+                "input": [
+                    *first.output,
+                    {
+                        "type": "function_call_output",
+                        "call_id": "tool-call-1",
+                        "output": '{"ok":true}',
+                    },
+                ],
+            }
+        )
+    finally:
+        client.close()
+
+    assert first.output == [
+        {
+            "type": "function_call",
+            "id": "tool-call-1",
+            "call_id": "tool-call-1",
+            "name": "list_sheets",
+            "arguments": "{}",
+            "provider_reasoning_content": "",
+        }
+    ]
+    assert second.text == "Done"
+    assert seen[0]["tool_choice"] == "auto"
+    assert seen[1]["messages"][0]["reasoning_content"] == ""
+
+
 @pytest.mark.parametrize(
     ("finish_reason", "message"),
     [

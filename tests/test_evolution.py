@@ -272,6 +272,38 @@ def test_evolution_generation_uses_and_records_provider_controls(tmp_path: Path)
     }
 
 
+def test_generation_can_constrain_candidate_to_base_skill(tmp_path: Path) -> None:
+    trajectory = tmp_path / "trajectory.jsonl"
+    _write_trajectory(trajectory, [_row("benchmark.evaluated", {"passed": False})])
+    base_skill = tmp_path / "base-SKILL.md"
+    base_skill.write_text(
+        "---\nname: spreadsheet-structure\ndescription: Base structure rules.\n---\n\n"
+        "# Structure\n\nInspect bounded ranges and preserve anchors.\n",
+        encoding="utf-8",
+    )
+    candidate_skill = (
+        "---\nname: spreadsheet-structure\ndescription: Minimal structure patch.\n---\n\n"
+        "# Structure\n\nInspect bounded ranges and preserve anchors before edits.\n"
+    )
+    client = FakeResponsesClient(["lesson", candidate_skill])
+
+    candidate = generate_candidate(
+        [trajectory],
+        tmp_path,
+        client,
+        candidate_id="base-constrained",
+        skill_name="spreadsheet-structure",
+        base_skill=base_skill,
+    )
+
+    consolidation_prompt = client.payloads[-1]["input"][0]["content"][0]["text"]
+    assert "base_skill" in consolidation_prompt
+    assert "preserve anchors" in consolidation_prompt
+    provenance = json.loads(candidate.provenance_path.read_text(encoding="utf-8"))
+    assert provenance["base_skill"] == str(base_skill)
+    assert provenance["base_skill_sha256"] == hashlib.sha256(base_skill.read_bytes()).hexdigest()
+
+
 @pytest.mark.parametrize(
     ("report", "min_delta", "message"),
     [

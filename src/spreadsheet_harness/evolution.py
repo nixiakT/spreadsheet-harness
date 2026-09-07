@@ -44,12 +44,21 @@ correctness. If no evaluator outcome is present, do not infer that the task pass
 Do not invent events, credentials, benchmark results, or file contents. Return
 Markdown only; do not return a SKILL.md yet."""
 
-_CONSOLIDATION_INSTRUCTIONS = """Consolidate trajectory lessons into one candidate
-SKILL.md for a spreadsheet editing agent. Resolve contradictions conservatively,
-prefer repeated evidence, retain failure-prevention and verification procedures,
-and do not claim validation or production status. Return only the complete SKILL.md
-with YAML frontmatter containing name and description. Do not wrap it in a code
-fence and do not include secrets or provenance metadata."""
+_CONSOLIDATION_INSTRUCTIONS = """Consolidate trajectory lessons into one minimal
+candidate SKILL.md for a spreadsheet editing agent. The supplied base SKILL.md is
+the current plugin coordinate: preserve its useful rules and structure, and make
+only evidence-supported changes needed to address the observed failures. This is a
+one-coordinate mutation, not a rewrite of the harness or a new workflow.
+
+First consider several concrete remedies internally, then select the smallest one
+supported by repeated trajectory/evaluator evidence. Do not add tools, APIs,
+capabilities, or workbook facts that are not present in the base skill or the
+evidence. Do not recommend direct spreadsheet APIs unless they appear in the tool
+evidence. Keep the result concise (preferably under 1200 words), avoid duplicating
+rules, and retain explicit verification and failure handling. Do not claim
+validation or production status. Return only the complete SKILL.md with YAML
+frontmatter containing name and description. Do not wrap it in a code fence and do
+not include secrets or provenance metadata."""
 
 
 class PromotionRejected(ValueError):
@@ -183,7 +192,13 @@ def _evaluator_outcome(event: str, payload: Mapping[str, Any]) -> dict[str, Any]
     """Return an explicit evaluator verdict without treating agent state as correctness."""
 
     lowered = event.lower()
-    if lowered not in {"benchmark.evaluated", "evaluation.completed", "evaluation.failed"}:
+    if lowered not in {
+        "benchmark.evaluated",
+        "evaluation.completed",
+        "evaluation.failed",
+        "spreadsheetbench_v2.evaluated",
+        "spreadsheetbench.evaluated",
+    }:
         return None
     passed = payload.get("passed")
     if not isinstance(passed, bool):
@@ -370,6 +385,7 @@ def generate_candidate(
     model: str | None = None,
     candidate_id: str | None = None,
     skill_name: str = "spreadsheet-core",
+    base_skill: str | Path | None = None,
     lesson_max_output_tokens: int = 4_000,
     consolidation_max_output_tokens: int = 8_000,
 ) -> Candidate:
@@ -428,9 +444,21 @@ def generate_candidate(
             }
         )
 
+    base_skill_text = ""
+    base_skill_sha256 = None
+    if base_skill is not None:
+        base_path = Path(base_skill).expanduser().resolve()
+        if not base_path.is_file():
+            raise FileNotFoundError(base_path)
+        base_skill_text = base_path.read_text(encoding="utf-8")
+        if not base_skill_text.strip():
+            raise ValueError("base_skill must not be empty")
+        base_skill_sha256 = hashlib.sha256(base_skill_text.encode("utf-8")).hexdigest()
+
     consolidation_input = json.dumps(
         {
             "skill_name": skill_name.strip(),
+            "base_skill": base_skill_text or None,
             "trajectory_lessons": [
                 {"input_sha256": item["input_sha256"], "lesson": item["lesson"]} for item in lessons
             ],
@@ -460,6 +488,8 @@ def generate_candidate(
         "model": resolved_model,
         "generation": generation,
         "skill_name": skill_name.strip(),
+        "base_skill": str(base_skill) if base_skill is not None else None,
+        "base_skill_sha256": base_skill_sha256,
         "inputs": [{"trajectory": item.source.name, "sha256": item.sha256} for item in evidences],
         "input_hashes": [item.sha256 for item in evidences],
         "lesson_response_ids": [item["response_id"] for item in lessons],

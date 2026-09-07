@@ -348,8 +348,16 @@ def _chat_wire_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "messages": _responses_input_to_chat_messages(
             payload.get("instructions"),
             payload.get("input", []),
+            model=str(payload["model"]),
         ),
     }
+    # DashScope OpenAI-compatible endpoints validate reasoning_content on every
+    # replayed assistant message.  Supplying an empty value is harmless for
+    # providers that do not use reasoning and prevents 400s when a prior
+    # response omitted provider metadata.
+    for message in result["messages"]:
+        if message.get("role") == "assistant":
+            message.setdefault("reasoning_content", " ")
     if "max_output_tokens" in payload:
         result["max_tokens"] = payload["max_output_tokens"]
     for name in ("temperature", "top_p", "presence_penalty"):
@@ -426,7 +434,7 @@ def _responses_content_to_chat(content: Any) -> str | list[dict[str, Any]]:
 
 
 def _responses_input_to_chat_messages(
-    instructions: str | None, input_items: Any
+    instructions: str | None, input_items: Any, *, model: str = ""
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     if instructions:
@@ -466,6 +474,8 @@ def _responses_input_to_chat_messages(
             reasoning_content = item.get("provider_reasoning_content")
             if isinstance(reasoning_content, str):
                 assistant_message["reasoning_content"] = reasoning_content
+            elif any(name in model.casefold() for name in ("kimi", "minimax")):
+                assistant_message["reasoning_content"] = " "
             messages.append(assistant_message)
             continue
         if item_type == "function_call_output":
@@ -485,6 +495,8 @@ def _responses_input_to_chat_messages(
         reasoning_content = item.get("provider_reasoning_content")
         if role == "assistant" and isinstance(reasoning_content, str):
             chat_message["reasoning_content"] = reasoning_content
+        elif role == "assistant" and any(name in model.casefold() for name in ("kimi", "minimax")):
+            chat_message["reasoning_content"] = " "
         messages.append(chat_message)
     return messages
 
@@ -644,7 +656,11 @@ def _chat_message_to_output(message: dict[str, Any]) -> tuple[list[dict[str, Any
 
 
 def _ensure_provider_chat_replay_metadata(output: list[dict[str, Any]], *, model: str) -> None:
-    if "deepseek" not in model.casefold():
+    # DashScope reasoning models require reasoning_content to be present when an
+    # assistant tool-call message is replayed, even when the provider returned an
+    # empty reasoning string.  DeepSeek already had this requirement; Kimi-K2.6
+    # and MiniMax-M2.7 enforce the same OpenAI-compatible replay contract.
+    if not any(name in model.casefold() for name in ("deepseek", "kimi", "minimax")):
         return
     for item in output:
         if item.get("type") in {"function_call", "message"}:
@@ -957,6 +973,8 @@ class AgentResult:
     terminal_tool: str | None = None
     observed_terminal_tool: str | None = None
     terminal_submissions: int = 0
+    tool_errors: int = 0
+    parallel_tool_batches: int = 0
     terminal_response: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -971,6 +989,8 @@ class AgentResult:
             "tool_trace": self.tool_trace,
             "terminal_submissions": self.terminal_submissions,
             "function_calls_total": self.tool_calls + self.terminal_submissions,
+            "tool_errors": self.tool_errors,
+            "parallel_tool_batches": self.parallel_tool_batches,
         }
         if self.budget is not None:
             result["budget"] = self.budget
@@ -3201,6 +3221,8 @@ class SpreadsheetAgent:
         last_id: str | None = None
         request_timings: list[dict[str, Any]] = []
         tool_trace: list[dict[str, Any]] = []
+        tool_errors = 0
+        parallel_tool_batches = 0
         observed_first_tool: str | None = None
         observed_forced_tool_prefix: list[str] = []
         forced_prefix_index = 0
@@ -3258,6 +3280,8 @@ class SpreadsheetAgent:
                 terminal_response=(
                     dict(terminal_response) if terminal_response is not None else None
                 ),
+                tool_errors=tool_errors,
+                parallel_tool_batches=parallel_tool_batches,
             )
 
         def execution_failure(
@@ -3425,6 +3449,14 @@ class SpreadsheetAgent:
                 )
                 if tool_schemas:
                     tool_choice: str | dict[str, str] = "auto"
+                    # Some DashScope adapters reject OpenAI's explicit `tool_choice`
+                    # form.  Restricting the advertised tool set to the required
+                    # function preserves routing while leaving selection as `auto`
+                    # for these models.
+                    supports_explicit_tool_choice = not any(
+                        name in self.config.model.casefold()
+                        for name in ("kimi", "minimax")
+                    )
                     request_tool_schemas = tool_schemas
                     request_max_output_tokens = self.max_output_tokens
                     forced_tool = (
@@ -3500,10 +3532,11 @@ class SpreadsheetAgent:
                             for schema in tool_schemas
                             if schema.get("name") == TERMINAL_TOOL_NAME
                         ]
-                        tool_choice = {
-                            "type": "function",
-                            "name": TERMINAL_TOOL_NAME,
-                        }
+                        if supports_explicit_tool_choice:
+                            tool_choice = {
+                                "type": "function",
+                                "name": TERMINAL_TOOL_NAME,
+                            }
                         if not self.terminal_result_required:
                             request_max_output_tokens = min(
                                 request_max_output_tokens,
@@ -3513,10 +3546,11 @@ class SpreadsheetAgent:
                         request_tool_schemas = [
                             schema for schema in tool_schemas if schema.get("name") == forced_tool
                         ]
-                        tool_choice = {
-                            "type": "function",
-                            "name": forced_tool,
-                        }
+                        if supports_explicit_tool_choice:
+                            tool_choice = {
+                                "type": "function",
+                                "name": forced_tool,
+                            }
                         if forced_tool != "code_interpreter":
                             request_max_output_tokens = min(
                                 request_max_output_tokens,
@@ -3820,6 +3854,8 @@ class SpreadsheetAgent:
                         },
                     )
                     raise
+                if len(function_calls) > 1:
+                    parallel_tool_batches += 1
                 if terminal_route_forced:
                     expected_forced_tool = TERMINAL_TOOL_NAME
                 else:
@@ -3844,6 +3880,48 @@ class SpreadsheetAgent:
                         else None
                     )
                     if observed_forced_tool is None:
+                        # Some chat-completions models perform workbook inspection with
+                        # code_interpreter immediately before the required formula-runtime
+                        # validation call.  Treat that as a recoverable sequencing mismatch:
+                        # the code call has already executed, but the validation route must
+                        # remain pending for the next turn.  Previously this was escalated to
+                        # AgentRoutingError and invalidated the whole arm.
+                        if (
+                            expected_forced_tool == "recalculate_and_read"
+                            and observed_forced_tools
+                            and all(name == "code_interpreter" for name in observed_forced_tools)
+                            and turn_number < self.max_turns
+                        ):
+                            session.recorder.record(
+                                "agent.formula_validation_route_deferred",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "forced_prefix_index": forced_prefix_index,
+                                    "requested_forced_tool": expected_forced_tool,
+                                    "observed_forced_tools": observed_forced_tools,
+                                },
+                            )
+                            recent_items = list(turn.output)
+                            recent_items.append(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": _formula_runtime_validation_prompt(
+                                                pending_formula_validation,
+                                                latest_formula_validation_diagnostics,
+                                            ),
+                                        }
+                                    ],
+                                }
+                            )
+                            recent_summaries = []
+                            recent_raw_tool_output_chars = 0
+                            recent_image_bytes = 0
+                            recent_image_count = 0
+                            continue
                         if (
                             expected_forced_tool != TERMINAL_TOOL_NAME
                             and not observed_forced_tools
@@ -4273,6 +4351,8 @@ class SpreadsheetAgent:
                         observed_terminal_tool=TERMINAL_TOOL_NAME,
                         terminal_submissions=1,
                         terminal_response=terminal_response,
+                        tool_errors=tool_errors,
+                        parallel_tool_batches=parallel_tool_batches,
                     )
                     session.recorder.record(
                         "agent.terminal_submitted",
@@ -4579,6 +4659,8 @@ class SpreadsheetAgent:
                         post_prefix_tool_choice=("auto" if tool_schemas else None),
                         terminal_tool=ASSISTANT_TEXT_TERMINAL,
                         observed_terminal_tool=ASSISTANT_TEXT_TERMINAL,
+                        tool_errors=tool_errors,
+                        parallel_tool_batches=parallel_tool_batches,
                     )
                     session.recorder.record("agent.completed", result.to_dict())
                     return result
@@ -5057,6 +5139,8 @@ class SpreadsheetAgent:
                         "name": name,
                         "ok": outcome_data.get("ok") is True,
                     }
+                    if outcome_data.get("ok") is not True:
+                        tool_errors += 1
                     if self.capture_tool_evidence:
                         trace_item["evidence"] = _bounded_tool_output(
                             model_visible_outcome,

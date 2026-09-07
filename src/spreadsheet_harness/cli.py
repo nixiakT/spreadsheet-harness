@@ -143,8 +143,14 @@ def _default_skill_root() -> Path:
 
 
 def _skills(args: argparse.Namespace) -> SkillRegistry:
-    roots = [_default_skill_root()]
-    roots.extend(Path(item).expanduser().resolve() for item in getattr(args, "skills", []) or [])
+    replacement_root = getattr(args, "skill_root", None)
+    roots = [
+        Path(replacement_root).expanduser().resolve()
+        if replacement_root is not None
+        else _default_skill_root()
+    ]
+    if replacement_root is None:
+        roots.extend(Path(item).expanduser().resolve() for item in getattr(args, "skills", []) or [])
     return SkillRegistry(roots)
 
 
@@ -1026,6 +1032,7 @@ def cmd_evolve_generate(args: argparse.Namespace) -> int:
             model=config.model,
             candidate_id=args.candidate_id,
             skill_name=args.skill_name,
+            base_skill=args.base_skill,
         )
     _json_print(
         {
@@ -1493,6 +1500,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override a selected arm composition; ours defaults to plugevolve-seed",
     )
     v2_compare.add_argument("--skills", action="append", default=[])
+    v2_compare.add_argument(
+        "--skill-root",
+        type=Path,
+        help="Use an isolated complete skill root (for candidate-plugin evaluation)",
+    )
     v2_compare.add_argument("--max-model-calls", type=int, default=20)
     v2_compare.add_argument("--max-turns-per-arm", type=int, default=20)
     v2_compare.add_argument("--max-total-tokens", type=int, default=200_000)
@@ -1579,6 +1591,11 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--output", type=Path, default=Path("evolution"))
     generate.add_argument("--candidate-id")
     generate.add_argument("--skill-name", default="spreadsheet-core")
+    generate.add_argument(
+        "--base-skill",
+        type=Path,
+        help="Current plugin SKILL.md; constrain evolution to a minimal one-coordinate mutation",
+    )
     _add_provider_flags(generate)
     generate.set_defaults(handler=cmd_evolve_generate)
 

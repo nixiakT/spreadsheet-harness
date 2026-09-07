@@ -29,6 +29,7 @@ FailureSource = Literal[
     "none",
     "infrastructure",
     "composition",
+    "composition-interface",
     "capability-gap",
     "capability",
     "unknown",
@@ -56,6 +57,9 @@ _INFRASTRUCTURE_CATEGORIES = frozenset(
 )
 _COMPOSITION_CATEGORIES = frozenset(
     {"routing-protocol", "missing-provider", "plugin-pending", "tool-unavailable"}
+)
+_INTERFACE_CATEGORIES = frozenset(
+    {"missing-evidence", "context-insufficient", "verification-not-triggered", "interface"}
 )
 _KIND_PRIORITY = {
     "knowledge": 0,
@@ -243,7 +247,7 @@ def attribute_failure(
         )
 
     capabilities = infer_capabilities(task_type=task_type, evidence_text=evidence)
-    if categories & _COMPOSITION_CATEGORIES and "composition" not in capabilities:
+    if (categories & (_COMPOSITION_CATEGORIES | _INTERFACE_CATEGORIES)) and "composition" not in capabilities:
         capabilities = (*capabilities, "composition")
         capabilities = tuple(
             capability for capability in SPREADSHEET_CAPABILITIES if capability in capabilities
@@ -309,6 +313,16 @@ def attribute_failure(
         (contract for contract in matching if contract.name not in selected), key=_contract_rank
     )
 
+    if categories & _INTERFACE_CATEGORIES:
+        return FailureAttribution(
+            "composition-interface",
+            "repair-composition",
+            capabilities,
+            tuple(_contract_route(contract) for contract in selected_not_activated),
+            tuple(_contract_route(contract) for contract in inactive_matches),
+            digests,
+            tuple(sorted(categories & _INTERFACE_CATEGORIES)),
+        )
     if categories & _COMPOSITION_CATEGORIES or selected_not_activated:
         policy_targets = sorted(
             (
