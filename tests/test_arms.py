@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 import yaml
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
 from PIL import Image
 
 from spreadsheet_harness import arms
 from spreadsheet_harness.agent import AgentResult, ResponseTurn
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
+from spreadsheet_harness.debugging_repairs import DebuggingRepairCandidate
 from spreadsheet_harness.errors import AgentBudgetError, RecalculationIntegrityError
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import ToolOutcome
@@ -614,6 +616,12 @@ def test_ours_consumes_compact_profile_hint_without_skills(
     assert "first code_interpreter call" in executor_instructions
     assert "Do not restart broad exploration" in executor_instructions
     assert "does not return a list of names" in executor_instructions
+    assert "sheet_harness.view_xlsx" in executor_instructions
+    assert "Never dump an entire sheet" in executor_instructions
+    assert "every source cell that already contains a value or formula is protected" in (
+        executor_instructions
+    )
+    assert "decorative spacers" in executor_instructions
 
 
 def test_plugevolve_seed_composition_explicitly_enables_skill_and_verifier(
@@ -778,6 +786,11 @@ def test_instruction_routing_prefers_named_sheets_and_bounded_skills() -> None:
         "spreadsheet-verification",
     )
     assert arms._routed_skill_names(
+        "Create a chart and calculate forecast revenue.",
+        ("spreadsheet-core", "spreadsheet-formula", "visual-review"),
+        task_category="Visualization",
+    ) == ("spreadsheet-core",)
+    assert arms._routed_skill_names(
         "Calculate forecast revenue growth and gross margin.",
         (
             "spreadsheet-structure",
@@ -823,6 +836,38 @@ provenance:
     assert workbook["Sales"]["B2"].value == 7
     assert workbook["Sales"]["C2"].value == "=A2*B2"
     assert workbook["Sales"]["C3"].value == "=A3*B3"
+    workbook.close()
+
+
+def test_safe_planner_actions_skip_non_anchor_merged_cells(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    source = load_workbook(sample_workbook)
+    source["Sales"].merge_cells("E2:F2")
+    source["Sales"]["E2"] = None
+    source.save(sample_workbook)
+    source.close()
+    session = WorkbookSession.create(sample_workbook, tmp_path / "safe-plan-merged")
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Complete the financial model.",
+        normalized_plan="""actions:
+- action: write_value
+  target: Sales!F2
+  value: ignored
+- action: write_formula
+  target: Sales!E2:F2
+  value: =B2*C2
+""",
+        deterministic_evidence="{}",
+    )
+
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    assert changed == 1
+    assert workbook["Sales"]["E2"].value == "=B2*C2"
+    assert isinstance(workbook["Sales"]["F2"], MergedCell)
     workbook.close()
 
 
@@ -1102,6 +1147,85 @@ def test_financial_plugin_warm_starts_domain_runtime_before_evidence(
         if event["event"] == "harness.financial_domain_runtime.warm_started"
     ]
     assert len(warm_start) == 1
+    checkpoint = json.loads(
+        (session.paths.root / "deterministic_financial_repairs.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert checkpoint["cells"]["Sales!F2"] == {"kind": "cell", "value": 7}
+    assert checkpoint["runtime_targets"] == ["Sales!F2"]
+    executor_prompt = next(
+        call["prompt"] for call in FakeAgent.calls if call["stage"] == "execute"
+    )
+    assert "Deterministic Financial warm-start already completed" in executor_prompt
+    assert "one bounded batch of sheet_harness.view_xlsx calls" in executor_prompt
+    assert [call["stage"] for call in FakeAgent.calls] == ["execute"]
+    bypassed = [
+        event
+        for event in events
+        if event["event"] == "harness.financial_planner.bypassed"
+    ]
+    assert bypassed[-1]["payload"]["policy"] == (
+        "deterministic-warm-start-direct-executor-v1"
+    )
+    assert bypassed[-1]["payload"]["executor_turns"] == 8
+
+
+def test_financial_complete_runtime_coverage_bypasses_executor(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    from spreadsheet_harness.plugins import SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION
+
+    _patch_agents(monkeypatch)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "financial-complete-warm-start")
+
+    def fake_domain_runtime(
+        path: str | Path,
+        *,
+        source_path: str | Path,
+        instruction: str,
+    ) -> list[dict[str, str]]:
+        workbook = load_workbook(path, data_only=False)
+        actions: list[dict[str, str]] = []
+        for sheet_name in ("Sales", "Lookup"):
+            worksheet = workbook[sheet_name]
+            for row in range(10, 20):
+                target = f"C{row}"
+                worksheet[target] = row
+                actions.append({"sheet": sheet_name, "target": target, "value": str(row)})
+        workbook.save(path)
+        workbook.close()
+        return actions
+
+    monkeypatch.setattr(
+        arms,
+        "complete_financial_model_runtime_actions",
+        fake_domain_runtime,
+    )
+
+    result = arms.run_arm(
+        "spreadsheet-harness-financial",
+        _config(),
+        session,
+        None,
+        "In the Sales sheet, calculate totals. In the Lookup sheet, calculate outputs.",
+        2_000,
+        300,
+        object(),
+        max_turns_per_arm=8,
+        composition=SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION,
+        task_category="Financial_Model",
+    )
+
+    assert FakeAgent.calls == []
+    assert result.stages == []
+    events = read_trajectory(session.paths.trajectory)
+    bypassed = [
+        event for event in events if event["event"] == "harness.financial_executor.bypassed"
+    ]
+    assert bypassed[-1]["payload"]["policy"] == "instruction-sheet-runtime-coverage-v1"
 
 
 def test_invalid_ours_plan_falls_back_to_executor(
@@ -1172,7 +1296,7 @@ provenance:
     assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
     executor = FakeAgent.calls[-1]
     assert executor["require_workbook_change"] is False
-    assert executor["max_read_only_code_calls_before_edit"] is None
+    assert executor["max_read_only_code_calls_before_edit"] == 2
 
 
 def test_debugging_planner_can_only_apply_an_enumerated_candidate(
@@ -1316,6 +1440,128 @@ def test_inconsistent_color_coding_repairs_cross_sheet_peer_outlier(tmp_path: Pa
     output.close()
 
 
+def test_color_cluster_repairs_local_source_links_and_blank_headers(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    source = tmp_path / "Inconsistent Color Coding_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    for row, source_color in zip(
+        range(2, 5), ("FF0000FF", "FF00B050", "FF00B050"), strict=True
+    ):
+        worksheet.cell(row, 4).value = row
+        worksheet.cell(row, 4).font = Font(color=source_color)
+        worksheet.cell(row, 2).value = f"=D{row}"
+        worksheet.cell(row, 2).font = Font(color="FF000000")
+    worksheet["C1"].font = Font(color="FFFFFFFF")
+    worksheet["B6"] = "Forecast input"
+    for column in range(4, 7):
+        worksheet.cell(6, column).value = 0
+        worksheet.cell(6, column).font = Font(color="FF000000")
+        worksheet.cell(6, column).number_format = "0.0%"
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "color-cluster")
+
+    assert arms._repair_cross_sheet_color_outliers(session) == 7
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert all(
+        output["Model"].cell(row, 2).font.color.rgb == "FF7030A0"
+        for row in range(2, 5)
+    )
+    assert output["Model"]["C1"].font.color.rgb == "FF000000"
+    assert all(
+        output["Model"].cell(6, column).font.color.rgb == "FF0000FF"
+        for column in range(4, 7)
+    )
+    output.close()
+
+
+def test_color_cluster_requires_multiple_source_color_witnesses(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    source = tmp_path / "Inconsistent Color Coding_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["D2"] = 2
+    worksheet["D2"].font = Font(color="FF0000FF")
+    worksheet["B2"] = "=D2"
+    worksheet["B2"].font = Font(color="FF000000")
+    worksheet["C1"].font = Font(color="FFFFFFFF")
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "color-cluster-gated")
+
+    assert arms._repair_cross_sheet_color_outliers(session) == 0
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output.active["B2"].font.color.rgb == "FF000000"
+    assert output.active["C1"].font.color.rgb == "FFFFFFFF"
+    output.close()
+
+
+def test_color_cluster_preserves_large_local_link_convention(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    source = tmp_path / "Inconsistent Color Coding_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    for row in range(2, 11):
+        worksheet.cell(row, 4).value = row
+        worksheet.cell(row, 4).font = Font(color="FF0000FF")
+        worksheet.cell(row, 2).value = f"=D{row}"
+        worksheet.cell(row, 2).font = Font(color="FF000000")
+    worksheet["C1"].font = Font(color="FFFFFFFF")
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "large-color-cluster")
+
+    assert arms._repair_cross_sheet_color_outliers(session) == 0
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert all(
+        output["Model"].cell(row, 2).font.color.rgb == "FF000000"
+        for row in range(2, 11)
+    )
+    assert output["Model"]["C1"].font.color.rgb == "FFFFFFFF"
+    output.close()
+
+
+def test_color_guard_rolls_back_mass_font_normalization(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    source = tmp_path / "Inconsistent Color Coding_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    for row in range(1, 121):
+        worksheet.cell(row, 1).value = row
+        worksheet.cell(row, 1).font = Font(color="FF000000")
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "mass-color-normalization")
+    mutated = load_workbook(session.workbook_path, data_only=False)
+    for row in range(1, 121):
+        mutated["Model"].cell(row, 1).font = Font(color="FF0000FF")
+    mutated.save(session.workbook_path)
+    mutated.close()
+
+    assert arms._restore_mass_color_rewrites(session) == 120
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert all(
+        output["Model"].cell(row, 1).font.color.rgb == "FF000000"
+        for row in range(1, 121)
+    )
+    output.close()
+    events = read_trajectory(session.paths.trajectory)
+    assert events[-1]["event"] == "harness.color_task_fonts.restored"
+    assert events[-1]["payload"]["policy"] == "mass-font-normalization-rollback-v1"
+
+
 def test_color_motif_repairs_are_gated_and_preserve_sensitivity_anchor(
     tmp_path: Path,
 ) -> None:
@@ -1441,7 +1687,7 @@ def test_color_postprocessor_normalizes_indexed_white_motif_without_header_blank
     monkeypatch.setattr(
         arms,
         "transplant_ooxml_formula_cached_values",
-        lambda recalculated, target: 0,
+        lambda recalculated, target, **kwargs: 0,
     )
 
     changed = arms.postprocess_debugging_artifact(
@@ -1532,6 +1778,31 @@ def test_debugging_family_scope_routes_public_workbook_name(
     assert "Do not repair other anomaly families" in scoped
 
 
+def test_debugging_family_inference_uses_workbook_structure_not_basename(
+    tmp_path: Path,
+) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    for column in range(2, 5):
+        letter = chr(64 + column)
+        sheet.cell(2, column).value = f"=SUM({letter}3:{letter}3,{letter}4)"
+        sheet.cell(3, column).value = 10
+        sheet.cell(4, column).value = 20
+    source = tmp_path / "arbitrary_workbook_name.xlsx"
+    workbook.save(source)
+    workbook.close()
+
+    assert (
+        arms._debugging_detector_hint(
+            source,
+            "Please audit and fix this file thoroughly.",
+            task_category="Debugging",
+        )
+        == "double counting"
+    )
+
+
 def test_protected_debugging_repairs_restore_only_executor_drift(
     tmp_path: Path,
 ) -> None:
@@ -1565,6 +1836,425 @@ def test_protected_debugging_repairs_restore_only_executor_drift(
         if event["event"] == "harness.deterministic_debugging_repairs.restored"
     ]
     assert restored[-1]["payload"]["policy"] == "high-confidence-repair-checkpoint-v1"
+
+
+def test_protected_financial_repairs_restore_cells_and_freeze_panes(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "Financial_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "protected-financial-run")
+
+    prepared = load_workbook(session.workbook_path, data_only=False)
+    prepared["Model"]["B2"] = "=SUM(B3:B4)"
+    prepared["Model"]["C2"] = 0.25
+    prepared["Model"].freeze_panes = "B2"
+    prepared.save(session.workbook_path)
+    prepared.close()
+    actions = [
+        {"sheet": "Model", "target": "B2", "formula": "=SUM(B3:B4)"},
+        {"sheet": "Model", "target": "C2", "value": "0.25"},
+        {"sheet": "Model", "target": "B2", "value": "freeze_panes"},
+    ]
+    assert arms._write_financial_repair_checkpoint(session, actions) == 3
+
+    mutated = load_workbook(session.workbook_path, data_only=False)
+    mutated["Model"]["B2"] = "=SUM(B3:B4)+B3"
+    mutated["Model"]["C2"] = 1
+    mutated["Model"].freeze_panes = None
+    mutated.save(session.workbook_path)
+    mutated.close()
+
+    assert arms._restore_protected_financial_repairs(session) == 3
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["Model"]["B2"].value == "=SUM(B3:B4)"
+    assert output["Model"]["C2"].value == 0.25
+    assert output["Model"].freeze_panes == "B2"
+    output.close()
+    assert arms._restore_protected_financial_repairs(session) == 0
+    events = read_trajectory(session.paths.trajectory)
+    restored = [
+        event
+        for event in events
+        if event["event"] == "harness.deterministic_financial_repairs.restored"
+    ]
+    assert restored[-1]["payload"]["policy"] == "instruction-grounded-repair-checkpoint-v1"
+
+
+def test_financial_completion_restores_populated_input_drift(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "Financial_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "DCF Valuation"
+    worksheet["D18"] = 1
+    worksheet["E18"] = "=D18+1"
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "financial-input-guard-run")
+
+    mutated = load_workbook(session.workbook_path, data_only=False)
+    mutated["DCF Valuation"]["D18"] = "=1/(1+$C$29)"
+    mutated["DCF Valuation"]["E18"] = "=1/(1+$C$29)^2"
+    mutated["DCF Valuation"]["F18"] = "=D18+E18"
+    mutated.save(session.workbook_path)
+    mutated.close()
+
+    assert arms._restore_financial_populated_input_content(session) == 2
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["DCF Valuation"]["D18"].value == 1
+    assert output["DCF Valuation"]["E18"].value == "=D18+1"
+    assert output["DCF Valuation"]["F18"].value == "=D18+E18"
+    output.close()
+    events = read_trajectory(session.paths.trajectory)
+    restored = [
+        event
+        for event in events
+        if event["event"] == "harness.financial_populated_input_content.restored"
+    ]
+    assert restored[-1]["payload"]["policy"] == (
+        "financial-completion-populated-inputs-read-only-v2"
+    )
+
+
+def test_financial_input_guard_does_not_copy_foreign_style_indexes(tmp_path: Path) -> None:
+    import zipfile
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    source = tmp_path / "Financial_foreign_styles_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    for index in range(1, 40):
+        cell = worksheet.cell(row=index, column=1, value=f"source-{index}")
+        cell.font = Font(name=f"Source Font {index}", size=9 + index / 10)
+    worksheet["D18"] = "original"
+    worksheet["D18"].font = Font(name="Source Only Font", bold=True)
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "foreign-style-run")
+
+    # Simulate a workbook rewritten by another spreadsheet engine: its local
+    # style registry has no relationship to the source workbook's style ids.
+    target = Workbook()
+    target_worksheet = target.active
+    target_worksheet.title = "Model"
+    for index in range(1, 40):
+        target_worksheet.cell(row=index, column=1, value=f"source-{index}")
+    target_worksheet["D18"] = "mutated"
+    target_worksheet["D18"].font = Font(name="Target Font", color="FFFF0000")
+    target.save(session.workbook_path)
+    target.close()
+
+    assert arms._restore_financial_populated_input_content(session) == 1
+    with zipfile.ZipFile(session.workbook_path) as package:
+        assert package.testzip() is None
+        assert {
+            "[Content_Types].xml",
+            "xl/workbook.xml",
+            "xl/styles.xml",
+            "_rels/.rels",
+            "xl/_rels/workbook.xml.rels",
+        } <= set(package.namelist())
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["Model"]["D18"].value == "original"
+    assert output["Model"]["D18"].font.name == "Target Font"
+    assert output["Model"]["D18"].font.color.rgb == "FFFF0000"
+    output.close()
+
+
+def test_embedded_uncached_whole_column_lookup_becomes_array_formula(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "Embedded_Hardcode_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "DCF"
+    worksheet["G9"] = (
+        "=INDEX('Exhibit 1'!B:B,MATCH(\"Total revenue, net\","
+        "'Exhibit 1'!A:A,0))"
+    )
+    worksheet["G10"] = "=SUM(B:B)"
+    workbook.create_sheet("Exhibit 1")
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "embedded-array-run")
+    (session.paths.root / "deterministic_debugging_repairs.json").write_text(
+        json.dumps(
+            {
+                "DCF!G9": (
+                    "=INDEX('Exhibit 1'!B:B,MATCH(\"Total revenue, net\","
+                    "'Exhibit 1'!A:A,0))"
+                )
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert arms._normalize_embedded_lookup_array_formulas(session) == 1
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert getattr(output["DCF"]["G9"].value, "text", None) == (
+        "=INDEX('Exhibit 1'!B:B,MATCH(\"Total revenue, net\","
+        "'Exhibit 1'!A:A,0))"
+    )
+    assert output["DCF"]["G10"].value == "=SUM(B:B)"
+    output.close()
+
+
+def test_embedded_cached_bounded_lookup_becomes_array_formula(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    source = tmp_path / "Embedded_Hardcodes_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Football Field"
+    worksheet["H6"] = (
+        "=INDEX('Comps'!$I$12:$I$13, MATCH(\"Median\", "
+        "'Comps'!$D$12:$D$13, 0))"
+    )
+    workbook.create_sheet("Comps")
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "bounded-array-run")
+    (session.paths.root / "deterministic_debugging_repairs.json").write_text(
+        json.dumps(
+            {
+                "Football Field!H6": (
+                    "=INDEX('Comps'!$I$12:$I$13, MATCH(\"Median\", "
+                    "'Comps'!$D$12:$D$13, 0))"
+                )
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert arms._normalize_embedded_lookup_array_formulas(session) == 1
+    output = load_workbook(session.workbook_path, data_only=False)
+    value = output["Football Field"]["H6"].value
+    assert isinstance(value, ArrayFormula)
+    assert value.text == (
+        "=INDEX('Comps'!$I$12:$I$13, MATCH(\"Median\", "
+        "'Comps'!$D$12:$D$13, 0))"
+    )
+    output.close()
+
+
+def test_embedded_uncheckpointed_lookup_keeps_formula_type(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "Embedded_Hardcode_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    formula = '=INDEX(Source!B:B,MATCH("Revenue",Source!A:A,0))'
+    worksheet["C3"] = formula
+    workbook.create_sheet("Source")
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "uncheckpointed-array-run")
+
+    assert arms._normalize_embedded_lookup_array_formulas(session) == 0
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["Model"]["C3"].value == formula
+    output.close()
+
+
+def test_embedded_scope_keeps_literal_replacement_and_restores_other_edits(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import Workbook, load_workbook
+
+    source = tmp_path / "Embedded_Hardcode_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["B2"] = "=A2*(0.05+C2)"
+    worksheet["B3"] = "=SUM(C3:D3)"
+    worksheet["B4"] = 0
+    worksheet["B5"] = "=A5+1"
+    worksheet["B6"] = None
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "embedded-scope-run")
+    (session.paths.root / "deterministic_debugging_repairs.json").write_text(
+        json.dumps({"Model!B5": "=A5+E5"}) + "\n",
+        encoding="utf-8",
+    )
+
+    mutated = load_workbook(session.workbook_path, data_only=False)
+    mutated["Model"]["B2"] = "=A2*(E2+C2)"
+    mutated["Model"]["B3"] = "=SUM(C3:E3)"
+    mutated["Model"]["B4"] = "=C4"
+    mutated["Model"]["B5"] = "=A5+E5"
+    mutated["Model"]["B6"] = "=C6"
+    mutated.save(session.workbook_path)
+    mutated.close()
+
+    assert arms._restore_embedded_hardcode_scope_content(session) == 4
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["Model"]["B2"].value == "=A2*(0.05+C2)"
+    assert output["Model"]["B3"].value == "=SUM(C3:D3)"
+    assert output["Model"]["B4"].value == 0
+    assert output["Model"]["B5"].value == "=A5+E5"
+    assert output["Model"]["B6"].value is None
+    output.close()
+
+
+def test_embedded_scope_keeps_executor_formula_matching_structural_candidate(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import Workbook, load_workbook
+
+    source = tmp_path / "Embedded_Hardcode_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "DCF"
+    worksheet["G9"] = 100
+    worksheet["H9"] = 110
+    worksheet["G14"] = -12
+    worksheet["H14"] = -14
+    worksheet["G15"] = "=G14/G9*-1"
+    worksheet["H15"] = "=H14/H9*-1"
+    worksheet["I15"] = "=AVERAGE($G$15:$H$15)"
+    for column in "JKLMNOP":
+        worksheet[f"{column}15"] = 0.124
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "embedded-candidate-scope-run")
+
+    mutated = load_workbook(session.workbook_path, data_only=False)
+    for previous, column in zip("IJKLMNO", "JKLMNOP", strict=True):
+        mutated["DCF"][f"{column}15"] = f"={previous}15"
+    mutated.save(session.workbook_path)
+    mutated.close()
+
+    assert arms._restore_embedded_hardcode_scope_content(session) == 0
+    output = load_workbook(session.workbook_path, data_only=False)
+    for previous, column in zip("IJKLMNO", "JKLMNOP", strict=True):
+        assert output["DCF"][f"{column}15"].value == f"={previous}15"
+    output.close()
+
+
+def test_incorrect_average_warm_start_includes_contiguous_first_data_row(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import Workbook, load_workbook
+
+    source = tmp_path / "Incorrect_Average_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Comps"
+    worksheet["B5"] = "Company"
+    for row, value in enumerate((2.2, 1.8, 12.0, 1.5), start=6):
+        worksheet.cell(row, 2).value = f"Company {row}"
+        worksheet.cell(row, 3).value = value
+        worksheet.cell(row, 4).value = value + 1
+    worksheet["B10"] = "Average"
+    worksheet["C10"] = "=AVERAGE(C7:C9)"
+    worksheet["D10"] = "=AVERAGE(D7:D9)"
+    worksheet["B11"] = "Median"
+    worksheet["C11"] = "=MEDIAN(C7:C9)"
+    worksheet["B12"] = "Max"
+    worksheet["C12"] = "=MAX(C7:C9)"
+    worksheet["B13"] = "Min"
+    worksheet["C13"] = "=MIN(C7:C9)"
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "average-summary-run")
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Please audit and fix incorrect average formulas.",
+        normalized_plan="actions: []\nprovenance: [{source: test}]",
+        deterministic_evidence="{}",
+        task_category="Debugging",
+    )
+
+    assert changed == 5
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["Comps"]["C10"].value == "=AVERAGE(C6:C9)"
+    assert output["Comps"]["D10"].value == "=AVERAGE(D6:D9)"
+    assert output["Comps"]["C11"].value == "=MEDIAN(C6:C9)"
+    assert output["Comps"]["C12"].value == "=MAX(C6:C9)"
+    assert output["Comps"]["C13"].value == "=MIN(C6:C9)"
+    output.close()
+
+
+def test_structural_scenario_repair_writes_completion_checkpoint(tmp_path: Path) -> None:
+    source = tmp_path / "scenario-model.xlsx"
+    workbook = Workbook()
+    scenario = workbook.active
+    scenario.title = "Scenario Engine"
+    for row in (2, 3):
+        for column in range(5, 8):
+            scenario.cell(row, column).value = row * column
+    scenario["D6"] = '="Target"'
+    scenario["D11"] = "Active Case"
+    for row in (13, 16, 19):
+        scenario.cell(row, 5).value = f"=CHOOSE(#REF!,H{row},I{row},J{row})"
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "scenario-structural-run")
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction=(
+            "Restore deleted rows. The model uses 3 scenario cases, and the active scenario "
+            "case selector value is 2."
+        ),
+        normalized_plan="actions: []\nprovenance: [{source: test}]",
+        deterministic_evidence="{}",
+        task_category="Debugging",
+    )
+
+    assert changed == 1
+    checkpoint = json.loads(
+        (session.paths.root / "deterministic_structural_repairs.json").read_text()
+    )
+    assert checkpoint["schema_version"] == "structural-repairs-v1"
+    assert checkpoint["remaining_broken_references"] == 0
+
+
+def test_completed_structural_warm_start_bypasses_model_stages(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "structural-bypass")
+    (session.paths.root / "deterministic_structural_repairs.json").write_text(
+        '{"schema_version":"structural-repairs-v1"}\n'
+    )
+    monkeypatch.setattr(arms, "_task_keyword_evidence", lambda *_args, **_kwargs: "{}")
+    monkeypatch.setattr(arms, "_apply_safe_planner_actions", lambda *_args, **_kwargs: 1)
+
+    result = arms.run_arm(
+        "ours",
+        _config(),
+        session,
+        None,
+        "Please audit and fix this file thoroughly.",
+        2_000,
+        300,
+        object(),
+        max_turns_per_arm=50,
+        task_category="Debugging",
+    )
+
+    assert FakeAgent.calls == []
+    assert result.turns == 0
 
 
 def test_repeated_double_count_sum_argument_series_is_checkpointed(
@@ -2012,6 +2702,60 @@ def test_financial_task_keyword_evidence_skips_debug_detector_and_compacts(
     assert "task_specific_repair_candidates" not in payload
 
 
+def test_cross_sheet_keyword_evidence_omits_speculative_offsets(tmp_path: Path) -> None:
+    workbook_path = tmp_path / "Incorrect Cross Sheet References_input.xlsx"
+    workbook = Workbook()
+    target = workbook.active
+    target.title = "DCF"
+    target["B2"] = "Revenue"
+    target["C2"] = "=Source!C3"
+    source = workbook.create_sheet("Source")
+    source["B3"] = "Costs"
+    source["C3"] = "=1"
+    source["B4"] = "Revenue"
+    source["C4"] = "=2"
+    workbook.save(workbook_path)
+    workbook.close()
+
+    evidence = arms._task_keyword_evidence(
+        workbook_path,
+        "Please audit and fix this file thoroughly.",
+        [],
+        task_hint=workbook_path.name,
+        task_category="Debugging",
+    )
+
+    assert "task_specific_repair_candidates" not in json.loads(evidence)
+
+
+def test_double_counting_keyword_evidence_omits_peer_translation(tmp_path: Path) -> None:
+    workbook_path = tmp_path / "Double Counting_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["N28"] = "=N20-N23-N23-N26"
+    worksheet["O28"] = "=O20-O26"
+    worksheet["P28"] = "=P20-P26"
+    workbook.save(workbook_path)
+    workbook.close()
+
+    evidence = arms._task_keyword_evidence(
+        workbook_path,
+        "Please audit and fix this file thoroughly.",
+        [],
+        task_hint=workbook_path.name,
+        task_category="Debugging",
+    )
+
+    payload = json.loads(evidence)
+    options = [
+        option
+        for group in payload.get("task_specific_repair_candidates", [])
+        for option in group.get("options", [])
+    ]
+    assert all(option.get("kind") != "double_count_peer_translation" for option in options)
+
+
 def test_high_risk_debugging_keeps_executor_after_planner_warm_start(
     sample_workbook: Path,
     tmp_path: Path,
@@ -2044,6 +2788,256 @@ def test_high_risk_debugging_keeps_executor_after_planner_warm_start(
     assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
     assert FakeAgent.calls[-1]["max_turns"] == 7
     assert FakeAgent.calls[-1]["require_workbook_change"] is False
+
+
+def test_embedded_hardcode_keeps_planner_after_ambiguous_warm_start(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    source = tmp_path / "Embedded_Hardcode_input.xlsx"
+    source.write_bytes(sample_workbook.read_bytes())
+    session = WorkbookSession.create(source, tmp_path / "embedded-warm-start")
+    monkeypatch.setattr(
+        arms,
+        "_task_keyword_evidence",
+        lambda *_args, **_kwargs: "task_specific_repair_candidates: []",
+    )
+    monkeypatch.setattr(arms, "_apply_safe_planner_actions", lambda *_args, **_kwargs: 1)
+
+    arms.run_arm(
+        "ours",
+        _config(),
+        session,
+        None,
+        "Please audit and fix this file thoroughly.",
+        2_000,
+        300,
+        object(),
+        max_turns_per_arm=8,
+        task_category="Debugging",
+    )
+
+    # The generic fixture contains no embedded-hardcode evidence.  A deterministic
+    # warm-start count alone must not route by the input filename, so the normal
+    # planner remains in the loop and the executor receives the resulting plan.
+    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
+    assert FakeAgent.calls[-1]["max_turns"] == 7
+    assert FakeAgent.calls[-1]["require_workbook_change"] is False
+
+
+def test_embedded_matching_sequence_is_not_auto_applied(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source = tmp_path / "Embedded_Hardcode_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "DCF Model"
+    worksheet["T10"] = 7
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "embedded-sequence-run")
+    candidate = DebuggingRepairCandidate(
+        candidate_id="embedded-sequence-test",
+        kind="embedded_matching_sequence",
+        sheet="DCF Model",
+        cell="T10",
+        current=7,
+        replacement="=J10",
+        rationale="test-only sequence candidate",
+        context=(),
+    )
+    monkeypatch.setattr(
+        arms,
+        "detect_debugging_repair_candidates",
+        lambda *_args, **_kwargs: [candidate],
+    )
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Please audit and fix this file thoroughly.",
+        normalized_plan="actions: []",
+        deterministic_evidence="{}",
+        task_category="Debugging",
+    )
+
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert changed == 0
+    assert output["DCF Model"]["T10"].value == 7
+    output.close()
+
+
+def test_cross_sheet_fixture_does_not_replace_text_at_reused_coordinate(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source = tmp_path / "Incorrect Cross Sheet References_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "DCF"
+    worksheet["E10"] = "% YoY Growth"
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "cross-sheet-text-fixture")
+    monkeypatch.setattr(arms, "detect_debugging_repair_candidates", lambda *_a, **_k: [])
+    monkeypatch.setattr(arms, "detect_formula_pattern_repairs", lambda *_a, **_k: [])
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Please audit and fix this file thoroughly.",
+        normalized_plan="actions: []",
+        deterministic_evidence="{}",
+        task_category="Debugging",
+    )
+
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert changed == 0
+    assert output["DCF"]["E10"].value == "% YoY Growth"
+    output.close()
+
+
+def test_cross_sheet_compound_label_alignment_is_not_auto_applied(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source = tmp_path / "Incorrect Cross Sheet References_input.xlsx"
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "Metrics"
+    model["C5"] = "=Source!C10/Source!C11"
+    source_sheet = workbook.create_sheet("Source")
+    source_sheet["C10"] = "=1"
+    source_sheet["C11"] = "=2"
+    source_sheet["C12"] = "=3"
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "cross-sheet-compound")
+    candidate = DebuggingRepairCandidate(
+        candidate_id="compound-label-alignment",
+        kind="cross_sheet_label_alignment",
+        sheet="Metrics",
+        cell="C5",
+        current="=Source!C10/Source!C11",
+        replacement="=Source!C10/Source!C12",
+        rationale="test-only compound candidate",
+        context=(),
+    )
+    monkeypatch.setattr(
+        arms,
+        "detect_debugging_repair_candidates",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(arms, "detect_formula_pattern_repairs", lambda *_a, **_k: [])
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Please audit and fix this file thoroughly.",
+        normalized_plan="actions: []",
+        deterministic_evidence="{}",
+        task_category="Debugging",
+    )
+
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert changed == 0
+    assert output["Metrics"]["C5"].value == "=Source!C10/Source!C11"
+    output.close()
+
+
+def test_index_return_column_after_blank_spacer_is_auto_applied(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "Incorrect_Index_Match_input.xlsx"
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "WACC"
+    lookup = workbook.create_sheet("Exhibit 6")
+    for row, label in enumerate(("Debt", "Equity", "MV Leverage (%)"), start=7):
+        lookup.cell(row, 2).value = label
+        lookup.cell(row, 3).value = None
+        lookup.cell(row, 4).value = row / 10
+    model["C7"] = (
+        "=INDEX('Exhibit 6'!C:C,MATCH(\"MV Leverage (%)\",'Exhibit 6'!B:B,0))"
+    )
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "index-return-run")
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Please audit and fix this file thoroughly.",
+        normalized_plan="actions: []",
+        deterministic_evidence="{}",
+        task_category="Debugging",
+    )
+
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert changed == 1
+    assert output["WACC"]["C7"].value == (
+        "=INDEX('Exhibit 6'!D:D,MATCH(\"MV Leverage (%)\",'Exhibit 6'!B:B,0))"
+    )
+    output.close()
+
+
+def test_debugging_followup_cannot_replace_checkpointed_target(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source = tmp_path / "Incorrect_Index_Match_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    protected_formula = '=INDEX(Source!B:B,MATCH("Revenue",Source!A:A,0))'
+    weaker_formula = '=INDEX(Source!A:B,MATCH("Revenue",Source!A:A,0))'
+    worksheet["C3"] = protected_formula
+    workbook.create_sheet("Source")
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "protected-followup-run")
+    checkpoint = session.paths.root / "deterministic_debugging_repairs.json"
+    checkpoint.write_text(
+        json.dumps({"Model!C3": protected_formula}) + "\n",
+        encoding="utf-8",
+    )
+    candidate = DebuggingRepairCandidate(
+        candidate_id="weaker-followup",
+        kind="cross_sheet_label_alignment",
+        sheet="Model",
+        cell="C3",
+        current=protected_formula,
+        replacement=weaker_formula,
+        rationale="test-only weaker followup",
+        context=(),
+    )
+    monkeypatch.setattr(
+        arms,
+        "detect_debugging_repair_candidates",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(arms, "detect_formula_pattern_repairs", lambda *_args: [])
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Please audit and fix this file thoroughly.",
+        normalized_plan=(
+            "actions:\n"
+            "- action: write_formula\n"
+            "  target: Model!C3\n"
+            f"  value: '{weaker_formula}'\n"
+            "provenance: [{source: test}]"
+        ),
+        deterministic_evidence="{}",
+        task_category="Debugging",
+    )
+
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert changed == 0
+    assert output["Model"]["C3"].value == protected_formula
+    output.close()
+    assert json.loads(checkpoint.read_text(encoding="utf-8")) == {
+        "Model!C3": protected_formula
+    }
 
 
 def test_repair_date_text_in_date_formatted_cells_rewrites_typed_dates(
@@ -2110,6 +3104,8 @@ def test_spreadsheet_core_skill_blocks_unverified_formula_submission() -> None:
     assert "Define the exact expected target cells before editing" in skill
     assert "first, middle, and last target positions" in skill
     assert "both the horizontal and vertical axes" in skill
+    assert 'sheet_harness.view_xlsx(mode="list")' in skill
+    assert "Do not replace this with workbook-wide custom print loops" in skill
     assert "absolute rows, absolute columns" in skill
     assert "recalculate_and_read" in skill
     assert '{"validation_scope":"pending_formula_changes"}' in skill
@@ -2119,6 +3115,8 @@ def test_spreadsheet_core_skill_blocks_unverified_formula_submission() -> None:
     assert "last-N, date-filtered, blank-aware, or lookup logic" in skill
     assert "duplicate key" in skill
     assert "blocks submission" in skill
+    assert "every source cell that already contains a value or formula" in skill
+    assert "decorative spacers" in skill
     assert "`list_sheets`" not in skill
     assert "`format_range`" not in skill
     assert "data_only=True" in skill

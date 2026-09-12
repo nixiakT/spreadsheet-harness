@@ -8,6 +8,9 @@ description: Perform bounded spreadsheet filtering, sorting, cleaning, formattin
 Change the smallest cell/range surface that satisfies the task. Snapshot all source rows before
 sorting, filtering, compacting, deleting, or rewriting a destination that overlaps the source.
 
+- Prefer one bounded `sheet_harness.view_xlsx(...)` window that includes the target labels and
+  neighboring rows/columns over custom workbook-wide print loops. Once the decisive coordinates are
+  visible, edit and save in one call, verify those exact cells in the next call, and submit.
 - Treat planner-proposed writes as hypotheses until their exact targets are inspected. Preserve
   populated cells by default, and reject a bulk target that mixes blank and nonblank cells.
 - Do not use an empty string as a clearing operation unless the instruction explicitly requests

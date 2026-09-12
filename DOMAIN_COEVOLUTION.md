@@ -57,7 +57,22 @@ For each failed development trajectory, the fixed router assigns one route:
 5. **Insufficient evidence**: collect another trace; do not guess a mutation.
 
 The routing decision is auditable and binds evaluator outcomes, trajectory
-hashes, activated plugin manifests, and the allowed evolution surface.
+hashes, activated plugin manifests, and the allowed evolution surface.  An
+interface failure carries structured evidence rather than being folded into a
+domain failure, for example:
+
+```json
+{
+  "route": "composition_interface",
+  "required_capability": "financial.scenario-selector",
+  "provider": "skill-spreadsheet-financial-model",
+  "missing_evidence": ["Assumptions!B4", "Model!C7:F7"],
+  "harness_surface": "context.workbook-profile"
+}
+```
+
+This preserves the chain `D declares evidence -> H exposes evidence -> D
+applies rule -> H triggers verification -> evaluator checks postcondition`.
 
 ## Alternating evolution algorithm
 
@@ -109,37 +124,45 @@ the generic tool runtime.
 
 ## Experimental decomposition
 
-Use five frozen arms so “plugin gain” and “co-evolution gain” are distinct:
+Use four frozen arms for the primary paired evaluation.  Every arm runs the
+same task set, model, seed, budget, evaluator, timeout, and balanced arm order:
 
 | Arm | Meaning |
 | --- | --- |
-| (H_0) | basic Spreadsheet Harness |
 | (H_0 \oplus D_0) | add the seed downstream plugin |
 | (H_1 \oplus D_0) | evolve only the basic harness |
 | (H_0 \oplus D_1) | evolve only the domain plugin |
 | (H_1 \oplus D_1) | alternating joint composition after co-evolution |
 
-The first contrast measures modular specialization:
+The four-arm contrasts are:
 
 \[
-G_{plugin}=S(H_0\oplus D_0)-S(H_0).
+G_H=S(H_1\oplus D_0)-S(H_0\oplus D_0),\qquad
+G_D=S(H_0\oplus D_1)-S(H_0\oplus D_0),
 \]
-
-The final contrast measures whether adapting the two layers together gives more
-than either one-sided update:
 
 \[
-G_{co}=S(H_1\oplus D_1)-\max(S(H_1\oplus D_0),S(H_0\oplus D_1)).
+G_{joint}=S(H_1\oplus D_1)-S(H_0\oplus D_0).
 \]
 
-An optional interaction statistic is:
+Most importantly, report the difference-in-differences interaction gain:
 
 \[
 I=S(H_1\oplus D_1)-S(H_1\oplus D_0)-S(H_0\oplus D_1)+S(H_0\oplus D_0).
 \]
 
-Report these only on common officially scored tasks, together with regression,
-token/call cost, and failure rates.
+An additional, more intuitive comparison is:
+
+\[
+G_{joint}>\max(G_H,G_D).
+\]
+
+The latter does not replace the interaction contrast.  Report both only on
+common officially scored tasks, together with exact task pass, modification and
+regression accuracy, paired win/tie/loss, provider/not-scored rate, token/call
+cost, tool errors, and per-round mutation and gate acceptance telemetry.  A
+standalone H_0 run may be included as a descriptive ablation, but is not one
+of the four primary interaction arms.
 
 ## Data separation
 
@@ -163,3 +186,44 @@ workbook.  The claim is therefore not a new optimization algorithm; it is that
 a pluginized spreadsheet harness makes controlled downstream specialization and
 composition-aware evolution practical and measurable.
 
+## Executable persistent controller
+
+The reference implementation is `spreadsheet_harness.continuous_evolution`.
+It is a controller-owned state machine, not a prompt-training shortcut:
+
+* `revisions/<sha>/` is an immutable snapshot of the complete source and skill
+  tree plus the resolved composition;
+* `candidates/<round>-<id>/` is an isolated proposal with a provenance-bound
+  base revision, contract mutation, validation report, and decision;
+* `rounds/<round>/round.json`, `state.json`, and `events.jsonl` make an
+  interrupted run resumable and auditable;
+* the router excludes infrastructure failures and selects exactly one plugin
+  coordinate; contracts independently authorize config, prompt, description,
+  implementation, enable, disable, and slot-compatible replacement updates;
+* paired replay, transfer, and regression contexts are hash-bound to the
+  evaluator/model/budget configuration.  Bootstrap lower confidence bounds,
+  context-wise regression floors, and hard validation checks gate promotion;
+* promotion atomically advances the revision pointer.  `continuous-rollback`
+  moves it back to the previous immutable revision, while `continuous-freeze`
+  seals the accepted composition and held-out task-set digest.
+
+An experiment supplies proposer/evaluator adapters in the frozen JSON config.
+The adapters receive structured requests only; evaluator error text and hidden
+answers are not sent to the proposer.  A minimal lifecycle is:
+
+```bash
+sheet-harness evolve continuous-init config.json evolution-workspace
+sheet-harness evolve continuous-evidence config.json evolution-workspace evidence.json
+sheet-harness evolve continuous-run config.json evolution-workspace --rounds 10
+sheet-harness evolve continuous-status evolution-workspace
+sheet-harness evolve continuous-freeze config.json evolution-workspace
+sheet-harness evolve continuous-rollback evolution-workspace
+```
+
+For a real SpreadsheetBench-v2 run, use
+`SpreadsheetBenchV2EvaluationAdapter` (which invokes the pinned official
+evaluator for every paired context) and pass a revision's `composition.json`
+to the benchmark CLI with `--composition-file ARM=PATH`.  Implementation
+revisions are confined to the paths declared by the owning plugin contract;
+the financial-model plugin consequently owns both its `SKILL.md` prompt and
+`src/spreadsheet_harness/financial_model_repairs.py`.

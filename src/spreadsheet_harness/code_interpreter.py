@@ -233,11 +233,13 @@ import re
 from contextlib import contextmanager
 from copy import copy
 from datetime import date, datetime, time
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 from openpyxl.formula.translate import Translator
-from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
 
 _FORMULA_RANGE_RE = re.compile(
     r"(?P<sheet>(?:'[^']+'|[A-Za-z_][A-Za-z0-9_ .]*)!)?"
@@ -261,6 +263,24 @@ def workbook_sha256(path: str | Path | None = None) -> str:
     return digest.hexdigest()
 
 
+def _serialized_workbook_digest(workbook: Any) -> str:
+    """Hash serialized OOXML member content while ignoring ZIP timestamps."""
+
+    payload = BytesIO()
+    workbook.save(payload)
+    payload.seek(0)
+    digest = hashlib.sha256()
+    with ZipFile(payload) as archive:
+        for name in sorted(archive.namelist()):
+            encoded_name = name.encode("utf-8")
+            content = archive.read(name)
+            digest.update(len(encoded_name).to_bytes(4, "big"))
+            digest.update(encoded_name)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    return digest.hexdigest()
+
+
 def _record_managed_mutation_attempt() -> None:
     marker = os.environ.get("SHEET_MUTATION_MARKER")
     if marker:
@@ -274,6 +294,28 @@ def load_workbook(path: str | Path | None = None, *, data_only: bool = False, **
     kwargs.setdefault("keep_vba", target.suffix.lower() == ".xlsm")
     kwargs.setdefault("keep_links", True)
     return _sheet_harness_load_workbook(target, data_only=data_only, **kwargs)
+
+
+def get_worksheet_by_name(workbook: Any, name: str):
+    """Compatibility wrapper for older model-written openpyxl helpers."""
+
+    try:
+        return workbook[name]
+    except (KeyError, ValueError):
+        wanted = str(name).strip().casefold()
+        matched = next(
+            (
+                sheet_name
+                for sheet_name in workbook.sheetnames
+                if str(sheet_name).strip().casefold() == wanted
+            ),
+            None,
+        )
+        if matched is None:
+            raise KeyError(
+                f"Worksheet not found: {name!r}; available={workbook.sheetnames!r}"
+            )
+        return workbook[matched]
 
 
 def _json_value(value: Any) -> Any:
@@ -371,6 +413,7 @@ def workbook_overview(workbook: Any | None = None) -> list[dict[str, Any]]:
                     "name": worksheet.title,
                     "title": worksheet.title,
                     "dimension": worksheet.calculate_dimension(),
+                    "dimensions": worksheet.calculate_dimension(),
                     "max_row": worksheet.max_row,
                     "max_column": worksheet.max_column,
                     "counts": counts,
@@ -463,6 +506,63 @@ def list_sheets(workbook: Any | None = None) -> dict[str, Any]:
             workbook.close()
 
 
+def _view_column_bounds(
+    cols: Any,
+    start_col: Any,
+    end_col: Any,
+    min_col: int,
+    max_col: int,
+) -> tuple[int, int]:
+    """Normalize official and historical view_xlsx column spellings."""
+
+    def as_index(value: Any, *, default: int) -> int:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            raise ValueError("column bounds must be letters or positive integers")
+        if isinstance(value, int):
+            index = value
+        else:
+            text = str(value).strip().replace("$", "")
+            # Accept an A1 endpoint while ignoring its row component.
+            match = re.fullmatch(r"([A-Za-z]{1,3})(?:[1-9][0-9]*)?", text)
+            if match is None:
+                raise ValueError(f"Invalid column reference: {value!r}")
+            index = column_index_from_string(match.group(1))
+        if index < 1:
+            raise ValueError("column bounds must be positive")
+        return index
+
+    parsed_start = as_index(start_col, default=min_col)
+    parsed_end = as_index(end_col, default=max_col)
+    if cols is not None:
+        text = str(cols).strip().replace("$", "")
+        # The common historical form is ``A:J``.  A single column is also
+        # useful when a model wants a narrow view.  For comma-separated lists,
+        # use the enclosing interval so the output remains rectangular.
+        pieces = [piece.strip() for piece in text.split(",") if piece.strip()]
+        if not pieces:
+            raise ValueError("cols must not be empty")
+        intervals: list[tuple[int, int]] = []
+        for piece in pieces:
+            endpoints = [endpoint.strip() for endpoint in piece.split(":")]
+            if len(endpoints) > 2:
+                raise ValueError(f"Invalid column range: {cols!r}")
+            left = as_index(endpoints[0], default=min_col)
+            right = as_index(endpoints[-1], default=left)
+            intervals.append((min(left, right), max(left, right)))
+        parsed_start = min(left for left, _ in intervals)
+        parsed_end = max(right for _, right in intervals)
+    parsed_start = max(min_col, parsed_start)
+    parsed_end = min(max_col, parsed_end)
+    if parsed_end < parsed_start:
+        raise ValueError(
+            f"Requested columns {parsed_start}:{parsed_end} do not intersect worksheet "
+            f"bounds {min_col}:{max_col}"
+        )
+    return parsed_start, parsed_end
+
+
 def inspect_range(
     sheet: str,
     range_ref: str,
@@ -473,13 +573,40 @@ def inspect_range(
 ) -> dict[str, Any]:
     """Inspect one bounded A1 range similarly to the native inspect_range tool."""
 
-    bounds = range_boundaries(range_ref.replace("$", ""))
-    min_col, min_row, max_col, max_row = bounds
-    if not all(isinstance(item, int) and item >= 1 for item in bounds):
+    # Historical trajectories occasionally emitted the arguments in the
+    # opposite order (``inspect_range("A1:D8", "Sheet1", wb)``).  Treat that
+    # unambiguous shape as a compatibility spelling instead of returning an
+    # opaque tool error.  This is deliberately limited to A1-looking first
+    # arguments so a real sheet name cannot be silently rewritten.
+    if isinstance(sheet, str) and isinstance(range_ref, str):
+        first_is_range = bool(re.fullmatch(r"\$?[A-Za-z]{1,3}\$?[1-9]\d*(?::\$?[A-Za-z]{1,3}\$?[1-9]\d*)?", sheet.strip()))
+        second_is_range = bool(re.fullmatch(r"\$?[A-Za-z]{1,3}\$?[1-9]\d*(?::\$?[A-Za-z]{1,3}\$?[1-9]\d*)?", range_ref.strip()))
+        if first_is_range and not second_is_range:
+            sheet, range_ref = range_ref, sheet
+
+    requested_bounds = range_boundaries(range_ref.replace("$", ""))
+    min_col, min_row, max_col, max_row = requested_bounds
+    if not all(isinstance(item, int) and item >= 1 for item in requested_bounds):
         raise ValueError(f"Range must be bounded: {range_ref!r}")
-    count = (max_col - min_col + 1) * (max_row - min_row + 1)
-    if count > max_cells:
-        raise ValueError(f"Range contains {count} cells; limit is {max_cells}")
+    if not isinstance(max_cells, int) or max_cells < 1:
+        raise ValueError("max_cells must be a positive integer")
+    requested_count = (max_col - min_col + 1) * (max_row - min_row + 1)
+    truncated = requested_count > max_cells
+    if truncated:
+        # Keep a deterministic row-major prefix while preserving the full
+        # requested column width whenever possible.  Returning bounded data
+        # with an explicit marker is more useful to model-written code than a
+        # hard exception after the model has already spent a turn inspecting.
+        width = max_col - min_col + 1
+        if width <= max_cells:
+            max_row = min(max_row, min_row + max_cells // width - 1)
+        else:
+            max_col = min(max_col, min_col + max_cells - 1)
+        if max_row < min_row or max_col < min_col:
+            max_row, max_col = min_row, min_col
+        count = (max_col - min_col + 1) * (max_row - min_row + 1)
+    else:
+        count = requested_count
 
     formula_book, should_close_formula = _load_if_path(workbook, data_only=False)
     if should_close_formula:
@@ -489,8 +616,21 @@ def inspect_range(
         value_book = formula_book
         should_close_value = False
     try:
-        formula_sheet = formula_book[sheet]
-        value_sheet = value_book[sheet]
+        # Match the native tool's forgiving sheet-name behavior: exact first,
+        # then trimmed/case-insensitive fallback for names copied from output.
+        try:
+            formula_sheet = formula_book[sheet]
+            value_sheet = value_book[sheet]
+        except (KeyError, ValueError):
+            wanted = str(sheet).strip().casefold()
+            matched = next(
+                (name for name in formula_book.sheetnames if str(name).strip().casefold() == wanted),
+                None,
+            )
+            if matched is None:
+                raise KeyError(f"Worksheet not found: {sheet!r}; available={formula_book.sheetnames!r}")
+            formula_sheet = formula_book[matched]
+            value_sheet = value_book[matched]
         matrix: list[list[Any]] = []
         cells: list[dict[str, Any]] = []
         cell_map: dict[str, dict[str, Any]] = {}
@@ -527,12 +667,12 @@ def inspect_range(
         merged = [
             str(item)
             for item in formula_sheet.merged_cells.ranges
-            if _intersects(bounds, range_boundaries(str(item)))
+            if _intersects(requested_bounds, range_boundaries(str(item)))
         ]
         tables = []
         for name, table in table_map(formula_sheet).items():
             ref = str(getattr(table, "ref", table))
-            if _intersects(bounds, range_boundaries(ref)):
+            if _intersects(requested_bounds, range_boundaries(ref)):
                 tables.append({"name": name, "ref": ref})
         return {
             "ok": True,
@@ -540,6 +680,9 @@ def inspect_range(
             "range": (
                 f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
             ),
+            "requested_range": range_ref,
+            "requested_cell_count": requested_count,
+            "truncated": truncated,
             # Keep a legacy-friendly alias for models that expect inspect tools to
             # expose the selected region under `region`.
             "region": (
@@ -559,6 +702,62 @@ def inspect_range(
             formula_book.close()
         if should_close_value:
             value_book.close()
+
+
+def view_xlsx(
+    path: Any = None,
+    mode: str = "content",
+    sheet: str | None = None,
+    start_row: int | None = None,
+    end_row: int | None = None,
+    *,
+    start_col: int | str | None = None,
+    end_col: int | str | None = None,
+    cols: str | None = None,
+) -> str:
+    """Compact, official-protocol-style workbook view for model grounding.
+
+    This mirrors the released ``view_xlsx`` contract while returning a bounded
+    string suitable for a code-interpreter observation.  It intentionally keeps
+    formulas (rather than only cached values) visible and limits content to the
+    requested row window.
+    """
+    supplied_workbook = bool(
+        path is not None and hasattr(path, "worksheets") and hasattr(path, "sheetnames")
+    )
+    workbook = path if supplied_workbook else load_workbook(path, data_only=False)
+    try:
+        if mode == "list":
+            return "Sheets: " + repr([ws.title for ws in workbook.worksheets if getattr(ws, "sheet_state", "visible") == "visible"])
+        if mode != "content":
+            raise ValueError("mode must be 'list' or 'content'")
+        visible = [ws for ws in workbook.worksheets if getattr(ws, "sheet_state", "visible") == "visible"]
+        if not visible:
+            return "No visible sheets"
+        wanted = sheet.strip().casefold() if isinstance(sheet, str) else None
+        target = next(
+            (ws for ws in visible if wanted is None or ws.title.strip().casefold() == wanted),
+            None,
+        )
+        if target is None:
+            raise KeyError(
+                f"Worksheet not found: {sheet!r}; available={[ws.title for ws in visible]!r}"
+            )
+        min_col, min_row, max_col, max_row = range_boundaries(target.calculate_dimension())
+        min_col, max_col = _view_column_bounds(
+            cols, start_col, end_col, min_col, max_col
+        )
+        actual_start = max(1, int(start_row)) if start_row is not None else min_row
+        actual_end = max(actual_start, int(end_row)) if end_row is not None else max_row
+        actual_end = min(actual_end, max_row)
+        lines = [f"Sheet: {target.title}", f"Data range: {target.calculate_dimension()}"]
+        for row in range(actual_start, actual_end + 1):
+            values = [target.cell(row=row, column=col).value for col in range(min_col, max_col + 1)]
+            lines.append(f"Row {row}: {values!r}")
+        return "\n".join(lines)
+    finally:
+        if not supplied_workbook:
+            workbook.close()
 
 
 def copy_cell_format(source: Any, target: Any) -> None:
@@ -761,18 +960,81 @@ def fill_formula(
     }
 
 
+def _snapshot_workbook_images(workbook: Any) -> list[tuple[Any, bytes]]:
+    """Capture image payloads before openpyxl consumes their file handles."""
+
+    snapshots: list[tuple[Any, bytes]] = []
+    for worksheet in getattr(workbook, "worksheets", []):
+        for image in getattr(worksheet, "_images", []) or []:
+            ref = getattr(image, "ref", None)
+            data: bytes | None = None
+            if isinstance(ref, (str, Path)):
+                data = Path(ref).read_bytes()
+            elif hasattr(ref, "read"):
+                try:
+                    ref.seek(0)
+                    data = ref.read()
+                    ref.seek(0)
+                except (OSError, ValueError):
+                    data = None
+            elif hasattr(ref, "save"):
+                payload = BytesIO()
+                ref.save(payload, format=str(getattr(image, "format", "png")).upper())
+                data = payload.getvalue()
+            if data is not None:
+                snapshots.append((image, bytes(data)))
+    return snapshots
+
+
+def _restore_workbook_images(snapshots: list[tuple[Any, bytes]]) -> None:
+    for image, data in snapshots:
+        image.ref = BytesIO(data)
+
+
 def save_workbook(workbook: Any, path: str | Path | None = None) -> Path:
     """Save to SHEET_WORKBOOK when called without a path."""
 
     target = Path(path) if path is not None else workbook_path()
-    if target.resolve() == workbook_path().resolve():
-        _record_managed_mutation_attempt()
-    calculation = getattr(workbook, "calculation", None)
-    if calculation is not None:
-        calculation.fullCalcOnLoad = True
-        calculation.forceFullCalc = True
-        calculation.calcMode = "auto"
-    workbook.save(target)
+    managed_target = target.resolve() == workbook_path().resolve()
+    image_snapshots = _snapshot_workbook_images(workbook)
+    try:
+        if managed_target and target.is_file():
+            try:
+                current = _sheet_harness_load_workbook(
+                    target,
+                    data_only=False,
+                    keep_vba=target.suffix.lower() == ".xlsm",
+                    keep_links=True,
+                )
+                current_image_snapshots = _snapshot_workbook_images(current)
+                try:
+                    workbook_digest = _serialized_workbook_digest(workbook)
+                    _restore_workbook_images(image_snapshots)
+                    current_digest = _serialized_workbook_digest(current)
+                    _restore_workbook_images(current_image_snapshots)
+                    if workbook_digest == current_digest:
+                        return target
+                finally:
+                    current.close()
+            except Exception:
+                # A failed serialization can be caused by a patched/failed save
+                # method.  It is no longer a proven no-op, so expose it as an
+                # attempted managed mutation to enable precise agent recovery.
+                _record_managed_mutation_attempt()
+                raise
+        if managed_target:
+            _record_managed_mutation_attempt()
+        calculation = getattr(workbook, "calculation", None)
+        if calculation is not None:
+            calculation.fullCalcOnLoad = True
+            calculation.forceFullCalc = True
+            calculation.calcMode = "auto"
+        _restore_workbook_images(image_snapshots)
+        workbook.save(target)
+    finally:
+        # Keep the in-memory workbook reusable for a second save or a narrow
+        # post-save verification.  openpyxl closes image streams as it writes.
+        _restore_workbook_images(image_snapshots)
     validator = _sheet_harness_load_workbook(
         target,
         read_only=True,

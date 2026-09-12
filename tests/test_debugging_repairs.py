@@ -1,9 +1,397 @@
 from __future__ import annotations
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.formula import ArrayFormula
 
-from spreadsheet_harness.debugging_repairs import detect_debugging_repair_candidates
+from spreadsheet_harness.debugging_repairs import (
+    detect_debugging_repair_candidates,
+    repair_broken_sheet_qualifiers,
+    restore_deleted_scenario_selector_row,
+    restore_missing_rate_driver_rows,
+    repair_semantic_broken_references,
+    restore_structural_error_rows,
+    restore_missing_assumption_rows,
+)
+
+
+def test_deleted_scenario_selector_row_is_inferred_across_layout_offsets() -> None:
+    for offset in (0, 7):
+        workbook = Workbook()
+        scenario = workbook.active
+        scenario.title = "Scenario Engine"
+        for row in (offset + 1, offset + 2):
+            for column in range(5, 8):
+                scenario.cell(row, column).value = row * column
+        content_row = offset + 5
+        inserted_at = content_row - 1
+        active_row = offset + 10
+        scenario.cell(content_row, 4).value = '="Acquisition Target"'
+        scenario.cell(active_row, 4).value = "Active Case"
+        broken_rows = (offset + 12, offset + 15, offset + 18)
+        for row in broken_rows:
+            scenario.cell(row, 5).value = f"=CHOOSE(#REF!,H{row},I{row},J{row})"
+        links = workbook.create_sheet("Summary")
+        links["B3"] = f"='Scenario Engine'!E{broken_rows[0]}"
+
+        actions = restore_deleted_scenario_selector_row(
+            workbook,
+            instruction=(
+                "Please restore deleted rows. The model uses 3 scenario cases. "
+                "The active scenario case selector value is 2."
+            ),
+        )
+
+        assert len(actions) == 1
+        assert actions[0]["sheet"] == "Scenario Engine"
+        assert actions[0]["target"] == f"{inserted_at}:{inserted_at}"
+        assert scenario.cell(inserted_at, 4).value == "Case"
+        assert scenario.cell(inserted_at, 5).value == 2
+        assert scenario.cell(content_row + 1, 4).value == '="Acquisition Target"'
+        for old_row in broken_rows:
+            new_row = old_row + 1
+            assert scenario.cell(new_row, 5).value == (
+                f"=CHOOSE($E${inserted_at},H{new_row},I{new_row},J{new_row})"
+            )
+        assert links["B3"].value == f"='Scenario Engine'!E{broken_rows[0] + 1}"
+        workbook.close()
+
+
+def test_deleted_scenario_selector_row_fails_closed_without_explicit_structure_task() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["D10"] = "Active Case"
+    for row in (12, 15, 18):
+        worksheet.cell(row, 5).value = f"=CHOOSE(#REF!,H{row},I{row},J{row})"
+
+    assert (
+        restore_deleted_scenario_selector_row(
+            workbook,
+            instruction="Please audit this scenario model thoroughly.",
+        )
+        == []
+    )
+    workbook.close()
+
+
+def test_broken_sheet_qualifier_repair_requires_a_unique_inventory_match() -> None:
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Summary"
+    workbook.create_sheet("North Ops")
+    workbook.create_sheet("North Plan")
+    summary["C7"] = "='[1]North 0ps'!D9+'North Ops'!D10"
+    summary["C8"] = "='[Budget.xlsx]North Ops'!D9"
+    summary["C9"] = "='North'!D9"
+
+    actions = repair_broken_sheet_qualifiers(
+        workbook,
+        instruction="Fix broken cross-sheet references and typos in sheet names.",
+    )
+
+    assert len(actions) == 1
+    assert summary["C7"].value == "='North Ops'!D9+'North Ops'!D10"
+    assert summary["C8"].value == "='[Budget.xlsx]North Ops'!D9"
+    assert summary["C9"].value == "='North'!D9"
+    workbook.close()
+
+
+def test_broken_sheet_qualifier_repair_is_instruction_gated() -> None:
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Summary"
+    workbook.create_sheet("Operations")
+    summary["B2"] = "='0perations'!C4"
+
+    assert repair_broken_sheet_qualifiers(workbook, instruction="Audit formulas.") == []
+    assert summary["B2"].value == "='0perations'!C4"
+    workbook.close()
+
+
+def test_broken_sheet_qualifier_repair_accepts_wrong_sheet_name_wording() -> None:
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Summary"
+    workbook.create_sheet("Financial Performance")
+    summary["C7"] = "='[1]Financial Perf'!D9"
+
+    actions = repair_broken_sheet_qualifiers(
+        workbook,
+        instruction="Fix wrong sheet name references and cascading errors.",
+    )
+
+    assert len(actions) == 1
+    assert summary["C7"].value == "='Financial Performance'!D9"
+    workbook.close()
+
+
+def test_structural_error_row_uses_component_and_cross_sheet_witnesses() -> None:
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "Overview"
+    overview["B4"] = "Energy"
+    overview["B5"] = "% Growth"
+    overview["B6"] = "Engineering"
+    overview["B7"] = "% Growth"
+    overview["B8"] = "% Growth"
+    overview["C4"] = 10
+    overview["D4"] = 12
+    overview["C6"] = 3
+    overview["D6"] = 4
+    overview["C8"] = "=(#REF!/#REF!)-1"
+    model = workbook.create_sheet("Model")
+    model["B10"] = "Total Contract Revenue"
+    model["C10"] = "='Overview'!#REF!"
+
+    actions = restore_structural_error_rows(
+        workbook,
+        instruction="Audit deleted rows and broken #REF! references.",
+    )
+
+    assert len(actions) == 1
+    assert overview["B8"].value == "Total Contract Revenue"
+    assert overview["C8"].value == "=SUM(C4,C6)"
+    assert overview["D8"].value == "=SUM(D4,D6)"
+    assert model["C10"].value == "='Overview'!#REF!"
+    workbook.close()
+
+
+def test_structural_error_row_fails_closed_without_unique_witness() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["B4"] = "Energy"
+    worksheet["B5"] = "% Growth"
+    worksheet["B6"] = "Engineering"
+    worksheet["B7"] = "% Growth"
+    worksheet["B8"] = "% Growth"
+    worksheet["C8"] = "=(#REF!/#REF!)-1"
+    model = workbook.create_sheet("Model")
+    model["B10"] = "One"
+    model["C10"] = "='Sheet'!#REF!"
+    model["B11"] = "Two"
+    model["C11"] = "='Sheet'!#REF!"
+
+    assert restore_structural_error_rows(
+        workbook,
+        instruction="Audit deleted rows and broken #REF! references.",
+    ) == []
+    workbook.close()
+
+
+def test_missing_assumption_row_uses_parallel_control_block_and_formula_witness() -> None:
+    workbook = Workbook()
+    dcf = workbook.active
+    dcf.title = "DCF"
+    dcf["B8"] = "Effective Tax Rate"
+    dcf["C8"] = "=WACC!C17"
+    dcf["B9"] = "Terminal Value Growth Rate"
+    dcf["C9"] = "=Assumptions!C10"
+    dcf["E9"] = "Total Revenue"
+    dcf["I29"] = "=I26/(1+#REF!)^I2"
+    dcf["R27"] = "=R26*(1+C9)/(#REF!-C9)"
+    wacc = workbook.create_sheet("WACC")
+    wacc["B22"] = "WACC"
+    wacc["C22"] = 0.08
+    assumptions = workbook.create_sheet("Assumptions")
+    assumptions["B10"] = "Terminal Value Growth Rate"
+    assumptions["C10"] = 0.02
+
+    actions = restore_missing_assumption_rows(
+        workbook,
+        instruction="Audit deleted rows and repair #REF! formulas.",
+    )
+
+    assert len(actions) == 1
+    assert dcf["B9"].value == "WACC"
+    assert dcf["C9"].value == "=WACC!C22"
+    assert dcf["B10"].value == "Terminal Value Growth Rate"
+    assert dcf["I29"].value == "=I26/(1+$C$9)^I2"
+    assert dcf["R27"].value == "=R26*(1+C10)/(C9-C10)"
+    workbook.close()
+
+
+def test_margin_denominator_reanchors_after_structural_insertion() -> None:
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "Overview"
+    overview["B3"] = "Energy"
+    overview["B4"] = "% Growth"
+    overview["B5"] = "Engineering"
+    overview["B6"] = "% Growth"
+    overview["B7"] = "% Growth"
+    overview["B8"] = "Total Net Revenue"
+    overview["B9"] = "Gross Profit"
+    overview["B10"] = "% Margin (Contract Rev.)"
+    overview["C3"] = 10
+    overview["C5"] = 3
+    overview["C7"] = "=(#REF!/#REF!)-1"
+    overview["C9"] = 5
+    overview["C10"] = "=C9/C11"
+    model = workbook.create_sheet("Model")
+    model["B12"] = "Total Contract Revenue"
+    model["C12"] = "='Overview'!#REF!"
+
+    actions = restore_structural_error_rows(
+        workbook,
+        instruction="Audit deleted rows and broken #REF! references.",
+    )
+    assert actions
+    repair_semantic_broken_references(
+        workbook,
+        instruction="Audit deleted rows and broken #REF! references.",
+    )
+    assert overview["C11"].value == "=C10/C7"
+    workbook.close()
+
+
+def test_missing_rate_driver_row_uses_unique_curve_header_and_years() -> None:
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "Model"
+    model["B10"] = "Debt Schedule"
+    model["B12"] = "Revolver"
+    model["B16"] = "Interest"
+    model["J16"] = "=SUM($I16,#REF!)*AVERAGE(J13,J15)"
+    model["K16"] = "=SUM($I16,#REF!)*AVERAGE(K13,K15)"
+    model["L16"] = "=SUM($I16,#REF!)*AVERAGE(L13,L15)"
+    model["B20"] = "Interest"
+    model["J20"] = "=SUM($I20,#REF!)*AVERAGE(J17,J19)"
+    model["K20"] = "=SUM($I20,#REF!)*AVERAGE(K17,K19)"
+    model["L20"] = "=SUM($I20,#REF!)*AVERAGE(L17,L19)"
+    model["B5"] = "Fiscal Year"
+    model["J5"] = 2026
+    model["K5"] = "=J5+1"
+    model["L5"] = "=K5+1"
+    curve = workbook.create_sheet("3-month Term SOFR")
+    curve["P9"] = "3-month Term SOFR"
+    curve["O10"] = 2026
+    curve["O11"] = 2027
+    curve["O12"] = 2028
+    curve["P10"] = 0.03
+    curve["P11"] = 0.031
+    curve["P12"] = 0.032
+
+    actions = restore_missing_rate_driver_rows(
+        workbook,
+        instruction="Repair deleted rows and broken #REF! references.",
+    )
+
+    assert len(actions) == 1
+    assert model["B11"].value == "SOFR"
+    assert model["J11"].value == "='3-month Term SOFR'!P10"
+    assert model["J17"].value == "=SUM($I17,J$11)*AVERAGE(J14,J16)"
+    workbook.close()
+
+
+def test_semantic_broken_reference_uses_source_label_and_aggregate_row() -> None:
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "Model"
+    model["B2"] = "Total Revenue"
+    model["C2"] = "='Overview'!#REF!"
+    overview = workbook.create_sheet("Overview")
+    overview["B4"] = "Energy"
+    overview["B6"] = "Engineering"
+    overview["B8"] = "Total Revenue"
+    overview["C8"] = "=SUM(C4,C6)"
+    model["C1"] = "=SUM(C5,C6)"
+    model["B3"] = "Gross Profit"
+    model["C3"] = "=#REF!-10"
+
+    actions = repair_semantic_broken_references(
+        workbook,
+        instruction="Repair broken #REF! references after deleted rows.",
+    )
+
+    assert len(actions) == 2
+    assert model["C2"].value == "='Overview'!C8"
+    assert model["C3"].value == "=C1-10"
+    workbook.close()
+
+
+def test_semantic_broken_reference_uses_labelled_rate_row_for_weighted_formula() -> None:
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "Model"
+    model["B5"] = "SOFR"
+    model["J5"] = "='Curve'!P10"
+    model["I6"] = 0.04
+    model["I7"] = 0.08
+    overview = workbook.create_sheet("Overview")
+    overview["B2"] = "Total Debt"
+    overview["C2"] = "=((Model!I6+Model!#REF!)*Model!I7)"
+    actions = repair_semantic_broken_references(
+        workbook,
+        instruction="Repair broken #REF! references after a deleted row.",
+    )
+    assert len(actions) == 1
+    assert overview["C2"].value == "=((Model!I6+Model!J5)*Model!I7)"
+    workbook.close()
+
+
+def test_cross_sheet_semantics_align_entity_metric_and_header_columns() -> None:
+    workbook = Workbook()
+    target = workbook.active
+    target.title = "Model"
+    source = workbook.create_sheet("Source")
+    source["A1"] = "Source table"
+    source["B4"] = "Treasury"
+    source["C4"] = "Expected"
+    source["B5"] = "Yields"
+    source["C5"] = "Inflation"
+    source["A7"] = "Net income"
+    source["B7"] = 8
+    source["A8"] = "Operating income"
+    source["B8"] = 10
+    source["C8"] = 20
+    source["A9"] = "Exploration"
+    source["B9"] = 2
+    source["A10"] = "Depreciation"
+    source["B10"] = 3
+    target["B2"] = "Terminal Value Growth Rate"
+    target["C2"] = "=+'Source'!B8"
+    target["B3"] = "EBITDAX"
+    target["C3"] = "='Source'!B7+'Source'!B9+'Source'!B10"
+    target["B4"] = "Occidental"
+    source["D4"] = "Chevron"
+    source["E4"] = "Occidental"
+    source["E8"] = 30
+    target["C4"] = "='Source'!D8"
+
+    candidates = detect_debugging_repair_candidates(
+        workbook,
+        task_hint="Incorrect Cross Sheet References_input.xlsx",
+        max_candidates=10_000,
+    )
+    observed = {(item.cell, item.kind, item.replacement) for item in candidates}
+    assert ("C2", "cross_sheet_semantic_alignment", "=+'Source'!C8") in observed
+    assert ("C3", "cross_sheet_semantic_alignment", "='Source'!B8+'Source'!B9+'Source'!B10") in observed
+    assert ("C4", "cross_sheet_semantic_alignment", "='Source'!E8") in observed
+    workbook.close()
+
+
+def test_cross_sheet_parallel_block_requires_repeated_source_witness() -> None:
+    workbook = Workbook()
+    target = workbook.active
+    target.title = "Model"
+    source = workbook.create_sheet("WACC")
+    source["C22"] = 0.08
+    source["D22"] = 0.09
+    target["B2"] = "WACC"
+    target["C2"] = "=WACC!$D$22"
+    target["J2"] = "WACC"
+    target["K2"] = "=WACC!C22"
+    candidates = detect_debugging_repair_candidates(
+        workbook,
+        task_hint="Incorrect Cross Sheet References_input.xlsx",
+        max_candidates=500,
+    )
+    assert any(
+        item.cell == "C2"
+        and item.kind == "cross_sheet_parallel_block"
+        and item.replacement == "=WACC!$C$22"
+        for item in candidates
+    )
+    workbook.close()
 
 
 def test_incorrect_average_candidates_are_exact_and_task_gated() -> None:
@@ -21,6 +409,23 @@ def test_incorrect_average_candidates_are_exact_and_task_gated() -> None:
     assert any(item.cell == "D3" and item.replacement == "=AVERAGE(360,365)" for item in candidates)
     assert any(item.cell == "C3" and item.replacement == "=AVERAGE(C1:C3)" for item in candidates)
     assert all(item.target.startswith("'Model'!") for item in candidates)
+
+
+def test_embedded_hardcode_sparse_label_scan_does_not_mutate_iterator() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["A3"] = "Interest expense"
+    worksheet["D3"] = "=B3*0.04"
+    worksheet["C5"] = 0.04
+
+    candidates = detect_debugging_repair_candidates(
+        workbook,
+        task_hint="Embedded Hardcodes_input.xlsx",
+        max_candidates=500,
+    )
+
+    assert isinstance(candidates, list)
 
 
 def test_average_candidates_cover_whole_range_shift_and_neighbor_translation() -> None:
@@ -47,6 +452,31 @@ def test_average_candidates_cover_whole_range_shift_and_neighbor_translation() -
         and item.replacement == "=AVERAGE(C3:D3)"
         for item in candidates
     )
+
+
+def test_average_vertical_period_windows_extend_only_with_repeated_source_boundaries() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    source = workbook.create_sheet("SOFR")
+    for row in range(8, 68):
+        source.cell(row, 3).value = float(row)
+    worksheet["Q52"] = "=AVERAGE('SOFR'!C8:C18)"
+    worksheet["R52"] = "=AVERAGE('SOFR'!C20:C30)"
+    worksheet["S52"] = "=AVERAGE('SOFR'!C32:C42)"
+    worksheet["T52"] = "=AVERAGE('SOFR'!C44:C54)"
+    worksheet["U52"] = "=AVERAGE('SOFR'!C56:C66)"
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Incorrect Average_input.xlsx", max_candidates=500
+    )
+    observed = {
+        (item.cell, item.kind, item.replacement)
+        for item in candidates
+        if item.kind == "average_vertical_period_extension"
+    }
+    assert ("Q52", "average_vertical_period_extension", "=AVERAGE('SOFR'!C8:C19)") in observed
+    assert ("U52", "average_vertical_period_extension", "=AVERAGE('SOFR'!C56:C67)") in observed
 
 
 def test_average_context_excludes_blank_and_subject_company() -> None:
@@ -349,6 +779,128 @@ def test_embedded_hardcode_candidate_restores_flat_forecast_chain() -> None:
     )
 
 
+def test_double_counting_peer_translation_removes_all_repeated_terms() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Operating Model + DCF"
+    worksheet["N28"] = "=N20-N23-N23-N26"
+    worksheet["O28"] = "=O20-O26"
+    worksheet["P28"] = "=P20-P26"
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Double Counting_input.xlsx", max_candidates=500
+    )
+
+    assert any(
+        item.cell == "N28"
+        and item.kind == "double_count_peer_translation"
+        and item.replacement == "=N20-N26"
+        for item in candidates
+    )
+
+
+def test_double_counting_peer_translation_requires_duplicate_signal() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["N28"] = "=N20-N23-N26"
+    worksheet["O28"] = "=O20-O26"
+    worksheet["P28"] = "=P20-P26"
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Double Counting_input.xlsx", max_candidates=500
+    )
+
+    assert not any(
+        item.cell == "N28" and item.kind == "double_count_peer_translation"
+        for item in candidates
+    )
+
+
+def test_embedded_hardcode_semantic_valuation_links_use_workbook_labels() -> None:
+    workbook = load_workbook(
+        "benchmarks/data/spreadsheetbench-v2/Debugging/spreadsheet/08_Debugging/input_files/Embedded Hardcodes_input.xlsx",
+        data_only=False,
+    )
+    try:
+        candidates = detect_debugging_repair_candidates(
+            workbook, task_hint="Embedded Hardcodes_input.xlsx", max_candidates=10_000
+        )
+    finally:
+        workbook.close()
+    observed = {(item.sheet, item.cell, item.kind, item.replacement) for item in candidates}
+    assert (
+        "Operating Model + DCF",
+        "C108",
+        "embedded_exit_ebitda_multiple",
+        "=INDEX('Comps + WACC'!H4:H12,MATCH(\"Median\",'Comps + WACC'!B4:B12,0))",
+    ) in observed
+    assert (
+        "Operating Model + DCF",
+        "C113",
+        "embedded_net_debt_lookup",
+        "=INDEX('Comps + WACC'!C39:C41,MATCH(\"Net Debt\",'Comps + WACC'!B39:B41,0))",
+    ) in observed
+    assert (
+        "Revenue Build",
+        "S6",
+        "embedded_forecast_case_link",
+        "=S29",
+    ) in observed
+
+
+def test_embedded_hardcode_candidate_shifts_absolute_source_entity_column() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Merger Model"
+    worksheet["B42"] = "Stock Price"
+    worksheet["C42"] = 62.4
+    worksheet["D42"] = "='Exhibit 8b'!$C$14"
+    exhibit = workbook.create_sheet("Exhibit 8b")
+    exhibit["B14"] = 62.36000061035156
+    exhibit["C14"] = 63.9900016784668
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Embedded Hardcode_input.xlsx", max_candidates=500
+    )
+
+    assert any(
+        item.cell == "C42"
+        and item.kind == "embedded_absolute_source_column"
+        and item.replacement == "='Exhibit 8b'!$B$14"
+        for item in candidates
+    )
+
+
+def test_embedded_hardcode_candidate_reuses_label_aligned_literal_reference() -> None:
+    workbook = Workbook()
+    synergies = workbook.active
+    synergies.title = "Synergies"
+    synergies["B11"] = "(x) OXY Share Price"
+    synergies["D10"] = "='Exhibit 6'!$D$33"
+    synergies["D11"] = 62.4
+    synergies["D12"] = "=D9*D10*D11"
+    merger = workbook.create_sheet("Merger Model")
+    merger["B42"] = "Stock Price"
+    merger["C42"] = 62.4
+    merger["D42"] = "='Exhibit 8b'!$C$14"
+    exhibit = workbook.create_sheet("Exhibit 8b")
+    exhibit["B14"] = 62.36000061035156
+    exhibit["C14"] = 63.9900016784668
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Embedded Hardcode_input.xlsx", max_candidates=500
+    )
+
+    assert any(
+        item.sheet == "Synergies"
+        and item.cell == "D11"
+        and item.kind == "embedded_shared_literal_reference"
+        and item.replacement == "='Exhibit 8b'!$B$14"
+        for item in candidates
+    )
+
+
 def test_embedded_formula_literal_candidate_links_same_column_assumption() -> None:
     workbook = Workbook()
     worksheet = workbook.active
@@ -475,10 +1027,14 @@ def test_double_counting_candidates_use_financial_subtotal_labels() -> None:
     worksheet["B69"] = "Net Income"
     worksheet["B158"] = "Cash Interest"
     worksheet["B175"] = "Total Interest"
+    worksheet["H46"] = "Revolver Interest Expense"
+    worksheet["H54"] = "Ending Balance"
     worksheet["G64"] = "=G57-G62"
     worksheet["G66"] = "=+G57+G75"
     worksheet["G69"] = "=+SUM(G64:G68)"
     worksheet["G175"] = "=+G136+G137+G145+G152+G158"
+    worksheet["J54"] = "=SUM(J51:J53)"
+    worksheet["K54"] = "=SUM(K51:K53)+J46"
 
     candidates = detect_debugging_repair_candidates(
         workbook, task_hint="Double Counting_input.xlsx", max_candidates=500
@@ -502,6 +1058,64 @@ def test_double_counting_candidates_use_financial_subtotal_labels() -> None:
         and item.replacement == "=+G136+G137+G145+G152"
         for item in candidates
     )
+    assert any(
+        item.cell == "K54"
+        and item.kind == "double_count_rollforward_interest"
+        and item.replacement == "=SUM(K51:K53)"
+        for item in candidates
+    )
+
+
+def test_double_counting_candidates_remove_cross_row_fee_reuse() -> None:
+    workbook = Workbook()
+    lbo = workbook.active
+    lbo.title = "LBO"
+    bridge = workbook.create_sheet("Valuation Bridge")
+    projected = workbook.create_sheet("Projected IS")
+    lbo["B13"] = "Transaction Fees"
+    lbo["C13"] = 110
+    lbo["B15"] = "Minimum Cash Balance"
+    lbo["C15"] = 20
+    lbo["E14"] = "Excess Cash"
+    lbo["F14"] = "=C10-C15-C13"
+    lbo["E20"] = "Transaction Fees"
+    lbo["F20"] = "=+C13"
+    lbo["H13"] = "EBITDA"
+    lbo["J13"] = "=+'Projected IS'!D29+'Projected IS'!D32"
+    projected["B29"] = "EBITDA"
+    projected["B32"] = "Depreciation and amortization"
+    bridge["B3"] = "Starting Equity"
+    bridge["C3"] = "=LBO!F15-LBO!C13"
+    bridge["B4"] = "Transaction Fees"
+    bridge["C4"] = "=-LBO!C13"
+    bridge["B8"] = "Exit Equity"
+    bridge["C8"] = "=SUM(C3:C7)"
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Double Counting_input.xlsx", max_candidates=500
+    )
+    observed = {
+        (item.sheet, item.cell, item.kind, item.replacement) for item in candidates
+    }
+
+    assert (
+        "LBO",
+        "F14",
+        "double_count_fee_in_cash",
+        "=C10-C15",
+    ) in observed
+    assert (
+        "Valuation Bridge",
+        "C3",
+        "double_count_cross_row_component",
+        "=LBO!F15",
+    ) in observed
+    assert (
+        "LBO",
+        "J13",
+        "double_count_embedded_subtotal_component",
+        "=+'Projected IS'!D29",
+    ) in observed
 
 
 def test_double_counting_candidate_expands_verified_cross_sheet_total() -> None:
@@ -613,7 +1227,9 @@ def test_cross_sheet_candidates_use_matching_source_row_label() -> None:
     target["B15"] = "EBITDA"
     target["C15"] = "='Income Statement'!J23"
     source["B23"] = "Revenue"
+    source["J23"] = "=1"
     source["B25"] = "EBITDA"
+    source["J25"] = "=2"
 
     candidates = detect_debugging_repair_candidates(
         workbook, task_hint="Incorrect Cross Sheet References_input.xlsx", max_candidates=500
@@ -623,6 +1239,28 @@ def test_cross_sheet_candidates_use_matching_source_row_label() -> None:
         item.cell == "C15"
         and item.kind == "cross_sheet_label_alignment"
         and item.replacement == "='Income Statement'!J25"
+        for item in candidates
+    )
+
+
+def test_cross_sheet_candidates_keep_an_equally_specific_existing_label() -> None:
+    workbook = Workbook()
+    target = workbook.active
+    target.title = "Cash Flow"
+    source = workbook.create_sheet("Income Statement")
+    target["B14"] = "Net Income"
+    target["D14"] = "='Income Statement'!J37"
+    source["B37"] = "Net Income to Company"
+    source["J37"] = "=1"
+    source["B39"] = "Net Income to Common Shareholders"
+    source["J39"] = "=2"
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Incorrect Cross Sheet References_input.xlsx", max_candidates=500
+    )
+
+    assert not any(
+        item.cell == "D14" and item.kind == "cross_sheet_label_alignment"
         for item in candidates
     )
 
@@ -660,6 +1298,96 @@ def test_index_match_candidates_cover_exact_mode_and_source_whitespace() -> None
     assert any(
         item.kind == "index_match_exact_label" and 'MATCH("  10 Years"' in item.replacement
         for item in candidates
+    )
+
+
+def test_index_match_candidate_skips_repeated_blank_spacer_before_data() -> None:
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "WACC"
+    source = workbook.create_sheet("Exhibit 6")
+    for row, label in enumerate(("Debt", "Equity", "MV Leverage (%)"), start=7):
+        source.cell(row, 2).value = label
+        source.cell(row, 3).value = None
+        source.cell(row, 4).value = row / 10
+    model["C7"] = (
+        "=INDEX('Exhibit 6'!C:C,MATCH(\"MV Leverage (%)\",'Exhibit 6'!B:B,0))"
+    )
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Incorrect Index Match_input.xlsx", max_candidates=500
+    )
+
+    assert any(
+        item.cell == "C7"
+        and item.kind == "index_return_column_after_blank_spacer"
+        and item.replacement
+        == "=INDEX('Exhibit 6'!D:D,MATCH(\"MV Leverage (%)\",'Exhibit 6'!B:B,0))"
+        for item in candidates
+    )
+
+
+def test_index_match_candidate_keeps_populated_adjacent_return_column() -> None:
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "WACC"
+    source = workbook.create_sheet("Exhibit 6")
+    for row, label in enumerate(("Debt", "Equity", "MV Leverage (%)"), start=7):
+        source.cell(row, 2).value = label
+        source.cell(row, 3).value = row / 20
+        source.cell(row, 4).value = row / 10
+    model["C7"] = (
+        "=INDEX('Exhibit 6'!C:C,MATCH(\"MV Leverage (%)\",'Exhibit 6'!B:B,0))"
+    )
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Incorrect Index Match_input.xlsx", max_candidates=500
+    )
+
+    assert not any(
+        item.cell == "C7" and item.kind == "index_return_column_after_blank_spacer"
+        for item in candidates
+    )
+
+
+def test_index_match_semantic_alignment_uses_metric_labels_and_header_span() -> None:
+    workbook = Workbook()
+    lbo = workbook.active
+    lbo.title = "Ex 1 - LBO"
+    source = workbook.create_sheet("Ex 4 - Organic Operating Model")
+    for column, year in enumerate(range(2022, 2031), start=3):
+        source.cell(1, column).value = year
+        source.cell(18, column).value = column
+        source.cell(40, column).value = column * 10
+    source["B18"] = "Total Revenue"
+    source["B40"] = "Adjusted EBITDA"
+    lbo["P1"] = 2025
+    lbo["O17"] = "Total Revenue"
+    lbo["P17"] = (
+        "=INDEX('Ex 4 - Organic Operating Model'!C14:K18,"
+        "MATCH(P1-1,'Ex 4 - Organic Operating Model'!C1:K1,0))"
+    )
+    lbo["B17"] = "Entry EBITDA - FY2025"
+    lbo["C17"] = (
+        "=INDEX('Ex 4 - Organic Operating Model'!D40:K40,"
+        "MATCH(2025,'Ex 4 - Organic Operating Model'!C1:K1,0))"
+    )
+
+    candidates = detect_debugging_repair_candidates(
+        workbook, task_hint="Incorrect Index Match_input.xlsx", max_candidates=500
+    )
+    semantic = {
+        item.cell: item.replacement
+        for item in candidates
+        if item.kind == "index_semantic_alignment"
+    }
+    assert semantic["P17"] == (
+        "=INDEX('Ex 4 - Organic Operating Model'!C18:K18,"
+        "MATCH(P1,'Ex 4 - Organic Operating Model'!C1:K1,0))"
+    )
+    assert semantic["C17"] == (
+        "=INDEX('Ex 4 - Organic Operating Model'!C40:K40,"
+        "MATCH(2025,'Ex 4 - Organic Operating Model'!C1:K1,0))"
     )
 
 

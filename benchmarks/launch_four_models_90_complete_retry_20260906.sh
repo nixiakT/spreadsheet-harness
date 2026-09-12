@@ -22,10 +22,10 @@ from pathlib import Path
 out = Path(sys.argv[1])
 data = Path("benchmarks/data/spreadsheetbench-v2")
 tasks = []
-for cat in ("Debugging", "Financial_Model", "Template"):
+for cat in ("Debugging", "Financial_Model", "Template", "Visualization"):
     rows = json.loads((data / cat / "dataset.json").read_text())
-    tasks += [f"{cat}/{str(r.get('id') or r.get('task_id'))}" for r in sorted(rows, key=lambda r: str(r.get('id') or r.get('task_id')))[:30]]
-(out / "canonical_90_task_ids.txt").write_text("\n".join(tasks) + "\n")
+    tasks += [f"{cat}/{str(r.get('id') or r.get('task_id'))}" for r in sorted(rows, key=lambda r: str(r.get('id') or r.get('task_id')))]
+(out / "canonical_v2_task_ids.txt").write_text("\n".join(tasks) + "\n")
 arms = ["bare", "spreadsheet-harness-basic", "spreadsheet-harness-financial"]
 sources = {
  "deepseek-v4-flash": [Path("benchmarks/results/deepseek-v4-flash-30-4arm-20260904"), Path("benchmarks/results/four-models-90-3arm-fixed-20260906-rerun/deepseek-v4-flash"), Path("benchmarks/results/four-models-90-complete-retry-20260906/deepseek-v4-flash"), Path("benchmarks/results/four-models-90-complete-retry-20260906-r2/deepseek-v4-flash"), Path("benchmarks/results/four-models-90-complete-retry-20260906-r3/deepseek-v4-flash"), Path("benchmarks/results/four-models-90-complete-retry-20260906-r4/deepseek-v4-flash")],
@@ -34,8 +34,11 @@ sources = {
  "glm52": [Path("benchmarks/results/spreadsheetbench-v2-glm52-nothinking-30-4arm-20260904"), Path("benchmarks/results/spreadsheetbench-v2-glm52-nothinking-remaining-parallel-20260904"), Path("benchmarks/results/spreadsheetbench-v2-glm52-nothinking-30-4arm-timeout-retry-20260904"), Path("benchmarks/results/four-models-90-3arm-fixed-20260906-rerun/glm52"), Path("benchmarks/results/four-models-90-complete-retry-20260906/glm52"), Path("benchmarks/results/four-models-90-complete-retry-20260906-r2/glm52"), Path("benchmarks/results/four-models-90-complete-retry-20260906-r3/glm52"), Path("benchmarks/results/four-models-90-complete-retry-20260906-r4/glm52")],
 }
 sources["minimax-m2.7"].append(Path("benchmarks/results/four-models-90-complete-retry-20260906-r5/minimax-m2.7"))
+sources["minimax-m2.7"].append(Path("benchmarks/results/four-models-90-complete-retry-20260906-r6/minimax-m2.7"))
 sources["glm52"].append(Path("benchmarks/results/four-models-90-complete-retry-20260906-r5/glm52"))
+sources["glm52"].append(Path("benchmarks/results/four-models-90-complete-retry-20260906-r6/glm52"))
 sources["kimi-k2.6"].append(Path("benchmarks/results/four-models-90-complete-retry-20260906-r5/kimi-k2.6"))
+sources["kimi-k2.6"].append(Path("benchmarks/results/four-models-90-complete-retry-20260906-r6/kimi-k2.6"))
 for slug, roots in sources.items():
     done = set()
     for root in roots:

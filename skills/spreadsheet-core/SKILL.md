@@ -16,6 +16,10 @@ Work on the smallest range that satisfies the instruction. Use the supplied prof
 
 ## Preserve intent
 
+- For completion tasks, treat every source cell that already contains a value or formula as
+  protected unless the instruction explicitly targets that populated cell. Fill only verified
+  target blanks; "complete" or "fill empty cells" does not mean filling decorative spacers,
+  unused forecast periods, headers, cover sheets, or every visually blank cell in the workbook.
 - Treat formulas, number formats, borders, fills, merged cells, hidden rows/columns, and tables as part of the answer.
 - Do not rebuild a sheet to make one local change. Avoid deleting rows or columns unless the instruction explicitly requires structural deletion.
 - Match nearby formatting by inspecting it first. Change only the requested properties with `code_interpreter`; do not replace an entire style when a narrower update is sufficient.
@@ -57,6 +61,14 @@ Any missing target, reference drift, Calc error, unexpected blank, or failed han
 ## Tool discipline
 
 - In the `ours` comparison arm, use only its fixed tool set: `code_interpreter`, `inspect_range`, `fill_formula`, `recalculate_and_read`, `render_workbook`, and `view_image`.
+- For a broad audit, ground the first edit with the official-compatible helper: print `sheet_harness.view_xlsx(mode="list")`, then print one bounded `sheet_harness.view_xlsx(sheet=<exact name>, ...)` window containing the suspected cells and their row labels. When deterministic evidence already supplies exact candidates, inspect that bounded window and make the supported edit in the same code call. Do not replace this with workbook-wide custom print loops.
+- For an Incorrect Cross Sheet References audit, compare both destination and source row labels plus
+  entity/period column headers before changing a link. Inspect every source term in a compound
+  formula; adjacent destination formulas may repeat the same bad source and therefore do not prove
+  correctness by themselves. In financial models, reconcile the actual identity as well as the
+  formula shape: terminal growth uses a long-term growth or expected-inflation assumption,
+  EBITDA/EBITDAX begins from operating income, and entity-specific shares or WACC must match the
+  destination entity header.
 - Use the managed code interpreter as the primary inspection and mutation path; `sheet_harness.save_workbook` records managed saves. Use `inspect_range` only for a bounded target check and `fill_formula` only for an already-verified adjacent pattern.
 - Use `recalculate_and_read` only when formula results matter. Use `render_workbook` followed by `view_image` only when the answer depends on layout or visual formatting.
 - Never access paths outside the run workspace or embed credentials in code, cells, logs, or responses.

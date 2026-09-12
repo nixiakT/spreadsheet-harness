@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import importlib.util
 import json
 import re
 import shutil
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -15,11 +17,12 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from .arms import postprocess_debugging_artifact, run_arm
+from .arms import _debugging_detector_hint, postprocess_debugging_artifact, run_arm
 from .benchmark import _atomic_write_json, _sha256
 from .budget import RunBudget
 from .config import ProviderConfig
 from .errors import AgentExecutionFailure, HarnessError
+from .openpyxl_compat import load_workbook as compat_load_workbook
 from .pacing import RelayPacer
 from .plugins import (
     ARM_COMPOSITIONS,
@@ -27,10 +30,16 @@ from .plugins import (
     CompositionSpec,
     default_plugin_registry,
 )
-from .openpyxl_compat import load_workbook as compat_load_workbook
-from .render import recalculate_workbook, restore_ooxml_cell_contents
+from .render import (
+    recalculate_workbook,
+    transplant_ooxml_formula_cached_values,
+)
 from .session import WorkbookSession
 from .skills import SkillRegistry
+from .spreadsheetbench_harbor import (
+    HARBOR_PROVENANCE_FILENAME,
+    normalize_spreadsheetbench_harbor,
+)
 
 SPREADSHEETBENCH_V2_DATASET_REVISION = "9dea60025792fbac5928ce9f44812362dccbeecd"
 SPREADSHEETBENCH_V2_ARCHIVE_SHA256 = (
@@ -82,8 +91,37 @@ def load_spreadsheetbench_v2_tasks(
     *,
     categories: Sequence[str] | None = None,
 ) -> list[SpreadsheetBenchV2Task]:
-    root = Path(dataset_root).expanduser().resolve(strict=True)
-    selected_categories = tuple(categories or SPREADSHEETBENCH_V2_CATEGORIES)
+    source = Path(dataset_root).expanduser().resolve(strict=True)
+    root = source
+    # The financial calibration releases are Harbor bundles rather than the
+    # flat category-root layout used by the official v2 archive.  Normalize
+    # them into a temporary canonical root so callers can use the same loader
+    # and evaluator without manually unpacking 269/1565 task directories.
+    harbor_directory = source.is_dir() and (
+        (source / "harbor_bundles").is_dir()
+        or any((child / "task.toml").is_file() for child in source.iterdir())
+    )
+    if source.is_file() or (
+        harbor_directory
+        and not any(
+            (source / category / "dataset.json").is_file()
+            for category in SPREADSHEETBENCH_V2_CATEGORIES
+        )
+    ):
+        destination = Path(tempfile.mkdtemp(prefix="spreadsheetbench-harbor-"))
+        root = normalize_spreadsheetbench_harbor(source, destination)
+        atexit.register(shutil.rmtree, destination, ignore_errors=True)
+    if not root.is_dir():
+        raise HarnessError(f"SpreadsheetBench 2 dataset root must be a directory: {source}")
+    if categories is None:
+        available_categories = tuple(
+            category
+            for category in SPREADSHEETBENCH_V2_CATEGORIES
+            if (root / category / "dataset.json").is_file()
+        )
+        selected_categories = available_categories or SPREADSHEETBENCH_V2_CATEGORIES
+    else:
+        selected_categories = tuple(categories)
     unknown = sorted(set(selected_categories) - set(SPREADSHEETBENCH_V2_CATEGORIES))
     if unknown:
         raise HarnessError("Unknown SpreadsheetBench 2 categories: " + ", ".join(unknown))
@@ -128,6 +166,37 @@ def load_spreadsheetbench_v2_tasks(
                 )
             )
     return tasks
+
+
+def _dataset_identity(source_root: Path) -> dict[str, Any]:
+    """Return auditable source identity for official and normalized datasets."""
+
+    if source_root.is_file():
+        return {
+            "name": source_root.name,
+            "revision": "harbor-financial-calibration-v1",
+            "format": "harbor-task-bundles-v1",
+            "archive_sha256": _sha256(source_root),
+        }
+    provenance_path = source_root / HARBOR_PROVENANCE_FILENAME
+    if provenance_path.is_file():
+        try:
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HarnessError(f"Invalid Harbor provenance: {provenance_path}") from exc
+        required = ("name", "revision", "format", "archive_sha256")
+        if not isinstance(provenance, dict) or not set(required).issubset(provenance):
+            raise HarnessError(f"Invalid Harbor provenance: {provenance_path}")
+        archive_sha256 = provenance["archive_sha256"]
+        if archive_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", archive_sha256):
+            raise HarnessError(f"Invalid Harbor archive digest: {provenance_path}")
+        return {key: provenance[key] for key in required}
+    return {
+        "name": "KAKA22/SpreadsheetBench-v2",
+        "revision": SPREADSHEETBENCH_V2_DATASET_REVISION,
+        "format": "spreadsheetbench-v2",
+        "archive_sha256": SPREADSHEETBENCH_V2_ARCHIVE_SHA256,
+    }
 
 
 def select_spreadsheetbench_v2_tasks(
@@ -204,80 +273,85 @@ def _official_score(
     return dict(result)
 
 
-def _restore_benchmark_regression_cells(
-    evaluator: ModuleType,
+def _parse_answer_position_segment(
+    segment: str,
+    *,
+    default_sheet: str,
+) -> tuple[str, str]:
+    if "!" in segment:
+        raw_sheet, raw_range = segment.split("!", 1)
+    else:
+        raw_sheet, raw_range = default_sheet, segment
+    sheet_name = raw_sheet.strip()
+    if len(sheet_name) >= 2 and sheet_name[0] == sheet_name[-1] == "'":
+        sheet_name = sheet_name[1:-1].replace("''", "'")
+    cell_range = raw_range.strip()
+    if len(cell_range) >= 2 and cell_range[0] == cell_range[-1] == "'":
+        cell_range = cell_range[1:-1]
+    return sheet_name, cell_range
+
+
+def _restore_unchanged_input_formula_caches(
     task: SpreadsheetBenchV2Task,
     output_workbook: Path,
 ) -> dict[str, Any]:
-    """Restore LibreOffice cache drift on cells classified as regressions.
+    """Restore input caches only where the submitted formula is unchanged.
 
-    SpreadsheetBench's debugging evaluator separates cells whose input already
-    matches the golden workbook (regressions) from cells intentionally mutated
-    by the task (modifications).  LibreOffice recalculation can change cached
-    values for otherwise untouched formulas, especially circular/data-table
-    models.  Restore only the former at the OOXML level so modified formulas
-    keep their freshly recalculated values and workbook structures remain
-    intact.
+    LibreOffice can rewrite cached values across an entire iterative workbook
+    while materializing one edited formula.  Preserve the source workbook's
+    cache for formula-equivalent cells without consulting answer positions or
+    the golden workbook.  Formula edits and non-formula cells remain untouched.
     """
 
     if task.category == "Visualization":
         return {"selected_cells": 0, "restored_cells": 0, "skipped": True}
     try:
-        source_name = str(task.source_row.get("spreadsheet_path", ""))
-        with_font_color = task.category == "Debugging" and "Color" in source_name
-        with_formula = task.category == "Debugging" and "Embedded" in source_name
-        wb_input = compat_load_workbook(task.input_path, data_only=not with_formula)
-        wb_answer = compat_load_workbook(task.golden_path, data_only=not with_formula)
-        wb_input_formula = wb_answer_formula = None
-        if not with_formula:
-            wb_input_formula = compat_load_workbook(task.input_path, data_only=False)
-            wb_answer_formula = compat_load_workbook(task.golden_path, data_only=False)
+        source = compat_load_workbook(task.input_path, data_only=False)
+        output = compat_load_workbook(output_workbook, data_only=False)
         selected: dict[str, set[str]] = {}
         try:
-            for segment in evaluator.parse_answer_position(task.answer_position):
-                if "!" in segment:
-                    sheet_name, cell_range = segment.split("!", 1)
-                else:
-                    sheet_name, cell_range = wb_answer.sheetnames[0], segment
-                sheet_name = sheet_name.strip("'").strip()
-                cell_range = cell_range.strip("'").strip()
-                regression, _ = evaluator.classify_cells_by_modification(
-                    wb_input,
-                    wb_answer,
-                    sheet_name,
-                    cell_range,
-                    with_font_color,
-                    with_formula,
-                    wb_input_formula=wb_input_formula,
-                    wb_answer_formula=wb_answer_formula,
-                )
-                if regression:
-                    selected.setdefault(sheet_name, set()).update(regression)
+
+            def normalize(value: Any) -> str:
+                if isinstance(value, str):
+                    normalized = "".join(value.split()).replace("=+", "=").upper()
+                    return normalized.replace(
+                        "COM.SUN.STAR.SHEET.ADDIN.ANALYSIS.GETXIRR(", "XIRR("
+                    ).replace(
+                        "COM.SUN.STAR.SHEET.ADDIN.ANALYSIS.GETXNPV(", "XNPV("
+                    )
+                if hasattr(value, "text"):
+                    return "ARRAY:" + normalize(str(getattr(value, "text", "")))
+                return repr(value)
+
+            for sheet_name in set(source.sheetnames) & set(output.sheetnames):
+                source_sheet = source[sheet_name]
+                output_sheet = output[sheet_name]
+                for source_cell in getattr(source_sheet, "_cells", {}).values():
+                    source_formula = source_cell.value
+                    source_text = getattr(source_formula, "text", source_formula)
+                    if not isinstance(source_text, str) or not source_text.startswith("="):
+                        continue
+                    output_formula = output_sheet[source_cell.coordinate].value
+                    output_text = getattr(output_formula, "text", output_formula)
+                    if not isinstance(output_text, str) or not output_text.startswith("="):
+                        continue
+                    if normalize(source_formula) == normalize(output_formula):
+                        selected.setdefault(sheet_name, set()).add(source_cell.coordinate)
         finally:
-            wb_input.close()
-            wb_answer.close()
-            if wb_input_formula is not None:
-                wb_input_formula.close()
-            if wb_answer_formula is not None:
-                wb_answer_formula.close()
-        selected_count = sum(len(cells) for cells in selected.values())
-        if not selected:
-            return {"selected_cells": 0, "restored_cells": 0, "skipped": False}
-        restored = restore_ooxml_cell_contents(
+            source.close()
+            output.close()
+        restored = transplant_ooxml_formula_cached_values(
             task.input_path,
             output_workbook,
+            exclude_data_table_formulas=False,
             selected_coordinates=selected,
-            minimum_changes=1,
         )
         return {
-            "selected_cells": selected_count,
+            "selected_cells": sum(len(cells) for cells in selected.values()),
             "restored_cells": restored,
             "skipped": False,
         }
     except Exception as exc:
-        # Preserve the original scoring path if a best-effort cache repair is
-        # unavailable for a legacy workbook.  The error is surfaced in the row
-        # metadata rather than turning a model result into infrastructure loss.
         return {
             "selected_cells": 0,
             "restored_cells": 0,
@@ -473,7 +547,7 @@ def _seal_interrupted_v2_row(
     manifest_sha256: str,
     model: str,
     max_model_calls: int,
-    max_total_tokens: int,
+    max_total_tokens: int | None,
     task_timeout_seconds: float,
 ) -> dict[str, Any]:
     run_dir = output / "runs" / task.category / task.item_id / arm
@@ -560,10 +634,10 @@ def run_spreadsheetbench_v2_comparison(
     tasks: Sequence[SpreadsheetBenchV2Task],
     arms: Sequence[str] = ("bare", "ours"),
     composition_overrides: Mapping[str, CompositionSpec] | None = None,
-    max_model_calls: int = 20,
-    max_turns_per_arm: int = 20,
-    max_total_tokens: int = 200_000,
-    max_output_tokens: int = 4_096,
+    max_model_calls: int = 50,
+    max_turns_per_arm: int = 50,
+    max_total_tokens: int | None = 200_000,
+    max_output_tokens: int | None = 4_096,
     task_timeout_seconds: float = 1_800,
     request_interval_seconds: float | None = None,
     arm_order_seed: int = 20_260_820,
@@ -599,7 +673,9 @@ def run_spreadsheetbench_v2_comparison(
         )
     if visual_generation_only and any(task.category != "Visualization" for task in tasks):
         raise HarnessError("Visual generation mode accepts only Visualization tasks")
-    root = Path(dataset_root).expanduser().resolve(strict=True)
+    source_root = Path(dataset_root).expanduser().resolve(strict=True)
+    if not source_root.is_dir() and not source_root.is_file():
+        raise HarnessError(f"SpreadsheetBench 2 dataset path is invalid: {source_root}")
     output = Path(output_dir).expanduser().resolve()
     if output.exists() and not resume:
         raise HarnessError(f"Fresh SpreadsheetBench 2 output already exists: {output}")
@@ -626,17 +702,20 @@ def run_spreadsheetbench_v2_comparison(
     }
     compositions = {arm: _composition_record(arm, specs[arm]) for arm in selected_arms}
     arm_orders = _balanced_arm_orders(tasks, arm_order_seed, selected_arms)
+    # Use the task-owned canonical category roots.  This also works when the
+    # caller supplied a Harbor archive and the loader materialized it into a
+    # temporary canonical root.
+    category_roots = {task.category: task.category_root for task in tasks}
     dataset_manifests = {
-        category: _sha256(root / category / "dataset.json")
-        for category in sorted({task.category for task in tasks})
+        category: _sha256(category_root / "dataset.json")
+        for category, category_root in sorted(category_roots.items())
     }
+    dataset_identity = _dataset_identity(source_root)
     manifest: dict[str, Any] = {
         "schema_version": SPREADSHEETBENCH_V2_MANIFEST_SCHEMA,
         "protocol": SPREADSHEETBENCH_V2_PROTOCOL,
         "dataset": {
-            "name": "KAKA22/SpreadsheetBench-v2",
-            "revision": SPREADSHEETBENCH_V2_DATASET_REVISION,
-            "archive_sha256": SPREADSHEETBENCH_V2_ARCHIVE_SHA256,
+            **dataset_identity,
             "dataset_json_sha256": dataset_manifests,
         },
         "official_evaluator": {
@@ -805,11 +884,18 @@ def run_spreadsheetbench_v2_comparison(
                         "Agent execution failure omitted auditable agent evidence"
                     ) from exc
                 execution_failure = exc
+            # Detection is workbook-local and safe to share with every arm for
+            # runner-level policies such as skipping LibreOffice on color-only
+            # repairs.  Only the harness arms apply the corresponding mutation
+            # postprocessor; ablation arms retain their own agent behavior.
+            debugging_hint = _debugging_detector_hint(
+                session.paths.input,
+                task.instruction,
+                task_category=task.category,
+            ) if task.category == "Debugging" else task.instruction
             if arm in {"ours", "spreadsheet-harness-basic"}:
-                postprocess_debugging_artifact(session, source_name=task.input_path.name)
-            color_only_debugging = "inconsistent color" in (
-                task.input_path.name.casefold().replace("_", " ")
-            )
+                postprocess_debugging_artifact(session, source_name=debugging_hint)
+            color_only_debugging = "inconsistent color" in debugging_hint.casefold()
             if visual_generation_only:
                 recalculation = {
                     "ok": True,
@@ -826,23 +912,27 @@ def run_spreadsheetbench_v2_comparison(
                 recalculation = recalculate_workbook(
                     session.workbook_path,
                     session.workbook_path,
+                    # Keep the untouched input workbook as a semantic seed.
+                    # LibreOffice/openpyxl can flatten one-cell CSE formulas
+                    # (and circular-formula caches need their pre-edit seed),
+                    # so recalculation must be able to restore only unchanged
+                    # source formula metadata without overwriting edited cells.
+                    cache_seed=session.paths.input,
                     timeout_seconds=min(120.0, task_timeout_seconds),
                 )
-            # LibreOffice is required to materialize values for edited formulas,
-            # but it also rewrites cached values in untouched cells.  Restore
-            # only official-evaluator regression cells from the original input;
-            # modification cells remain the freshly recalculated artifact.
+            # calculateAll() must remain the final value-producing operation.
+            # Formula-equivalent downstream cells can legitimately change when
+            # an edited assumption changes, so restoring their input caches
+            # would silently undo the dependency-consistent recalculation.
             if not visual_generation_only and not color_only_debugging:
-                recalculation["regression_cache_restore"] = _restore_benchmark_regression_cells(
-                    evaluator,
-                    task,
-                    session.workbook_path,
-                ) if evaluator is not None else {
-                    "selected_cells": 0,
-                    "restored_cells": 0,
-                    "skipped": True,
-                    "reason": "evaluator_unavailable",
-                }
+                recalculation["unchanged_input_formula_cache_restore"] = (
+                    {
+                        "selected_cells": 0,
+                        "restored_cells": 0,
+                        "skipped": True,
+                        "reason": "preserve_dependency_consistent_calculate_all_values",
+                    }
+                )
             used = budget.to_dict()["used"]
             if visual_generation_only:
                 visual_dir = output / "visual_outputs" / arm
@@ -963,7 +1053,7 @@ def run_spreadsheetbench_v2_comparison(
         "schema_version": 1,
         "protocol": SPREADSHEETBENCH_V2_PROTOCOL,
         "manifest_sha256": manifest_sha256,
-        "dataset_revision": SPREADSHEETBENCH_V2_DATASET_REVISION,
+        "dataset_revision": str(manifest["dataset"]["revision"]),
         "official_evaluator_sha256": evaluator_sha256,
         "task_count": len(tasks),
         **summary_body,

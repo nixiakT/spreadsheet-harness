@@ -272,6 +272,35 @@ def test_evolution_generation_uses_and_records_provider_controls(tmp_path: Path)
     }
 
 
+def test_generation_can_omit_output_token_limits(tmp_path: Path) -> None:
+    trajectory = tmp_path / "trajectory.jsonl"
+    _write_trajectory(trajectory, [_row("benchmark.evaluated", {"passed": False})])
+    candidate_skill = (
+        "---\n"
+        "name: spreadsheet-core\n"
+        "description: Evidence-derived spreadsheet procedures.\n"
+        "---\n\n"
+        "# Workflow\n\nInspect and verify.\n"
+    )
+    client = FakeResponsesClient(["lesson", candidate_skill])
+
+    candidate = generate_candidate(
+        [trajectory],
+        tmp_path,
+        client,
+        candidate_id="unlimited-candidate",
+        lesson_max_output_tokens=None,
+        consolidation_max_output_tokens=None,
+    )
+
+    assert all("max_output_tokens" not in payload for payload in client.payloads)
+    provenance = json.loads(candidate.provenance_path.read_text(encoding="utf-8"))
+    assert provenance["output_limits"] == {
+        "lesson_max_output_tokens": None,
+        "consolidation_max_output_tokens": None,
+    }
+
+
 def test_generation_can_constrain_candidate_to_base_skill(tmp_path: Path) -> None:
     trajectory = tmp_path / "trajectory.jsonl"
     _write_trajectory(trajectory, [_row("benchmark.evaluated", {"passed": False})])

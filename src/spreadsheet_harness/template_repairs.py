@@ -620,6 +620,79 @@ def _complete_oid_zero_coupon(ws: Any, changes: list[dict[str, str]]) -> None:
         )
 
 
+def _complete_annual_subtotals(ws: Any, changes: list[dict[str, str]]) -> None:
+    """Fill an annual subtotal column from a neighboring period subtotal row.
+
+    Several templates leave a whole detail row blank while retaining the annual
+    subtotal column.  A nearby row such as ``H11=SUM(D11:G11)`` is an explicit
+    declaration of the period range; reuse that declaration only in columns
+    labelled FY/Annual and only when the detail cells contain model content.
+    Notes and underwriting columns therefore remain untouched.
+    """
+
+    max_row = int(ws.max_row or 0)
+    max_column = int(ws.max_column or 0)
+    for annual_column in range(1, max_column + 1):
+        headers = [
+            _norm(ws.cell(row, annual_column).value)
+            for row in range(1, min(10, max_row) + 1)
+            if ws.cell(row, annual_column).value is not None
+        ]
+        if not any(header.startswith("fy ") or header == "annual" for header in headers):
+            continue
+        declarations: set[tuple[int, int]] = set()
+        for row in range(1, max_row + 1):
+            value = ws.cell(row, annual_column).value
+            if not isinstance(value, str):
+                continue
+            match = re.fullmatch(
+                r"=SUM\(\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?\2\)",
+                value.replace(" ", ""),
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                continue
+            start_column = ws[f"{match.group(1)}1"].column
+            end_column = ws[f"{match.group(3)}1"].column
+            if end_column <= start_column:
+                continue
+            declarations.add((start_column, end_column))
+        for start_column, end_column in declarations:
+            for row in range(1, max_row + 1):
+                target = ws.cell(row, annual_column)
+                if target.value is not None:
+                    continue
+                if not any(
+                    ws.cell(row, column).value is not None
+                    for column in range(start_column, end_column + 1)
+                ):
+                    continue
+                row_label = " ".join(
+                    _norm(ws.cell(row, label_column).value)
+                    for label_column in range(1, min(start_column, 4))
+                    if ws.cell(row, label_column).value is not None
+                )
+                if "growth" in row_label:
+                    continue
+                if not any(
+                    isinstance(ws.cell(row, column).value, str)
+                    and ws.cell(row, column).value.startswith("=")
+                    for column in range(start_column, end_column + 1)
+                ):
+                    continue
+                if any(
+                    isinstance(ws.cell(row, column).value, str)
+                    and not ws.cell(row, column).value.startswith("=")
+                    for column in range(start_column, end_column + 1)
+                ):
+                    continue
+                formula = (
+                    f"=SUM({get_column_letter(start_column)}{row}:"
+                    f"{get_column_letter(end_column)}{row})"
+                )
+                _set_if_blank(ws, row, annual_column, formula, changes)
+
+
 def complete_template_schedules(path: str | Path) -> list[dict[str, str]]:
     """Apply only complete, label-matched template repairs and return an audit trail."""
 
@@ -643,6 +716,8 @@ def complete_template_schedules(path: str | Path) -> list[dict[str, str]]:
                 _complete_debt_waterfall(ws, changes)
             elif title == "oid bond":
                 _complete_oid_zero_coupon(ws, changes)
+        for ws in workbook.worksheets:
+            _complete_annual_subtotals(ws, changes)
         if changes:
             workbook.save(workbook_path)
     finally:

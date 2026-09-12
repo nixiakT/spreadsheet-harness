@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import io
 import json
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
 
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import AgentExecutionFailure, HarnessError
 from spreadsheet_harness.skills import SkillRegistry
 from spreadsheet_harness.spreadsheetbench_v2 import (
     DEFAULT_V2_EVALUATOR,
+    SpreadsheetBenchV2Task,
     _balanced_arm_orders,
     _load_official_evaluator,
     _official_score,
+    _parse_answer_position_segment,
+    _restore_unchanged_input_formula_caches,
     _seal_interrupted_v2_row,
     _summarize_results,
     audit_spreadsheetbench_v2_comparison,
@@ -45,6 +50,23 @@ def _workbook(path: Path, value: int) -> None:
     sheet["A2"] = "unchanged"
     workbook.save(path)
     workbook.close()
+
+
+def _set_formula_caches(path: Path, values: dict[str, str]) -> None:
+    def rewrite(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        for cell in root.findall(".//x:c", namespace):
+            coordinate = cell.attrib.get("r")
+            if coordinate not in values or cell.find("x:f", namespace) is None:
+                continue
+            cached = cell.find("x:v", namespace)
+            if cached is None:
+                cached = ET.SubElement(cell, f"{{{namespace['x']}}}v")
+            cached.text = values[coordinate]
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_zip_member(path, "xl/worksheets/sheet1.xml", rewrite)
 
 
 def _dataset(tmp_path: Path, category: str = "Template") -> Path:
@@ -78,6 +100,111 @@ def test_load_and_select_spreadsheetbench_v2_tasks(tmp_path: Path) -> None:
     assert [task.task_id for task in tasks] == ["Template/01_01"]
     assert select_spreadsheetbench_v2_tasks(tasks, ("01_01",)) == tasks
     assert select_spreadsheetbench_v2_tasks(tasks, ("Template/01_01",)) == tasks
+
+
+def test_answer_position_parser_preserves_quoted_sheet_whitespace() -> None:
+    assert _parse_answer_position_segment(
+        "'Ex 10 - Forecast Assumptions '!B2:H50",
+        default_sheet="Model",
+    ) == ("Ex 10 - Forecast Assumptions ", "B2:H50")
+
+
+def test_unchanged_formula_cache_restore_uses_input_without_golden(tmp_path: Path) -> None:
+    source = tmp_path / "input.xlsx"
+    output = tmp_path / "output.xlsx"
+    for path, second_formula in ((source, "=2+2"), (output, "=3+3")):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Model"
+        sheet["A1"] = "=1+1"
+        sheet["A2"] = second_formula
+        if path == output:
+            sheet["A1"].font = Font(bold=True)
+        workbook.save(path)
+        workbook.close()
+    _set_formula_caches(source, {"A1": "2", "A2": "4"})
+    _set_formula_caches(output, {"A1": "99", "A2": "6"})
+    task = SpreadsheetBenchV2Task(
+        category="Template",
+        item_id="01_01",
+        instruction="Update the model.",
+        category_root=tmp_path,
+        input_path=source,
+        golden_path=tmp_path / "missing-golden.xlsx",
+        answer_position="'Model'!A1:A2",
+        source_row={},
+    )
+
+    restored = _restore_unchanged_input_formula_caches(task, output)
+
+    assert restored == {"selected_cells": 1, "restored_cells": 1, "skipped": False}
+    formulas = load_workbook(output, data_only=False)
+    values = load_workbook(output, data_only=True)
+    try:
+        assert formulas["Model"]["A1"].value == "=1+1"
+        assert formulas["Model"]["A1"].font.bold is True
+        assert formulas["Model"]["A2"].value == "=3+3"
+        assert values["Model"]["A1"].value == 2
+        assert values["Model"]["A2"].value == 6
+    finally:
+        formulas.close()
+        values.close()
+
+
+def test_v2_runner_does_not_restore_formula_caches_after_calculate_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _dataset(tmp_path)
+    task = load_spreadsheetbench_v2_tasks(root, categories=("Template",))[0]
+
+    class Evidence:
+        def to_dict(self) -> dict[str, object]:
+            return {"observed_terminal_tool": "completed"}
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.spreadsheetbench_v2.run_arm",
+        lambda **_kwargs: Evidence(),
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.spreadsheetbench_v2.recalculate_workbook",
+        lambda *_args, **_kwargs: {"calculation_mode": "uno-calculate-all"},
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.spreadsheetbench_v2._restore_unchanged_input_formula_caches",
+        lambda *_args, **_kwargs: pytest.fail(
+            "dependency-consistent calculateAll caches must not be overwritten"
+        ),
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.spreadsheetbench_v2._official_score",
+        lambda *_args, **_kwargs: {
+            "accuracy": 1.0,
+            "modification_accuracy": 1.0,
+            "regression_accuracy": 1.0,
+        },
+    )
+
+    run_spreadsheetbench_v2_comparison(
+        config=ProviderConfig("https://example.test/v1", "secret", "test-model"),
+        dataset_root=root,
+        evaluator_path=DEFAULT_V2_EVALUATOR,
+        output_dir=tmp_path / "results-no-cache-restore",
+        skill_registry=SkillRegistry([]),
+        tasks=(task,),
+        arms=("ours",),
+        max_model_calls=1,
+        max_turns_per_arm=1,
+    )
+    rows = json.loads(
+        (tmp_path / "results-no-cache-restore" / "results.json").read_text()
+    )
+
+    assert rows[0]["recalculation"]["unchanged_input_formula_cache_restore"] == {
+        "selected_cells": 0,
+        "restored_cells": 0,
+        "skipped": True,
+        "reason": "preserve_dependency_consistent_calculate_all_values",
+    }
 
 
 def test_spreadsheetbench_v2_short_id_must_be_unambiguous(tmp_path: Path) -> None:
@@ -372,11 +499,18 @@ def test_v2_color_only_task_skips_libreoffice_recalculation(
     root = _dataset(tmp_path, category="Debugging")
     category_root = root / "Debugging"
     original = category_root / "spreadsheet" / "input.xlsx"
-    renamed = category_root / "spreadsheet" / "Inconsistent Color Coding_input.xlsx"
-    original.rename(renamed)
+    # Give the detector actual color-neighborhood evidence.  The task filename
+    # is intentionally generic: semantic routing must not depend on a hidden
+    # fixture label encoded in the basename.
+    workbook = load_workbook(original)
+    sheet = workbook.active
+    for row in range(1, 16):
+        sheet.cell(row, 2).value = f"=A{row}"
+        sheet.cell(row, 2).font = Font(color="7030A0" if row in {2, 5, 8, 11, 14} else "70AD47")
+    workbook.save(original)
+    workbook.close()
     manifest_path = category_root / "dataset.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest[0]["spreadsheet_path"] = "spreadsheet/Inconsistent Color Coding_input.xlsx"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     task = load_spreadsheetbench_v2_tasks(root, categories=("Debugging",))[0]
 

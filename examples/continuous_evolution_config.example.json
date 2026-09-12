@@ -1,0 +1,68 @@
+{
+  "schema_version": "continuous-plugin-evolution-config-v1",
+  "repository_root": ".",
+  "composition": "spreadsheet-harness-financial",
+  "groups": {
+    "harness": ["policy-ours", "profile-deterministic-compact", "verifier-formula-runtime"],
+    "domain": ["skill-spreadsheet-financial-model", "skill-spreadsheet-formula"]
+  },
+  "contexts": [
+    {
+      "name": "replay",
+      "kind": "replay",
+      "task_ids": ["Financial_Model/DEV-001"],
+      "workbook_families": ["financial-family-a"],
+      "weight": 1.0,
+      "runner": {"dataset": "benchmarks/data/spreadsheetbench-v2"}
+    },
+    {
+      "name": "transfer",
+      "kind": "transfer",
+      "task_ids": ["Financial_Model/DEV-002"],
+      "workbook_families": ["financial-family-b"],
+      "weight": 1.0,
+      "runner": {"dataset": "benchmarks/data/spreadsheetbench-v2"}
+    },
+    {
+      "name": "regression",
+      "kind": "regression",
+      "task_ids": ["Template/DEV-003"],
+      "workbook_families": ["template-family-c"],
+      "weight": 1.0,
+      "runner": {"dataset": "benchmarks/data/spreadsheetbench-v2"}
+    }
+  ],
+  "heldout_task_ids": ["Financial_Model/HELDOUT-001"],
+  "initial_evidence": [
+    {
+      "path": "/absolute/path/to/redacted/trajectory.jsonl",
+      "task_id": "Financial_Model/DEV-001",
+      "task_type": "Financial_Model",
+      "workbook_family": "financial-family-a"
+    }
+  ],
+  "evaluation_binding": {
+    "protocol": "paired_official_evaluator_v4",
+    "model": "fixed-model-id",
+    "dataset_revision": "pinned-dataset-revision",
+    "evaluator_sha256": "pinned-evaluator-sha256",
+    "max_model_calls": 50,
+    "max_total_tokens": 200000,
+    "task_timeout_seconds": 1800,
+    "seed": 20260911
+  },
+  "promotion": {
+    "delta": 0.01,
+    "epsilon": 0.0,
+    "confidence": 0.95,
+    "bootstrap_samples": 4000,
+    "min_pairs_per_context": 3
+  },
+  "first_group": "harness",
+  "max_rounds": 10,
+  "max_candidates_per_round": 3,
+  "proposer_command": ["/absolute/path/to/proposer", "{request}", "{response}"],
+  "evaluator_command": ["/absolute/path/to/evaluator", "{request}", "{response}"],
+  "command_timeout_seconds": 7200,
+  "static_checks": [["python", "-m", "compileall", "-q", "{source}"]]
+}

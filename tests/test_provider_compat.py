@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from spreadsheet_harness.agent import ResponseTurn
+from spreadsheet_harness.agent import ResponseTurn, _responses_input_to_chat_messages
 from spreadsheet_harness.cli import build_parser, cmd_doctor
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import HarnessError, ProviderError
@@ -214,6 +214,62 @@ def test_chat_tool_compatibility_canary_uses_chat_client(monkeypatch: Any) -> No
         item for item in second["input"] if item.get("type") == "function_call_output"
     )
     assert replay["call_id"] == "call-chat-echo"
+
+
+def test_chat_replay_groups_parallel_function_calls_before_tool_results() -> None:
+    messages = _responses_input_to_chat_messages(
+        None,
+        [
+            {
+                "type": "function_call",
+                "call_id": "call-a",
+                "name": "inspect_range",
+                "arguments": "{}",
+                "provider_reasoning_content": "inspect",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call-b",
+                "name": "find_cells",
+                "arguments": {"query": "#REF!"},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-a",
+                "output": '{"ok":true}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-b",
+                "output": '{"ok":true}',
+            },
+        ],
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "inspect",
+            "tool_calls": [
+                {
+                    "id": "call-a",
+                    "type": "function",
+                    "function": {"name": "inspect_range", "arguments": "{}"},
+                },
+                {
+                    "id": "call-b",
+                    "type": "function",
+                    "function": {
+                        "name": "find_cells",
+                        "arguments": '{"query":"#REF!"}',
+                    },
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-a", "content": '{"ok":true}'},
+        {"role": "tool", "tool_call_id": "call-b", "content": '{"ok":true}'},
+    ]
 
 
 def test_chat_tool_compatibility_canary_rejects_wrong_terminal_arguments(

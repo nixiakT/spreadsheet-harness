@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "dataset": "KAKA22/SpreadsheetBench-v2",
+  "dataset_revision": "9dea60025792fbac5928ce9f44812362dccbeecd",
+  "split_manifest": "benchmarks/results/spreadsheetbench-v2-glm52-nothinking-30-4arm-20260904/manifest.json",
+  "task_count": 30,
+  "categories": ["Debugging", "Financial_Model", "Template"],
+  "environment": {
+    "os": "Linux",
+    "recalculation": "LibreOffice",
+    "visualization_official": false,
+    "seed": 41,
+    "task_timeout_seconds": 1800,
+    "request_timeout_seconds": 600,
+    "max_turns_per_arm": 20
+  },
+  "methods": {
+    "SpreadsheetAgent": {
+      "identity": "paper-vision",
+      "status": "30_case_rows_collected_with_failures",
+      "fidelity": "clean-room proxy; official Excel COM unavailable on Linux",
+      "launcher": "benchmarks/launch_spreadsheetagent_paper_vision_proxy_v2_30_20260905.sh",
+      "continuation_launcher": "benchmarks/launch_paper_reproduction_parallel_pending_20260905.sh",
+      "model": "qwen36-35b-a3b"
+    },
+    "Spreadsheet-RL": {
+      "identity": "official Spreadsheet-RL-4B checkpoint + native tool loop",
+      "status": "completed_with_provider_errors",
+      "fidelity": "official released checkpoint; Linux/LibreOffice proxy for Excel reward service",
+      "launcher": "benchmarks/launch_spreadsheet_rl4b_v2_30_native_20260905.sh",
+      "continuation_launcher": "benchmarks/launch_paper_reproduction_parallel_pending_20260905.sh",
+      "model": "Spreadsheet-RL-4B",
+      "checkpoint_revision": "f594c782331194bf38356107041e309ce7e0b65a",
+      "checkpoint_bytes": 8822894520
+    },
+    "Trace2Skill": {
+      "identity": "official public runner + released xlsx skill",
+      "status": "30_case_rows_collected; qwen3-coder-plus 30/30 scored; qwen36 compatibility supplement still running",
+      "fidelity": "official code/skill; model substitution qwen36-35b-a3b for paper Qwen3.5-35B",
+      "launcher": "benchmarks/launch_trace2skill_v2_30_qwen36_20260905.sh",
+      "model": "qwen36-35b-a3b"
+      ,"environment_fixed_launcher": "benchmarks/launch_trace2skill_v2_30_qwen36_envfixed_20260905.sh"
+      ,"environment_fixed_status": "running"
+      ,"compatibility_launcher": "benchmarks/launch_trace2skill_v2_30_qwen36_compatfix_20260905.sh"
+      ,"output_scoring_adapter": "tools/score_trace2skill_outputs.py"
+    },
+    "SheetCompass": {
+      "identity": "graph-memory proxy via harness structure/analysis/memory/verification skills",
+      "status": "30_case_rows_collected; 29 scored and 1 timeout sealed",
+      "fidelity": "clean-room proxy; no public implementation/checkpoint located",
+      "launcher": "benchmarks/launch_sheetcompass_graph_memory_proxy_v2_30_20260905.sh",
+      "continuation_launcher": "benchmarks/launch_paper_reproduction_parallel_pending_20260905.sh",
+      "model": "qwen36-35b-a3b",
+      "score_summary": "28 primary completed plus 1 continuation completed; Financial_Model/09_01 sealed after 1800s"
+    }
+  }
+}

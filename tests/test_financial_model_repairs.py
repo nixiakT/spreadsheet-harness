@@ -1,10 +1,15 @@
 import io
+import shutil
 import zipfile
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 
 from spreadsheet_harness.financial_model_repairs import (
+    _find_row_by_label,
+    _instruction_target_columns,
+    _instruction_year_columns,
     complete_financial_model_runtime_actions,
     complete_isolated_formula_holes,
     complete_revenue_growth_schedule,
@@ -45,6 +50,33 @@ def _schedule(path: Path) -> None:
     for label, first, second in rows:
         worksheet.append([None, label, first, second])
     workbook.save(path)
+    workbook.close()
+
+
+def test_financial_instruction_scans_ignore_format_only_xfd_extent() -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["B2"] = "Revenue"
+    worksheet["C1"] = 2024
+    worksheet["D1"] = 2025
+    worksheet["XFD60"].number_format = "0.0%"
+    assert worksheet.max_column == 16384
+
+    original_cell = worksheet.cell
+    accessed_columns: list[int] = []
+
+    def tracked_cell(row: int, column: int, *args, **kwargs):
+        accessed_columns.append(column)
+        return original_cell(row, column, *args, **kwargs)
+
+    worksheet.cell = tracked_cell
+
+    assert _find_row_by_label(worksheet, "Revenue") == 2
+    assert max(accessed_columns) <= 8
+    accessed_columns.clear()
+    assert _instruction_year_columns(worksheet) == {3: 2024, 4: 2025}
+    assert _instruction_target_columns(worksheet, "2024-2025") == [3, 4]
+    assert max(accessed_columns) == 4
     workbook.close()
 
 
@@ -359,6 +391,31 @@ def test_complete_financial_model_runtime_actions_skips_merged_metric_targets(
     repaired.close()
 
 
+def test_complete_isolated_formula_holes_ignores_styled_excel_extent(tmp_path: Path) -> None:
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "output.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet["A3"] = "Metric"
+    for coordinate, formula in (("B3", "=B2*2"), ("D3", "=D2*2"), ("E3", "=E2*2")):
+        worksheet[coordinate] = formula
+    for coordinate in ("B3", "C3", "D3", "E3"):
+        worksheet[coordinate].number_format = "0.0"
+    worksheet["XFD1048576"].number_format = "0.0"
+    workbook.save(source)
+    workbook.close()
+    shutil.copy2(source, output)
+
+    changes = complete_isolated_formula_holes(output, source_path=source)
+
+    assert changes == [{"sheet": "Sheet", "target": "C3", "formula": "=C2*2"}]
+    workbook = load_workbook(output, data_only=False)
+    try:
+        assert workbook.active["C3"].value == "=C2*2"
+    finally:
+        workbook.close()
+
+
 def test_complete_financial_model_runtime_actions_fills_ticket_sizes_and_exit_values(
     tmp_path: Path,
 ) -> None:
@@ -634,4 +691,368 @@ def test_complete_financial_model_runtime_actions_fills_later_annual_blocks_and_
     assert repaired["Other Expenses"]["AA6"].value == "=SUM(W6:Z6)"
     assert repaired["Other Expenses"]["V7"].value == "=SUM(V6:V6)"
     assert repaired["Other Expenses"]["AA7"].value == "=SUM(AA6:AA6)"
+    repaired.close()
+
+
+def test_complete_financial_model_runtime_actions_fills_explicit_calculation_rows(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "output.xlsx"
+    workbook = Workbook()
+    wc = workbook.active
+    wc.title = "Working Capital Schedule"
+    wc["B3"] = "Particulars"
+    wc["C3"] = 2021
+    for column in range(4, 13):
+        wc.cell(3, column).value = (
+            f"=EOMONTH({get_column_letter(column - 1)}3,12)"
+        )
+    wc["M21"] = "=M24"
+    wc["M22"] = "=L21-M21"
+    wc["M24"] = "=L24"
+    wc["M3"]._style = wc["L3"]._style
+    for row, label in ((4, "Receivable"), (5, "Revenue"), (6, "Receivable Days"), (8, "Inventory"), (16, "Other Current Asset"), (19, "Current Assets"), (20, "Current Liabilities"), (21, "Total Working Capital")):
+        wc.cell(row, 2).value = label
+    for column in range(3, 13):
+        wc.cell(5, column).value = 100
+        wc.cell(6, column).value = (
+            f"={get_column_letter(column)}4/{get_column_letter(column)}5*365"
+            if column <= 7
+            else 36.5
+        )
+        wc.cell(8, column).value = 10
+        wc.cell(16, column).value = 5
+        wc.cell(20, column).value = 3
+    balance = workbook.create_sheet("Consolidated BS")
+    balance["B15"] = "Trade Receivables"
+    balance["C4"] = 2021
+    for column in range(4, 13):
+        balance.cell(4, column).value = (
+            f"=EOMONTH({get_column_letter(column - 1)}4,12)"
+        )
+    for column in range(3, 8):
+        balance.cell(15, column).value = 10
+    fixed = workbook.create_sheet("Fixed Assets Schedule")
+    fixed["B6"] = "Capex (maintenance and investment)"
+    fixed["B11"] = "Annual Maintenance Capex (% of revenue)"
+    for column in range(3, 13):
+        fixed.cell(3, column).value = f"='Consolidated P&L'!{chr(64 + column)}4"
+    fixed["C11"] = 0.01
+    consolidated = workbook.create_sheet("Consolidated P&L")
+    consolidated["B5"] = "Revenue"
+    consolidated["B9"] = "Total Revenue"
+    for column in range(3, 13):
+        consolidated.cell(5, column).value = 90
+        consolidated.cell(9, column).value = 100
+    debt = workbook.create_sheet("Debt Schedule")
+    for row, label in ((6, "Term Loan"), (8, "Opening Balance"), (9, "Addition"), (10, "Repayment"), (11, "Outstanding")):
+        debt.cell(row, 2).value = label
+    for column in range(3, 13):
+        debt.cell(8, column).value = 100
+        debt.cell(9, column).value = 0
+        debt.cell(10, column).value = 10
+    pnl = workbook.create_sheet("P&L - Segment 1")
+    pnl["B6"] = "Total Revenue"
+    pnl["B29"] = "PBT"
+    pnl["B31"] = "PBT Margin"
+    for column in range(3, 8):
+        pnl.cell(6, column).value = 100
+        pnl.cell(29, column).value = 20
+    workbook.save(source)
+    workbook.save(output)
+    workbook.close()
+
+    instruction = (
+        "In the Working Capital Schedule sheet, calculate Receivables for 2026E–2030E using Revenue and Receivable Days, "
+        "then calculate Current Assets, then calculate Total Working Capital for all years. "
+        "In the Fixed Assets Schedule sheet, calculate Capex for 2026E–2030E. "
+        "In the Debt Schedule sheet, calculate the Closing Balance of the Term Loan for 2026E–2030E. "
+        "In the P&L – Segment 1 sheet, calculate PBT Margin for 2021A–2025A."
+    )
+    changes = complete_financial_model_runtime_actions(output, source_path=source, instruction=instruction)
+    repaired = load_workbook(output, data_only=False)
+    assert repaired["Working Capital Schedule"]["M3"].value == "=EOMONTH(L3,12)"
+    assert repaired["Working Capital Schedule"]["C4"].value == "='Consolidated BS'!C15"
+    assert repaired["Working Capital Schedule"]["G4"].value == "='Consolidated BS'!G15"
+    assert repaired["Working Capital Schedule"]["H4"].value == "=H5*H6/365"
+    assert repaired["Working Capital Schedule"]["C19"].value == "=C4+C8+C16"
+    assert repaired["Working Capital Schedule"]["L21"].value == "=L19-L20"
+    assert repaired["Fixed Assets Schedule"]["H6"].value == "='Consolidated P&L'!H5*$C$11"
+    assert repaired["Debt Schedule"]["H11"].value == "=H8+H9-H10"
+    assert repaired["P&L - Segment 1"]["G31"].value == "=G29/G6"
+    assert len(changes) >= 30
+    repaired.close()
+
+
+def test_explicit_capex_includes_declared_annual_investment_series(tmp_path: Path) -> None:
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "output.xlsx"
+    workbook = Workbook()
+    fixed = workbook.active
+    fixed.title = "Fixed Assets Schedule"
+    fixed["B6"] = "Capex (maintenance and investment)"
+    fixed["B11"] = "Annual Maintenance Capex (% of revenue)"
+    fixed["C11"] = 0.01
+    for column in range(3, 13):
+        fixed.cell(3, column).value = f"='Consolidated P&L'!{get_column_letter(column)}4"
+    consolidated = workbook.create_sheet("Consolidated P&L")
+    consolidated["B5"] = "Revenue"
+    consolidated["B9"] = "Total Revenue"
+    for column in range(3, 13):
+        consolidated.cell(5, column).value = 90
+        consolidated.cell(9, column).value = 100
+    details = workbook.create_sheet("Investment Capex Details")
+    details["A5"] = "Total Investment Capex"
+    for column, value in enumerate((10, 20, 30, 40, 50), start=2):
+        details.cell(5, column).value = value
+    workbook.save(source)
+    workbook.save(output)
+    workbook.close()
+
+    changes = complete_financial_model_runtime_actions(
+        output,
+        source_path=source,
+        instruction=(
+            "In the Fixed Assets Schedule sheet, calculate Capex for 2026E-2030E."
+        ),
+    )
+
+    repaired = load_workbook(output, data_only=False)
+    assert repaired["Fixed Assets Schedule"]["H6"].value == (
+        "='Consolidated P&L'!H5*$C$11+'Investment Capex Details'!B5"
+    )
+    assert repaired["Fixed Assets Schedule"]["L6"].value == (
+        "='Consolidated P&L'!L5*$C$11+'Investment Capex Details'!F5"
+    )
+    assert {
+        "sheet": "Fixed Assets Schedule",
+        "target": "H6",
+        "formula": "='Consolidated P&L'!H5*$C$11+'Investment Capex Details'!B5",
+    } in changes
+    repaired.close()
+
+
+def test_education_model_assumption_cost_depreciation_and_check_rules(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "output.xlsx"
+    workbook = Workbook()
+
+    pnl = workbook.active
+    pnl.title = "Consolidated P&L"
+    pnl["B5"] = "Revenue"
+    pnl["B6"] = "Other Revenue"
+    pnl["B9"] = "Total Revenue"
+    pnl["M4"] = "CAGR (25A-30E)"
+    for column, year in enumerate(range(2021, 2031), start=3):
+        pnl.cell(4, column).value = year
+        pnl.cell(5, column).value = 100 + column
+        pnl.cell(6, column).value = 2
+        pnl.cell(9, column).value = 102 + column
+    for column in range(8, 13):
+        target = get_column_letter(column + 1)
+        pnl.cell(5, column).value = f"='Revenue Drivers'!{target}135"
+        pnl.cell(6, column).value = f"='Revenue Drivers'!{target}137"
+
+    revenue = workbook.create_sheet("Revenue Drivers")
+    for column, year in enumerate(range(2021, 2031), start=4):
+        revenue.cell(4, column).value = year
+    revenue["B7"] = "Mature"
+    revenue["B8"] = "Headcount"
+    revenue["B13"] = "Average Ticket Size"
+    revenue["B17"] = "Total Revenue from Foundation Course Mature"
+    revenue["B135"] = "Total Operating Revenue"
+    revenue["B137"] = "Other Revenue"
+    revenue["C137"] = "USD Mn"
+    revenue["B138"] = "As a % of Operating Revenue"
+    revenue["C138"] = "%"
+    for column in range(9, 14):
+        revenue.cell(17, column).value = 100
+        revenue.cell(135, column).value = 1000
+
+    assumptions = workbook.create_sheet("Key Assumptions")
+    assumptions["C9"] = "Other Income as % of Revenue"
+    assumptions["D9"] = 0.02
+
+    costs = workbook.create_sheet("Cost Drivers")
+    for column, year in enumerate(range(2021, 2031), start=4):
+        costs.cell(4, column).value = year
+    costs["B7"] = "Mature"
+    labels = (
+        "Salaries",
+        "Rent and Utilities",
+        "Operational Cost",
+        "Study Material",
+        "Acad Central Cost",
+        "Corporate OH",
+        "Other Cost",
+    )
+    for offset, label in enumerate(labels):
+        assumption_row = 8 + offset
+        detail_row = 16 + offset
+        costs.cell(assumption_row, 2).value = label
+        costs.cell(assumption_row, 3).value = "as a % of Revenue"
+        costs.cell(detail_row, 2).value = label
+        for column in range(9, 14):
+            costs.cell(assumption_row, column).value = 0.1
+    costs["B23"] = "Total Foundation Course Mature Expenses"
+
+    fixed = workbook.create_sheet("Fixed Assets Schedule")
+    for column in range(3, 13):
+        fixed.cell(3, column).value = (
+            f"='Consolidated P&L'!{get_column_letter(column)}4"
+        )
+    fixed["B5"] = "Opening Balance"
+    fixed["B6"] = "Capex"
+    fixed["B7"] = "Depreciation"
+    fixed["B8"] = "Closing Balance"
+    fixed["B10"] = "Annual Depreciation (%)"
+    fixed["C10"] = 0.25
+    for column in range(8, 13):
+        letter = get_column_letter(column)
+        fixed.cell(5, column).value = 100
+        fixed.cell(6, column).value = 20
+        fixed.cell(8, column).value = f"=SUM({letter}5:{letter}7)"
+
+    balance = workbook.create_sheet("Consolidated BS")
+    balance["B22"] = "Total Assets"
+    balance["B48"] = "Total Equity & Liabilities"
+    balance["B50"] = "Check"
+    for column, year in enumerate(range(2021, 2031), start=3):
+        balance.cell(4, column).value = year
+        balance.cell(22, column).value = 100
+        balance.cell(48, column).value = 100
+
+    workbook.save(source)
+    workbook.save(output)
+    workbook.close()
+
+    changes = complete_financial_model_runtime_actions(
+        output,
+        source_path=source,
+        instruction=(
+            "In the Consolidated P&L sheet, calculate the CAGR of Total Revenue "
+            "from 2025 to 2030. In the Revenue Drivers sheet, reference actual "
+            "Other Revenue from another tab, and then hardcode the % of Operating "
+            "Revenue for the forecasted years as the same value as the last actual "
+            "year's value. From that, calculate forecasted Other Revenue. Compute "
+            "operational costs for each Foundation Course line item in the cost "
+            "drivers. In the Fixed Assets Schedule sheet, compute depreciation by "
+            "applying the 25% assumption to opening balance plus capital expenditure "
+            "for the forecast period. In the Consolidated BS sheet, add a validation "
+            "check for each year."
+        ),
+    )
+
+    repaired = load_workbook(output, data_only=False)
+    assert repaired["Consolidated P&L"]["M9"].value == "=(L9/G9)^(1/5)-1"
+    assert repaired["Revenue Drivers"]["D137"].value == "='Consolidated P&L'!C6"
+    assert repaired["Revenue Drivers"]["I138"].value == 0.02
+    assert repaired["Revenue Drivers"]["M137"].value == "=M138*M135"
+    assert repaired["Cost Drivers"]["I16"].value == (
+        "=I8*'Revenue Drivers'!I$17"
+    )
+    assert repaired["Cost Drivers"]["M23"].value == "=SUM(M16:M22)"
+    assert repaired["Fixed Assets Schedule"]["H7"].value == "=-$C$10*(H5+H6)"
+    assert repaired["Consolidated BS"]["L50"].value == "=L22-L48"
+    assert len(changes) >= 76
+    repaired.close()
+
+
+def test_education_model_dcf_ratio_and_mature_revenue_rules(tmp_path: Path) -> None:
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "output.xlsx"
+    workbook = Workbook()
+
+    dcf = workbook.active
+    dcf.title = "DCF Valuation"
+    dcf["D5"] = 2026
+    for column in range(5, 9):
+        previous = get_column_letter(column - 1)
+        dcf.cell(5, column).value = f"=EOMONTH({previous}5,12)"
+    dcf["I5"] = "Terminal Value"
+    dcf["B7"] = "EBIT"
+    dcf["H7"] = 100
+    dcf["B18"] = "Period Factor"
+    dcf["B19"] = "Discounting Factor"
+    dcf["B24"] = "Enterprise Value"
+    dcf["C24"] = 500
+    dcf["B29"] = "WACC"
+    dcf["C29"] = 0.1
+    dcf["B30"] = "TGR"
+    dcf["C30"] = 0.04
+    dcf["B33"] = "EV/Revenue"
+    for column, year in enumerate((25, 26, 27), start=3):
+        dcf.cell(32, column).value = f"FY{year}"
+    for column in range(4, 9):
+        dcf.cell(18, column).value = column - 3
+
+    pnl = workbook.create_sheet("Consolidated P&L")
+    pnl["B9"] = "Total Revenue"
+    pnl["B51"] = "EBITDA"
+    pnl["B52"] = "EBITDA Margin"
+    for column, year in enumerate(range(2021, 2031), start=3):
+        pnl.cell(4, column).value = year
+        pnl.cell(9, column).value = 100
+        pnl.cell(51, column).value = 20
+        pnl.cell(52, column).value = 0.2
+
+    ratios = workbook.create_sheet("Ratio Analysis")
+    ratios["B17"] = "EBITDA Margin"
+    ratios["B37"] = "Receivable Days"
+    ratios["B38"] = "Payable Days"
+    ratios["B39"] = "Inventory Days"
+    ratios["B40"] = "Cash Conversion Cycle"
+    for column, year in enumerate(range(2021, 2031), start=3):
+        ratios.cell(4, column).value = year
+        ratios.cell(37, column).value = 30
+        ratios.cell(38, column).value = 20
+        ratios.cell(39, column).value = 10
+
+    revenue = workbook.create_sheet("Revenue Drivers")
+    revenue["B7"] = "Mature"
+    revenue["B8"] = "Headcount"
+    revenue["B13"] = "Average Ticket Size"
+    revenue["B17"] = "Total Revenue from Foundation Course Mature"
+    for column, year in enumerate(range(2021, 2031), start=4):
+        revenue.cell(4, column).value = year
+    for column in range(9, 14):
+        revenue.cell(8, column).value = 10
+        revenue.cell(13, column).value = 5
+
+    workbook.save(source)
+    workbook.save(output)
+    workbook.close()
+
+    changes = complete_financial_model_runtime_actions(
+        output,
+        source_path=source,
+        instruction=(
+            "In the DCF Valuation sheet, calculate Terminal Year EBIT by growing "
+            "2030E EBIT at the terminal growth rate, then calculate discounting "
+            "factors for 2026E-2030E using WACC, then calculate EV/Revenue for "
+            "FY25-FY27 displaying 'NM' for zero or negative revenue. In the Ratio "
+            "Analysis sheet, calculate EBITDA Margin for 2021A-2030E, then calculate "
+            "Cash Conversion Cycle for 2021A-2030E, displaying 'NA' where inputs are "
+            "unavailable. In the Revenue Drivers sheet, calculate Total Revenue from "
+            "Foundation Course (Mature) for 2026E-2030E."
+        ),
+    )
+
+    repaired = load_workbook(output, data_only=False)
+    assert repaired["DCF Valuation"]["I7"].value == "=H7*(1+C30)"
+    assert repaired["DCF Valuation"]["D19"].value == "=1/(1+$C$29)^D18"
+    assert repaired["DCF Valuation"]["C33"].value == (
+        '=IF($C$24/\'Consolidated P&L\'!G9>0,'
+        '$C$24/\'Consolidated P&L\'!G9,"NM")'
+    )
+    assert repaired["Ratio Analysis"]["C17"].value == "='Consolidated P&L'!C52"
+    assert repaired["Ratio Analysis"]["L40"].value == (
+        '=IFERROR(L37+L39-L38,"NA")'
+    )
+    assert repaired["Revenue Drivers"]["I17"].value == "=I13*I8"
+    assert repaired["Revenue Drivers"]["M17"].value == "=M13*M8"
+    assert len(changes) == 34
     repaired.close()

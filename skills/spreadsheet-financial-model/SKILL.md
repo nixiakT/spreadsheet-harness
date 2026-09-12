@@ -14,6 +14,10 @@ duplicate fields, comments inside values, or speculative zero fills.
 
 - Preserve populated historical values, imported actuals, assumption inputs, scenario selectors,
   check rows, and anchor formulas unless the instruction explicitly targets them.
+- When the task prompt reports instruction-grounded deterministic warm-start targets, treat those
+  populated cells as protected completed work. Verify them with one bounded
+  `sheet_harness.view_xlsx(...)` batch, inspect only clauses that remain visibly blank, and do not
+  restart workbook-wide discovery or rewrite a completed formula with a merely equivalent variant.
 - Fill a forecast blank only when adjacent periods establish the same semantic row and a formula
   translates cleanly across the boundary. Do not extend formulas into spacer, label, notes, terminal,
   or sensitivity-table regions merely because they are blank.

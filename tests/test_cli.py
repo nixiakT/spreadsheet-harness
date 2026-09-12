@@ -10,9 +10,62 @@ import httpx
 import pytest
 
 from spreadsheet_harness import cli
-from spreadsheet_harness.agent import AgentResult, ResponsesClient
+from spreadsheet_harness.agent import AgentResult, ResponsesClient, _chat_wire_payload
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import HarnessError
+
+
+def test_v2_compare_accepts_unlimited_token_budgets_without_sending_max_tokens() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "v2-compare",
+            "--dataset",
+            "dataset",
+            "--category",
+            "Financial_Model",
+            "--max-output-tokens",
+            "unlimited",
+            "--max-total-tokens",
+            "unlimited",
+        ]
+    )
+
+    assert args.max_output_tokens is None
+    assert args.max_total_tokens is None
+    assert "max_tokens" not in _chat_wire_payload(
+        {"model": "test-model", "input": [], "instructions": "test"}
+    )
+
+
+def test_v2_visual_generate_accepts_core_only_configuration() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "v2-visual-generate",
+            "--dataset",
+            "dataset",
+            "--visual-evaluator",
+            "visual-evaluator.py",
+            "--output",
+            "output",
+            "--arm",
+            "ours",
+            "--composition",
+            "ours=spreadsheet-harness-core",
+            "--skill-root",
+            "core-only-skills",
+            "--max-output-tokens",
+            "unlimited",
+            "--max-total-tokens",
+            "unlimited",
+        ]
+    )
+
+    assert args.composition == ["ours=spreadsheet-harness-core"]
+    assert args.skill_root == Path("core-only-skills")
+    assert args.max_output_tokens is None
+    assert args.max_total_tokens is None
 
 
 def test_benchmark_compare_parses_plugin_composition_override() -> None:

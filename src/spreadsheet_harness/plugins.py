@@ -12,7 +12,8 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 from statistics import fmean, pvariance
 from types import MappingProxyType
 from typing import Any, Literal
@@ -31,6 +32,7 @@ SpreadsheetCapability = Literal[
     "composition",
 ]
 Scalar = str | int | float | bool | None
+EvolutionSurface = Literal["config", "implementation", "prompt", "description"]
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?$")
@@ -175,6 +177,117 @@ class EvolutionStrategy:
 
 
 @dataclass(frozen=True)
+class PluginEditPolicy:
+    """Code-owned authority for one evolvable plugin surface.
+
+    Paths are repository-relative POSIX glob patterns.  They are deliberately
+    separate from a proposal: the proposal may choose an allowed operator and
+    content, but it cannot enlarge its own write authority.
+    """
+
+    surface: EvolutionSurface
+    paths: tuple[str, ...]
+    operators: tuple[str, ...]
+    max_changed_files: int = 1
+    max_patch_bytes: int = 128_000
+
+    def __post_init__(self) -> None:
+        if self.surface not in {"config", "implementation", "prompt", "description"}:
+            raise ValueError(f"Unsupported plugin edit surface: {self.surface!r}")
+        normalized_paths: list[str] = []
+        for raw in self.paths:
+            path = str(raw).strip().replace("\\", "/")
+            parts = PurePosixPath(path).parts
+            if (
+                not path
+                or path.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise ValueError(f"Plugin edit path must be contained and relative: {raw!r}")
+            normalized_paths.append(path)
+        if len(normalized_paths) != len(set(normalized_paths)):
+            raise ValueError("Plugin edit paths must be unique")
+        normalized_operators = tuple(
+            _identifier(str(value), label="plugin edit operator") for value in self.operators
+        )
+        if not normalized_operators or len(normalized_operators) != len(
+            set(normalized_operators)
+        ):
+            raise ValueError("Plugin edit operators must be non-empty and unique")
+        if (
+            isinstance(self.max_changed_files, bool)
+            or not isinstance(self.max_changed_files, int)
+            or self.max_changed_files < 1
+        ):
+            raise ValueError("max_changed_files must be a positive integer")
+        if (
+            isinstance(self.max_patch_bytes, bool)
+            or not isinstance(self.max_patch_bytes, int)
+            or self.max_patch_bytes < 1
+        ):
+            raise ValueError("max_patch_bytes must be a positive integer")
+        if self.surface == "config" and normalized_paths:
+            raise ValueError("Config edit policy must not grant filesystem paths")
+        if self.surface != "config" and not normalized_paths:
+            raise ValueError("File-backed edit policy requires at least one path")
+        object.__setattr__(self, "paths", tuple(sorted(normalized_paths)))
+        object.__setattr__(self, "operators", normalized_operators)
+
+    def allows_path(self, path: str) -> bool:
+        normalized = str(path).strip().replace("\\", "/")
+        parts = PurePosixPath(normalized).parts
+        if (
+            not normalized
+            or normalized.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            return False
+        return any(PurePosixPath(normalized).match(pattern) for pattern in self.paths)
+
+    def validate_edit(
+        self,
+        *,
+        operator: str,
+        changed_paths: Sequence[str] = (),
+        patch_bytes: int = 0,
+    ) -> None:
+        normalized_operator = _identifier(str(operator), label="plugin edit operator")
+        if normalized_operator not in self.operators:
+            raise HarnessError(
+                f"Surface {self.surface!r} does not allow operator {normalized_operator!r}"
+            )
+        paths = tuple(str(path).strip().replace("\\", "/") for path in changed_paths)
+        if len(paths) != len(set(paths)):
+            raise HarnessError("A plugin proposal may not change the same path twice")
+        if len(paths) > self.max_changed_files:
+            raise HarnessError(
+                f"Plugin proposal changes {len(paths)} files; limit is {self.max_changed_files}"
+            )
+        if self.surface == "config":
+            if paths:
+                raise HarnessError("A config proposal may not change files")
+        elif not paths or any(not self.allows_path(path) for path in paths):
+            raise HarnessError(
+                f"Plugin proposal changes a path outside the {self.surface!r} contract"
+            )
+        if isinstance(patch_bytes, bool) or not isinstance(patch_bytes, int) or patch_bytes < 0:
+            raise ValueError("patch_bytes must be a non-negative integer")
+        if patch_bytes > self.max_patch_bytes:
+            raise HarnessError(
+                f"Plugin proposal contains {patch_bytes} bytes; limit is {self.max_patch_bytes}"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "surface": self.surface,
+            "paths": list(self.paths),
+            "operators": list(self.operators),
+            "max_changed_files": self.max_changed_files,
+            "max_patch_bytes": self.max_patch_bytes,
+        }
+
+
+@dataclass(frozen=True)
 class PluginContract:
     """Immutable ABI and mutation boundary for one harness plugin."""
 
@@ -191,6 +304,7 @@ class PluginContract:
     conflicts: frozenset[str] = frozenset()
     spreadsheet_capabilities: frozenset[SpreadsheetCapability] = frozenset()
     evolution_strategy: EvolutionStrategy | None = None
+    edit_policies: tuple[PluginEditPolicy, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _identifier(self.name, label="plugin name"))
@@ -246,6 +360,13 @@ class PluginContract:
             "spreadsheet_capabilities",
             frozenset(self.spreadsheet_capabilities),
         )
+        policies = tuple(self.edit_policies)
+        policy_surfaces = [policy.surface for policy in policies]
+        if len(policy_surfaces) != len(set(policy_surfaces)):
+            raise ValueError(f"Plugin {self.name!r} has duplicate edit policies")
+        if not set(policy_surfaces) <= set(self.evolvable_surfaces):
+            raise ValueError("Plugin edit policies may target only evolvable surfaces")
+        object.__setattr__(self, "edit_policies", policies)
         if self.evolution_strategy is not None and not self.evolvable_surfaces:
             raise ValueError("A frozen plugin cannot declare an evolution strategy")
 
@@ -261,6 +382,14 @@ class PluginContract:
                 raise ValueError(f"Plugin {self.name!r} has no configurable field {key!r}")
             values[key] = fields[key].validate(value)
         return PluginInstance(self, tuple(sorted(values.items())))
+
+    def edit_policy(self, surface: EvolutionSurface) -> PluginEditPolicy:
+        for policy in self.edit_policies:
+            if policy.surface == surface:
+                return policy
+        raise HarnessError(
+            f"Plugin {self.name!r} has no executable edit policy for {surface!r}"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -281,6 +410,7 @@ class PluginContract:
                 if self.evolution_strategy is not None
                 else None
             ),
+            "edit_policies": [policy.to_dict() for policy in self.edit_policies],
         }
 
 
@@ -713,6 +843,7 @@ class PluginMutation:
     changed_paths: tuple[str, ...] = ()
     evidence_sha256: tuple[str, ...] = ()
     _config_patch: tuple[tuple[str, Scalar], ...] = ()
+    operator: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -747,6 +878,12 @@ class PluginMutation:
             raise ValueError("Only config mutations may carry a config patch")
         if self.surface != "config" and not self.changed_paths:
             raise ValueError("A file-backed plugin mutation requires changed_paths")
+        if self.operator is not None:
+            object.__setattr__(
+                self,
+                "operator",
+                _identifier(str(self.operator), label="plugin edit operator"),
+            )
 
     @classmethod
     def create(
@@ -760,21 +897,23 @@ class PluginMutation:
         changed_paths: Sequence[str] = (),
         evidence_sha256: Sequence[str] = (),
         config_patch: Mapping[str, Any] | None = None,
+        operator: str | None = None,
     ) -> PluginMutation:
         return cls(
-            target_plugin,
-            base_version,
-            base_manifest_sha256,
-            surface,
-            candidate_artifact_sha256,
-            tuple(changed_paths),
-            tuple(evidence_sha256),
-            tuple(
+            target_plugin=target_plugin,
+            base_version=base_version,
+            base_manifest_sha256=base_manifest_sha256,
+            surface=surface,
+            candidate_artifact_sha256=candidate_artifact_sha256,
+            changed_paths=tuple(changed_paths),
+            evidence_sha256=tuple(evidence_sha256),
+            _config_patch=tuple(
                 sorted(
                     (str(key), _scalar(value, label=f"config patch {key}"))
                     for key, value in (config_patch or {}).items()
                 )
             ),
+            operator=operator,
         )
 
     @property
@@ -795,6 +934,29 @@ class PluginMutation:
             contract.configure(self.config_patch)
         return contract
 
+    def validate_edit_policy(
+        self,
+        registry: PluginRegistry,
+        *,
+        patch_bytes: int = 0,
+    ) -> PluginContract:
+        """Validate both the immutable ABI and the executable edit authority."""
+
+        contract = self.validate(registry)
+        policy = contract.edit_policy(self.surface)
+        default_operator = {
+            "config": "bounded-config",
+            "prompt": "replace-file",
+            "description": "unified-diff",
+            "implementation": "unified-diff",
+        }[self.surface]
+        policy.validate_edit(
+            operator=self.operator or default_operator,
+            changed_paths=self.changed_paths,
+            patch_bytes=patch_bytes,
+        )
+        return contract
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": "plugevolve-plugin-mutation-v1",
@@ -806,6 +968,7 @@ class PluginMutation:
             "changed_paths": list(self.changed_paths),
             "evidence_sha256": list(self.evidence_sha256),
             "config_patch": dict(self._config_patch),
+            "operator": self.operator,
         }
 
 
@@ -1028,6 +1191,90 @@ def _strategy(
     return EvolutionStrategy(tuple(evidence), tuple(operators), tuple(validation_contexts))
 
 
+_PLUGIN_FILE_OWNERSHIP: Mapping[str, Mapping[EvolutionSurface, tuple[str, ...]]] = {
+    "runtime-code-interpreter": {
+        "description": ("src/spreadsheet_harness/code_interpreter.py",),
+        "implementation": ("src/spreadsheet_harness/code_interpreter.py",),
+    },
+    "runtime-native-tools": {
+        "description": ("src/spreadsheet_harness/tools.py",),
+        "implementation": ("src/spreadsheet_harness/tools.py",),
+    },
+    "runtime-code-plus-formula-validation": {
+        "description": ("src/spreadsheet_harness/tools.py",),
+        "implementation": (
+            "src/spreadsheet_harness/code_interpreter.py",
+            "src/spreadsheet_harness/formula_runtime.py",
+            "src/spreadsheet_harness/tools.py",
+        ),
+    },
+    "profile-deterministic-full": {
+        "implementation": ("src/spreadsheet_harness/preprocess.py",),
+    },
+    "profile-deterministic-compact": {
+        "implementation": ("src/spreadsheet_harness/preprocess.py",),
+    },
+    "policy-bare": {"prompt": ("src/spreadsheet_harness/arms.py",)},
+    "policy-profile": {"prompt": ("src/spreadsheet_harness/arms.py",)},
+    "policy-native": {
+        "prompt": ("src/spreadsheet_harness/arms.py",),
+        "implementation": ("src/spreadsheet_harness/arms.py",),
+    },
+    "policy-ours": {
+        "prompt": ("src/spreadsheet_harness/arms.py",),
+        "implementation": ("src/spreadsheet_harness/arms.py",),
+    },
+    "verifier-formula-runtime": {
+        "implementation": (
+            "src/spreadsheet_harness/formula_runtime.py",
+            "src/spreadsheet_harness/arms.py",
+        ),
+    },
+    "repair-date-text": {
+        "implementation": ("src/spreadsheet_harness/arms.py",),
+    },
+    # The financial specialist has a first-class runtime implementation in
+    # addition to its prompt.  Keeping this ownership explicit is what lets a
+    # continuous evolution candidate change a bounded repair rule without
+    # acquiring write access to the rest of the harness.
+    "skill-spreadsheet-financial-model": {
+        "implementation": ("src/spreadsheet_harness/financial_model_repairs.py",),
+    },
+}
+
+
+def _default_edit_policies(contract: PluginContract) -> tuple[PluginEditPolicy, ...]:
+    ownership = _PLUGIN_FILE_OWNERSHIP.get(contract.name, {})
+    policies: list[PluginEditPolicy] = []
+    for surface in sorted(contract.evolvable_surfaces):
+        if surface == "config":
+            policies.append(PluginEditPolicy("config", (), ("bounded-config",)))
+            continue
+        paths = ownership.get(surface)
+        if paths is None and contract.kind == "knowledge" and surface == "prompt":
+            skill_name = contract.implementation.removeprefix("knowledge.")
+            if skill_name == "spreadsheet-visualization":
+                skill_name = "visual-review"
+            paths = (f"skills/{skill_name}/SKILL.md",)
+        if paths is None:
+            raise ValueError(
+                f"Evolvable plugin {contract.name!r} has no file ownership for {surface!r}"
+            )
+        operators = ("replace-file", "unified-diff") if surface == "prompt" else (
+            "unified-diff",
+        )
+        policies.append(
+            PluginEditPolicy(
+                surface,  # type: ignore[arg-type]
+                paths,
+                operators,
+                max_changed_files=len(paths),
+                max_patch_bytes=256_000,
+            )
+        )
+    return tuple(policies)
+
+
 def default_plugin_registry() -> PluginRegistry:
     compact_profile_fields = (
         _field("max-sheets", 8, 1, 12),
@@ -1038,8 +1285,7 @@ def default_plugin_registry() -> PluginRegistry:
         _field("max-formula-clusters-per-sheet", 2, 1, 12),
         _field("max-rendered-chars", 4000, 500, 12000),
     )
-    return PluginRegistry(
-        (
+    contracts = (
             PluginContract(
                 "runtime-code-interpreter",
                 "1.0.0",
@@ -1246,7 +1492,7 @@ def default_plugin_registry() -> PluginRegistry:
                 frozenset({"knowledge.spreadsheet-financial-model"}),
                 frozenset({"model.request"}),
                 frozenset({"before_model_request"}),
-                evolvable_surfaces=frozenset({"prompt"}),
+                evolvable_surfaces=frozenset({"prompt", "implementation"}),
                 spreadsheet_capabilities=frozenset({"formula", "verification"}),
                 evolution_strategy=_strategy(
                     (
@@ -1390,6 +1636,8 @@ def default_plugin_registry() -> PluginRegistry:
                 spreadsheet_capabilities=frozenset(SPREADSHEET_CAPABILITIES),
             ),
         )
+    return PluginRegistry(
+        tuple(replace(contract, edit_policies=_default_edit_policies(contract)) for contract in contracts)
     )
 
 
@@ -1409,6 +1657,18 @@ SPREADSHEET_HARNESS_BASIC_COMPOSITION = CompositionSpec.create(
         "skill-spreadsheet-visualization",
         "skill-spreadsheet-verification",
         "skill-spreadsheet-memory",
+        "verifier-formula-runtime",
+        "repair-date-text",
+    ),
+)
+
+SPREADSHEET_HARNESS_CORE_COMPOSITION = CompositionSpec.create(
+    "spreadsheet-harness-core",
+    (
+        "runtime-code-plus-formula-validation",
+        "profile-deterministic-compact",
+        "policy-ours",
+        "skill-spreadsheet-core",
         "verifier-formula-runtime",
         "repair-date-text",
     ),
@@ -1482,6 +1742,7 @@ BUILTIN_COMPOSITIONS: Mapping[str, CompositionSpec] = MappingProxyType(
         **ARM_COMPOSITIONS,
         PLUGEOLVE_SEED_COMPOSITION.name: PLUGEOLVE_SEED_COMPOSITION,
         SPREADSHEET_HARNESS_BASIC_COMPOSITION.name: SPREADSHEET_HARNESS_BASIC_COMPOSITION,
+        SPREADSHEET_HARNESS_CORE_COMPOSITION.name: SPREADSHEET_HARNESS_CORE_COMPOSITION,
         SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION.name: (
             SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION
         ),
@@ -1512,6 +1773,7 @@ __all__ = [
     "KERNEL_CAPABILITIES",
     "PLUGEOLVE_SEED_COMPOSITION",
     "SPREADSHEET_HARNESS_BASIC_COMPOSITION",
+    "SPREADSHEET_HARNESS_CORE_COMPOSITION",
     "SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION",
     "SPREADSHEET_CAPABILITIES",
     "CompositionCandidate",
@@ -1521,7 +1783,9 @@ __all__ = [
     "ConfigField",
     "ConstrainedCompositionRouter",
     "EvolutionStrategy",
+    "EvolutionSurface",
     "PluginContract",
+    "PluginEditPolicy",
     "PluginExecutionPlan",
     "PluginInstance",
     "PluginMutation",

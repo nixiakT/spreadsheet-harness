@@ -54,10 +54,17 @@ from .comparison import (
     verify_pilot_run_spec_contract,
 )
 from .config import API_PROTOCOLS, REASONING_ALIASES, REASONING_EFFORTS, ProviderConfig
+from .continuous_evolution import (
+    ContinuousEvolutionConfig,
+    ContinuousEvolutionEngine,
+    EvidenceRef,
+    RevisionStore,
+)
 from .errors import HarnessError
 from .evolution import generate_candidate, promote_candidate
 from .plugins import (
     BUILTIN_COMPOSITIONS,
+    CompositionSpec,
     PluginMutation,
     default_plugin_registry,
     enumerate_single_plugin_candidates,
@@ -72,6 +79,7 @@ from .render import (
 )
 from .session import SUPPORTED_EDIT_FORMATS, WorkbookSession
 from .skills import SkillRegistry
+from .spreadsheetbench_harbor import normalize_spreadsheetbench_harbor
 from .spreadsheetbench_v1 import (
     audit_spreadsheetbench_v1_comparison,
     load_spreadsheetbench_v1,
@@ -150,7 +158,9 @@ def _skills(args: argparse.Namespace) -> SkillRegistry:
         else _default_skill_root()
     ]
     if replacement_root is None:
-        roots.extend(Path(item).expanduser().resolve() for item in getattr(args, "skills", []) or [])
+        roots.extend(
+            Path(item).expanduser().resolve() for item in getattr(args, "skills", []) or []
+        )
     return SkillRegistry(roots)
 
 
@@ -801,13 +811,40 @@ def cmd_benchmark_v2_compare(args: argparse.Namespace) -> int:
         if arm in composition_overrides:
             raise HarnessError(f"Duplicate composition override for arm {arm!r}")
         composition_overrides[arm] = _named_composition(composition_name)
+    for raw_override in getattr(args, "composition_file", ()) or []:
+        arm, separator, raw_path = str(raw_override).partition("=")
+        if not separator or not arm or not raw_path:
+            raise HarnessError("--composition-file must use ARM=PATH syntax")
+        if arm not in arms:
+            raise HarnessError(f"Composition file targets unselected arm {arm!r}")
+        if arm in composition_overrides:
+            raise HarnessError(f"Duplicate composition override for arm {arm!r}")
+        composition_path = Path(raw_path).expanduser().resolve()
+        try:
+            document = json.loads(composition_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise HarnessError(f"Unable to read composition file: {composition_path}") from exc
+        if not isinstance(document, dict):
+            raise HarnessError("Composition file must contain a composition object")
+        if isinstance(document.get("composition"), dict):
+            document = document["composition"]
+        if not isinstance(document, dict):
+            raise HarnessError("Composition file must contain a composition object")
+        plugins = document.get("plugins")
+        overrides = document.get("overrides") or {}
+        if not isinstance(plugins, list) or not all(isinstance(item, str) for item in plugins):
+            raise HarnessError("Composition file plugins must be a string list")
+        if not isinstance(overrides, dict):
+            raise HarnessError("Composition file overrides must be an object")
+        try:
+            composition_overrides[arm] = CompositionSpec.create(
+                str(document.get("name", f"evolved-{arm}")), plugins, overrides
+            )
+        except (TypeError, ValueError) as exc:
+            raise HarnessError(f"Invalid composition file: {composition_path}") from exc
     categories = tuple(args.category or ())
     tasks = load_spreadsheetbench_v2_tasks(args.dataset, categories=categories)
-    selected = (
-        select_spreadsheetbench_v2_tasks(tasks, args.task_id)
-        if args.task_id
-        else tasks
-    )
+    selected = select_spreadsheetbench_v2_tasks(tasks, args.task_id) if args.task_id else tasks
     output = (
         Path(args.output).expanduser().resolve()
         if args.output
@@ -835,17 +872,41 @@ def cmd_benchmark_v2_compare(args: argparse.Namespace) -> int:
     return 0 if summary["study_complete"] else 2
 
 
+def cmd_benchmark_harbor_normalize(args: argparse.Namespace) -> int:
+    """Convert a Harbor financial archive into the v2 category layout."""
+
+    output = normalize_spreadsheetbench_harbor(args.source, args.output)
+    tasks = load_spreadsheetbench_v2_tasks(output, categories=("Financial_Model",))
+    _json_print(
+        {
+            "output": str(output),
+            "category": "Financial_Model",
+            "task_count": len(tasks),
+            "dataset_roles": sorted(
+                {str(task.source_row.get("dataset_role", "")) for task in tasks}
+            ),
+        }
+    )
+    return 0
+
+
 def cmd_benchmark_v2_visual_generate(args: argparse.Namespace) -> int:
     arms = tuple(args.arm or ("ours",))
+    composition_overrides: dict[str, Any] = {}
+    for raw_override in args.composition or []:
+        arm, separator, composition_name = str(raw_override).partition("=")
+        if not separator or not arm or not composition_name:
+            raise HarnessError("--composition must use ARM=COMPOSITION syntax")
+        if arm not in arms:
+            raise HarnessError(f"Composition override targets unselected arm {arm!r}")
+        if arm in composition_overrides:
+            raise HarnessError(f"Duplicate composition override for arm {arm!r}")
+        composition_overrides[arm] = _named_composition(composition_name)
     tasks = load_spreadsheetbench_v2_tasks(
         args.dataset,
         categories=("Visualization",),
     )
-    selected = (
-        select_spreadsheetbench_v2_tasks(tasks, args.task_id)
-        if args.task_id
-        else tasks
-    )
+    selected = select_spreadsheetbench_v2_tasks(tasks, args.task_id) if args.task_id else tasks
     summary = run_spreadsheetbench_v2_comparison(
         config=_provider(args),
         dataset_root=args.dataset,
@@ -854,6 +915,7 @@ def cmd_benchmark_v2_visual_generate(args: argparse.Namespace) -> int:
         skill_registry=_skills(args),
         tasks=selected,
         arms=arms,
+        composition_overrides=composition_overrides,
         max_model_calls=args.max_model_calls,
         max_turns_per_arm=args.max_turns_per_arm,
         max_total_tokens=args.max_total_tokens,
@@ -1033,6 +1095,8 @@ def cmd_evolve_generate(args: argparse.Namespace) -> int:
             candidate_id=args.candidate_id,
             skill_name=args.skill_name,
             base_skill=args.base_skill,
+            lesson_max_output_tokens=args.lesson_max_output_tokens,
+            consolidation_max_output_tokens=args.consolidation_max_output_tokens,
         )
     _json_print(
         {
@@ -1054,6 +1118,62 @@ def cmd_evolve_promote(args: argparse.Namespace) -> int:
         min_delta=args.min_delta,
     )
     _json_print({"ok": True, "promoted_to": str(destination)})
+    return 0
+
+
+def _continuous_engine(args: argparse.Namespace) -> ContinuousEvolutionEngine:
+    config = ContinuousEvolutionConfig.load(args.config)
+    return ContinuousEvolutionEngine(config, args.workspace)
+
+
+def cmd_evolve_continuous_init(args: argparse.Namespace) -> int:
+    engine = _continuous_engine(args)
+    _json_print(engine.initialize())
+    return 0
+
+
+def cmd_evolve_continuous_step(args: argparse.Namespace) -> int:
+    engine = _continuous_engine(args)
+    engine.initialize()
+    _json_print(engine.step())
+    return 0
+
+
+def cmd_evolve_continuous_evidence(args: argparse.Namespace) -> int:
+    engine = _continuous_engine(args)
+    try:
+        document = json.loads(Path(args.evidence_file).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HarnessError(f"Unable to read evidence file: {args.evidence_file}") from exc
+    if isinstance(document, dict):
+        document = document.get("evidence")
+    if not isinstance(document, list):
+        raise HarnessError("Evidence file must contain a list or an {evidence: [...]} object")
+    evidence = tuple(EvidenceRef.from_document(item) for item in document)
+    _json_print(engine.add_evidence(evidence))
+    return 0
+
+
+def cmd_evolve_continuous_run(args: argparse.Namespace) -> int:
+    engine = _continuous_engine(args)
+    _json_print(engine.run(rounds=args.rounds))
+    return 0
+
+
+def cmd_evolve_continuous_status(args: argparse.Namespace) -> int:
+    state = RevisionStore(args.workspace).load_state()
+    _json_print(state)
+    return 0
+
+
+def cmd_evolve_continuous_freeze(args: argparse.Namespace) -> int:
+    engine = _continuous_engine(args)
+    _json_print(engine.store.freeze(engine.config))
+    return 0
+
+
+def cmd_evolve_continuous_rollback(args: argparse.Namespace) -> int:
+    _json_print(RevisionStore(args.workspace).rollback())
     return 0
 
 
@@ -1171,9 +1291,7 @@ def _plugin_mutation_from_document(document: dict[str, Any]) -> PluginMutation:
 
 
 def cmd_plugins_lifecycle(args: argparse.Namespace) -> int:
-    mutation = _plugin_mutation_from_document(
-        _json_object(args.mutation, label="plugin mutation")
-    )
+    mutation = _plugin_mutation_from_document(_json_object(args.mutation, label="plugin mutation"))
     mutation.validate(default_plugin_registry())
     decision = evaluate_candidate_lifecycle(
         mutation,
@@ -1259,11 +1377,50 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _max_output_tokens_value(value: str) -> int | None:
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "none", "unlimited", "no-limit"}:
+        return None
+    try:
+        parsed = int(normalized)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "max output tokens must be a positive integer or unlimited"
+        ) from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            "max output tokens must be a positive integer or unlimited"
+        )
+    return parsed
+
+
+def _max_total_tokens_value(value: str) -> int | None:
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "none", "unlimited", "no-limit"}:
+        return None
+    try:
+        parsed = int(normalized)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "max total tokens must be a positive integer or unlimited"
+        ) from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            "max total tokens must be a positive integer or unlimited"
+        )
+    return parsed
+
+
 def _add_agent_flags(parser: argparse.ArgumentParser) -> None:
     _add_provider_flags(parser)
     parser.add_argument("--skills", action="append", default=[], help="Additional skills root")
     parser.add_argument("--max-turns", type=int, default=30)
-    parser.add_argument("--max-output-tokens", type=int, default=16_000)
+    parser.add_argument(
+        "--max-output-tokens",
+        type=_max_output_tokens_value,
+        default=16_000,
+        help="Per-request output cap; use unlimited to omit max_tokens from provider requests",
+    )
     parser.add_argument("--no-code", action="store_true", help="Disable local code interpreter")
 
 
@@ -1408,7 +1565,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum model-response turns across all stages of each arm",
     )
     compare.add_argument("--max-total-tokens", type=int, default=100_000)
-    compare.add_argument("--max-output-tokens", type=int, default=4_096)
+    compare.add_argument("--max-output-tokens", type=_max_output_tokens_value, default=4_096)
     compare.add_argument("--task-timeout", type=float, default=900)
     compare.add_argument("--arm-order-seed", type=int, default=20_260_811)
     compare.add_argument("--circuit-breaker", type=int, default=3)
@@ -1437,7 +1594,7 @@ def build_parser() -> argparse.ArgumentParser:
     v1_compare.add_argument("--max-model-calls", type=int, default=20)
     v1_compare.add_argument("--max-turns-per-arm", type=int, default=20)
     v1_compare.add_argument("--max-total-tokens", type=int, default=200_000)
-    v1_compare.add_argument("--max-output-tokens", type=int, default=4_096)
+    v1_compare.add_argument("--max-output-tokens", type=_max_output_tokens_value, default=4_096)
     v1_compare.add_argument("--task-timeout", type=float, default=1_800)
     v1_compare.add_argument("--arm-order-seed", type=int, default=20_260_829)
     v1_compare.add_argument("--resume", action="store_true")
@@ -1483,9 +1640,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--arm",
         action="append",
         choices=(
-            "bare", "ours", "native", "paper",
-            "spreadsheet-rl-minimal", "spreadsheet-rl-native", "paper-vision",
-            "spreadsheet-harness-basic", "spreadsheet-harness-financial",
+            "bare",
+            "ours",
+            "native",
+            "paper",
+            "spreadsheet-rl-minimal",
+            "spreadsheet-rl-native",
+            "paper-vision",
+            "spreadsheet-harness-basic",
+            "spreadsheet-harness-financial",
         ),
         help=(
             "Comparison arm; spreadsheet-rl-minimal is the code+recalculate clean-room proxy, "
@@ -1499,16 +1662,32 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ARM=COMPOSITION",
         help="Override a selected arm composition; ours defaults to plugevolve-seed",
     )
+    v2_compare.add_argument(
+        "--composition-file",
+        action="append",
+        metavar="ARM=PATH",
+        help="Load an evolved composition.json/revision.json for a selected arm",
+    )
     v2_compare.add_argument("--skills", action="append", default=[])
     v2_compare.add_argument(
         "--skill-root",
         type=Path,
         help="Use an isolated complete skill root (for candidate-plugin evaluation)",
     )
-    v2_compare.add_argument("--max-model-calls", type=int, default=20)
-    v2_compare.add_argument("--max-turns-per-arm", type=int, default=20)
-    v2_compare.add_argument("--max-total-tokens", type=int, default=200_000)
-    v2_compare.add_argument("--max-output-tokens", type=int, default=4_096)
+    v2_compare.add_argument("--max-model-calls", type=int, default=50)
+    v2_compare.add_argument("--max-turns-per-arm", type=int, default=50)
+    v2_compare.add_argument(
+        "--max-total-tokens",
+        type=_max_total_tokens_value,
+        default=200_000,
+        help="Per-arm cumulative token budget; use unlimited to disable this budget",
+    )
+    v2_compare.add_argument(
+        "--max-output-tokens",
+        type=_max_output_tokens_value,
+        default=4_096,
+        help="Per-request output cap; use unlimited to omit max_tokens from provider requests",
+    )
     v2_compare.add_argument("--task-timeout", type=float, default=1_800)
     v2_compare.add_argument("--arm-order-seed", type=int, default=20_260_820)
     v2_compare.add_argument("--resume", action="store_true")
@@ -1519,6 +1698,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_provider_flags(v2_compare)
     v2_compare.set_defaults(handler=cmd_benchmark_v2_compare)
+
+    harbor_normalize = benchmark_commands.add_parser(
+        "harbor-normalize",
+        help="Convert a Harbor-packaged Financial_Model archive or directory to v2 layout",
+    )
+    harbor_normalize.add_argument("source", type=Path)
+    harbor_normalize.add_argument("--output", type=Path, required=True)
+    harbor_normalize.set_defaults(handler=cmd_benchmark_harbor_normalize)
 
     v2_visual_generate = benchmark_commands.add_parser(
         "v2-visual-generate",
@@ -1532,16 +1719,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--arm",
         action="append",
         choices=(
-            "bare", "ours", "native", "paper",
-            "spreadsheet-rl-minimal", "spreadsheet-rl-native", "paper-vision",
-            "spreadsheet-harness-basic", "spreadsheet-harness-financial",
+            "bare",
+            "ours",
+            "native",
+            "paper",
+            "spreadsheet-rl-minimal",
+            "spreadsheet-rl-native",
+            "paper-vision",
+            "spreadsheet-harness-basic",
+            "spreadsheet-harness-financial",
         ),
     )
     v2_visual_generate.add_argument("--skills", action="append", default=[])
-    v2_visual_generate.add_argument("--max-model-calls", type=int, default=20)
-    v2_visual_generate.add_argument("--max-turns-per-arm", type=int, default=20)
-    v2_visual_generate.add_argument("--max-total-tokens", type=int, default=200_000)
-    v2_visual_generate.add_argument("--max-output-tokens", type=int, default=4_096)
+    v2_visual_generate.add_argument(
+        "--skill-root",
+        type=Path,
+        help="Use an isolated complete skill root (for candidate-plugin evaluation)",
+    )
+    v2_visual_generate.add_argument(
+        "--composition",
+        action="append",
+        metavar="ARM=COMPOSITION",
+        help="Override a selected arm composition",
+    )
+    v2_visual_generate.add_argument("--max-model-calls", type=int, default=50)
+    v2_visual_generate.add_argument("--max-turns-per-arm", type=int, default=50)
+    v2_visual_generate.add_argument(
+        "--max-total-tokens",
+        type=_max_total_tokens_value,
+        default=200_000,
+        help="Per-arm cumulative token budget; use unlimited to disable this budget",
+    )
+    v2_visual_generate.add_argument(
+        "--max-output-tokens", type=_max_output_tokens_value, default=4_096
+    )
     v2_visual_generate.add_argument("--task-timeout", type=float, default=1_800)
     v2_visual_generate.add_argument("--arm-order-seed", type=int, default=20_260_829)
     v2_visual_generate.add_argument("--resume", action="store_true")
@@ -1596,6 +1807,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Current plugin SKILL.md; constrain evolution to a minimal one-coordinate mutation",
     )
+    generate.add_argument(
+        "--lesson-max-output-tokens",
+        type=_max_output_tokens_value,
+        default=4_000,
+        help="Per-trajectory lesson output cap; use unlimited to omit max_tokens",
+    )
+    generate.add_argument(
+        "--consolidation-max-output-tokens",
+        type=_max_output_tokens_value,
+        default=8_000,
+        help="Candidate consolidation output cap; use unlimited to omit max_tokens",
+    )
     _add_provider_flags(generate)
     generate.set_defaults(handler=cmd_evolve_generate)
 
@@ -1607,6 +1830,55 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--validation-report", type=Path, required=True)
     promote.add_argument("--min-delta", type=float, default=0.0)
     promote.set_defaults(handler=cmd_evolve_promote)
+
+    continuous_init = evolve_commands.add_parser(
+        "continuous-init", help="Initialize a persistent contract-governed evolution workspace"
+    )
+    continuous_init.add_argument("config", type=Path)
+    continuous_init.add_argument("workspace", type=Path)
+    continuous_init.set_defaults(handler=cmd_evolve_continuous_init)
+
+    continuous_step = evolve_commands.add_parser(
+        "continuous-step", help="Run one resumable evolution round"
+    )
+    continuous_step.add_argument("config", type=Path)
+    continuous_step.add_argument("workspace", type=Path)
+    continuous_step.set_defaults(handler=cmd_evolve_continuous_step)
+
+    continuous_evidence = evolve_commands.add_parser(
+        "continuous-evidence", help="Append redacted development trajectories to a workspace"
+    )
+    continuous_evidence.add_argument("config", type=Path)
+    continuous_evidence.add_argument("workspace", type=Path)
+    continuous_evidence.add_argument("evidence_file", type=Path)
+    continuous_evidence.set_defaults(handler=cmd_evolve_continuous_evidence)
+
+    continuous_run = evolve_commands.add_parser(
+        "continuous-run", help="Run evolution rounds until the configured limit or a stall"
+    )
+    continuous_run.add_argument("config", type=Path)
+    continuous_run.add_argument("workspace", type=Path)
+    continuous_run.add_argument("--rounds", type=int)
+    continuous_run.set_defaults(handler=cmd_evolve_continuous_run)
+
+    continuous_status = evolve_commands.add_parser(
+        "continuous-status", help="Show persistent evolution state"
+    )
+    continuous_status.add_argument("workspace", type=Path)
+    continuous_status.set_defaults(handler=cmd_evolve_continuous_status)
+
+    continuous_freeze = evolve_commands.add_parser(
+        "continuous-freeze", help="Freeze the accepted composition before held-out evaluation"
+    )
+    continuous_freeze.add_argument("config", type=Path)
+    continuous_freeze.add_argument("workspace", type=Path)
+    continuous_freeze.set_defaults(handler=cmd_evolve_continuous_freeze)
+
+    continuous_rollback = evolve_commands.add_parser(
+        "continuous-rollback", help="Atomically move the workspace pointer to the prior revision"
+    )
+    continuous_rollback.add_argument("workspace", type=Path)
+    continuous_rollback.set_defaults(handler=cmd_evolve_continuous_rollback)
 
     synthetic = subparsers.add_parser(
         "synthetic", help="Build and score exact-answer synthetic spreadsheet tasks"

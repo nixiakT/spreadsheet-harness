@@ -192,7 +192,10 @@ def check_chat_completions_tool_compatibility(config: ProviderConfig) -> dict[st
         "tool_choice": {"type": "function", "name": _CANARY_TOOL_NAME},
         "parallel_tool_calls": False,
         "reasoning": {"effort": config.reasoning_effort},
-        "max_output_tokens": 128,
+        # Reasoning-first providers can consume a few hundred hidden tokens
+        # even for a forced tool call. Keep the canary large enough to test
+        # tool replay instead of failing on an artificial output cap.
+        "max_output_tokens": 1_024,
     })
     try:
         with ChatCompletionsClient(config) as client:
@@ -252,7 +255,7 @@ def check_chat_completions_tool_compatibility(config: ProviderConfig) -> dict[st
                 },
                 "parallel_tool_calls": False,
                 "reasoning": {"effort": config.reasoning_effort},
-                "max_output_tokens": 64,
+                "max_output_tokens": 1_024,
             })
             second = client.create(second_payload)
             terminal_calls = _validated_function_calls(second.output)

@@ -16,6 +16,7 @@ from spreadsheet_harness.agent import (
     ResponsesClient,
     ResponseTurn,
     SpreadsheetAgent,
+    _code_interpreter_intends_workbook_edit,
     _edit_recovery_diagnostics,
     _failed_tool_requires_edit_recovery,
     _redact_model_visible,
@@ -33,8 +34,27 @@ from spreadsheet_harness.errors import (
     ProviderOutputLimitError,
     RecalculationIntegrityError,
 )
+from spreadsheet_harness.formula_runtime import formula_coordinate_sha256
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
+
+
+def test_code_interpreter_edit_preflight_requires_mutation_and_save() -> None:
+    assert not _code_interpreter_intends_workbook_edit(
+        {"code": "wb = sheet_harness.load_workbook(); sheet_harness.save_workbook(wb)"}
+    )
+    assert not _code_interpreter_intends_workbook_edit(
+        {"code": "wb = sheet_harness.load_workbook(); wb['Data']['B2'] = 3"}
+    )
+    assert _code_interpreter_intends_workbook_edit(
+        {
+            "code": (
+                "wb = sheet_harness.load_workbook()\n"
+                "wb['Data']['B2'] = '=A2*2'\n"
+                "sheet_harness.save_workbook(wb)"
+            )
+        }
+    )
 
 
 class _LateStallingStream(httpx.SyncByteStream):
@@ -829,7 +849,7 @@ def test_agent_forced_tool_prefix_reprompts_empty_response_without_advancing(
         config,
         tools,
         forced_tool_prefix=("list_sheets",),
-        max_turns=3,
+        max_turns=4,
     ).run("inspect")
 
     assert result.final_text == "done"
@@ -1867,7 +1887,7 @@ def test_agent_attaches_partial_evidence_to_recalculation_integrity_failure(
     }
     assert result.terminal_tool == "submit_result"
     assert result.observed_terminal_tool is None
-    assert result.terminal_submissions == 0
+    assert result.terminal_submissions == 1
     assert result.tool_trace == [
         {
             "name": "recalculate_and_read",
@@ -1932,6 +1952,12 @@ class _CalculationScenarioTools:
     ) -> None:
         self.session = session
         self.recalculation_outcomes = iter(recalculation_outcomes)
+        self.pending_formula_validation: set[tuple[str, str]] = set()
+
+    def set_pending_formula_validation_scope(
+        self, pending: set[tuple[str, str]]
+    ) -> None:
+        self.pending_formula_validation = set(pending)
 
     def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         if name == "recalculate_and_read":
@@ -2284,6 +2310,189 @@ def test_agent_allows_submit_after_repair_and_covering_clean_validation(
     ][0]
     assert passed["payload"]["outstanding_changes"]["cleared_coordinate_count"] == 1
     assert passed["payload"]["outstanding_after"]["total_count"] == 0
+
+
+def test_agent_immediately_validates_formula_mutations_but_allows_repair(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "write_range",
+                "arguments": {
+                    "sheet": "Sales",
+                    "start_cell": "D4",
+                    "values": [["=B4*C4+1"]],
+                },
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {
+                "type": "tool",
+                "name": "write_range",
+                "arguments": {
+                    "sheet": "Sales",
+                    "start_cell": "D4",
+                    "values": [["=B4*C4+2"]],
+                },
+            },
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"sheet": "Sales", "range_ref": "D4"},
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "immediate-formula-validation-run")
+    tools = _CalculationScenarioTools(
+        session,
+        [
+            _calculation_test_outcome("Sales", "D4", [("D4", "#REF!")]),
+            _calculation_test_outcome("Sales", "D4", []),
+        ],
+    )
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,  # type: ignore[arg-type]
+        required_tool_termination=True,
+        require_workbook_change=True,
+        require_formula_runtime_validation=True,
+        max_turns=5,
+    ).run("Repair the formula")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert client.requests[1]["tool_choice"] == {
+        "type": "function",
+        "name": "recalculate_and_read",
+    }
+    assert [tool["name"] for tool in client.requests[1]["tools"]] == [
+        "recalculate_and_read"
+    ]
+    assert "pending_formula_changes" in json.dumps(client.requests[1]["input"])
+    assert client.requests[2]["tool_choice"] == "auto"
+    assert {tool["name"] for tool in client.requests[2]["tools"]} == {
+        "recalculate_and_read",
+        "write_range",
+        "submit_result",
+    }
+    assert client.requests[3]["tool_choice"] == {
+        "type": "function",
+        "name": "recalculate_and_read",
+    }
+
+
+def test_agent_drops_unexecuted_premature_submit_before_formula_validation_replay(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class FormulaTools(_CalculationScenarioTools):
+        def __init__(self, session: WorkbookSession) -> None:
+            super().__init__(session, [])
+
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            if name != "recalculate_and_read":
+                return super().invoke(name, arguments)
+            pending = set(self.pending_formula_validation)
+            return ToolOutcome(
+                {
+                    "ok": True,
+                    "calculation_valid": True,
+                    "validation_scope": {
+                        "kind": "pending_formula_changes",
+                        "coordinate_count": len(pending),
+                        "coordinate_sha256": formula_coordinate_sha256(pending),
+                        "coverage_complete": True,
+                        "formula_cells_present": len(pending),
+                        "formula_cells_absent": 0,
+                    },
+                    "calculation_errors": {
+                        "count": 0,
+                        "coordinates": [],
+                        "coordinates_truncated": False,
+                    },
+                }
+            )
+
+    class PrematureSubmitClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                name = "write_range"
+                arguments = {
+                    "sheet": "Sales",
+                    "start_cell": "D4",
+                    "values": [["=B4*C4+1"]],
+                }
+            elif self.turn == 2:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "recalculate_and_read",
+                }
+                name = "submit_result"
+                arguments = {}
+            elif self.turn == 3:
+                # The rejected submit_result call must not be replayed because no
+                # corresponding function_call_output exists.
+                assert not any(
+                    item.get("type") == "function_call"
+                    and item.get("name") == "submit_result"
+                    for item in payload["input"]
+                )
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "recalculate_and_read",
+                }
+                name = "recalculate_and_read"
+                arguments = {"validation_scope": "pending_formula_changes"}
+            else:
+                assert [tool["name"] for tool in payload["tools"]] == ["submit_result"]
+                name = "submit_result"
+                arguments = {}
+            return ResponseTurn(
+                f"response-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{self.turn}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", PrematureSubmitClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "premature-submit-formula")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        FormulaTools(session),  # type: ignore[arg-type]
+        required_tool_termination=True,
+        require_workbook_change=True,
+        require_formula_runtime_validation=True,
+        max_turns=4,
+    ).run("Repair the formula")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert result.terminal_submissions == 1
 
 
 def test_agent_clears_outstanding_calculation_coordinates_progressively(
@@ -3627,7 +3836,100 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
         "type": "function",
         "name": "submit_result",
     }
-    assert FinalTurnClient.requests[1]["max_output_tokens"] == 512
+
+
+def test_required_tool_termination_defers_final_read_only_inspection(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class InspectBeforeSubmitClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> InspectBeforeSubmitClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-tool",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-tool",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            if self.turn == 2:
+                return ResponseTurn(
+                    "response-list",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-list-2",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            if self.turn == 3:
+                return ResponseTurn(
+                    "response-inspect",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-inspect",
+                            "name": "inspect_range",
+                            "arguments": '{"sheet":"Sales","range_ref":"A1:B2"}',
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", InspectBeforeSubmitClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "inspect-before-submit-run")
+    tools = SpreadsheetToolRegistry(session, enable_code=False)
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,
+        required_tool_termination=True,
+        max_turns=5,
+        budget=RunBudget(max_model_calls=5),
+    ).run("inspect")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert result.tool_trace == [
+        {"name": "list_sheets", "ok": True},
+        {"name": "list_sheets", "ok": True},
+        {"name": "inspect_range", "ok": True},
+    ]
+    assert result.terminal_submissions == 1
 
 
 def test_required_tool_termination_rejects_unadvanced_prefix_on_final_turn(
@@ -3752,6 +4054,67 @@ def test_required_tool_termination_reserves_last_shared_budget_call_for_submit(
         "name": "submit_result",
     }
     assert [tool["name"] for tool in BudgetTerminalClient.requests[0]["tools"]] == ["submit_result"]
+
+
+def test_required_tool_termination_reserves_two_shared_budget_calls_for_submit_retry(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class TwoSlotTerminalClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            pass
+
+        def __enter__(self) -> TwoSlotTerminalClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            return ResponseTurn(
+                "response-submit",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-submit",
+                        "name": "submit_result",
+                        "arguments": "{}",
+                    }
+                ],
+                "",
+                {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ChatCompletionsClient", TwoSlotTerminalClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "two-slot-budget-terminal-run")
+    budget = RunBudget(max_model_calls=3, max_total_tokens=100)
+    reservation = budget.begin_model_call(stage="prior")
+    budget.record_response(reservation, {"total_tokens": 2}, stage="prior")
+
+    result = SpreadsheetAgent(
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            api_protocol="chat-completions",
+        ),
+        SpreadsheetToolRegistry(session, enable_code=False),
+        max_turns=5,
+        budget=budget,
+        required_tool_termination=True,
+    ).run("inspect")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert result.turns == 1
+    assert TwoSlotTerminalClient.requests[0]["tool_choice"] == {
+        "type": "function",
+        "name": "submit_result",
+    }
+    assert [tool["name"] for tool in TwoSlotTerminalClient.requests[0]["tools"]] == [
+        "submit_result"
+    ]
 
 
 def test_required_tool_termination_rejects_prefix_on_last_shared_budget_call(
@@ -4678,6 +5041,63 @@ def test_agent_classifies_invalid_terminal_submission_as_execution_failure(
     assert failed[0]["payload"]["reason"] == "terminal_submission_invalid"
 
 
+def test_agent_reprompts_nonempty_terminal_acknowledgement(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class RetryTerminalClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> RetryTerminalClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            arguments = {"unexpected": True} if self.turn == 1 else {}
+            return ResponseTurn(
+                f"response-terminal-retry-{self.turn}",
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-terminal-retry-{self.turn}",
+                        "name": "submit_result",
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+                "",
+                {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", RetryTerminalClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "terminal-retry-run")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        SpreadsheetToolRegistry(session, enable_code=False),
+        max_turns=2,
+        required_tool_termination=True,
+    ).run("inspect")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert result.turns == 2
+    assert result.terminal_submissions == 1
+    assert RetryTerminalClient.requests[1]["tool_choice"] == {
+        "type": "function",
+        "name": "submit_result",
+    }
+    assert "literal empty JSON object {}" in json.dumps(RetryTerminalClient.requests[1])
+    events = [
+        json.loads(line)
+        for line in session.paths.trajectory.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "agent.invalid_terminal_reprompted" for event in events)
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -5126,7 +5546,8 @@ def test_chat_completions_client_uses_auto_tool_choice_for_minimax_models() -> N
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": "",
+                                "content": "\n\n\n",
+                                "reasoning_content": "Calling list_sheets.",
                                 "tool_calls": [
                                     {
                                         "id": "tool-call-1",
@@ -5219,12 +5640,26 @@ def test_chat_completions_client_uses_auto_tool_choice_for_minimax_models() -> N
             "call_id": "tool-call-1",
             "name": "list_sheets",
             "arguments": "{}",
-            "provider_reasoning_content": "",
+            "provider_reasoning_content": "Calling list_sheets.",
         }
     ]
     assert second.text == "Done"
     assert seen[0]["tool_choice"] == "auto"
-    assert seen[1]["messages"][0]["reasoning_content"] == ""
+    assert seen[1]["messages"] == [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Calling list_sheets.",
+            "tool_calls": [
+                {
+                    "id": "tool-call-1",
+                    "type": "function",
+                    "function": {"name": "list_sheets", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tool-call-1", "content": '{"ok":true}'},
+    ]
 
 
 @pytest.mark.parametrize(

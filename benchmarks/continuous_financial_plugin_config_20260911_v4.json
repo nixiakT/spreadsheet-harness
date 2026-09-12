@@ -1,0 +1,73 @@
+{
+  "schema_version": "continuous-plugin-evolution-config-v1",
+  "repository_root": "/data/zju-160/tongzeyuan/spreadsheet-harness",
+  "composition": "spreadsheet-harness-financial",
+  "groups": {
+    "harness": ["policy-ours", "profile-deterministic-compact"],
+    "domain": ["skill-spreadsheet-financial-model"]
+  },
+  "contexts": [
+    {
+      "name": "replay-v06-c3",
+      "kind": "replay",
+      "task_ids": ["Financial_Model/fina_Debu_01_c0", "Financial_Model/fina_Debu_03_c0"],
+      "workbook_families": ["spreadsheet/01_Debugging/01_golden.xlsx", "spreadsheet/03_Debugging/03_golden.xlsx"],
+      "weight": 1.0,
+      "runner": {"dataset": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/data/normalized-harbor/v06-financial-269"}
+    },
+    {
+      "name": "transfer-v06-c2",
+      "kind": "transfer",
+      "task_ids": ["Financial_Model/fina_Debu_03_c1", "Financial_Model/fina_Fina_01_Education_c0"],
+      "workbook_families": ["spreadsheet/03_Debugging/03_golden.xlsx", "spreadsheet/01_Project Education/01_Education_golden.xlsx"],
+      "weight": 1.0,
+      "runner": {"dataset": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/data/normalized-harbor/v06-financial-269"}
+    },
+    {
+      "name": "regression-enhanced-hard",
+      "kind": "regression",
+      "task_ids": ["Financial_Model/fina_Fina_dam_2cc0046ebc_capstru_c0", "Financial_Model/fina_Fina_eus_140c5d9253_FinStmtEx_c0"],
+      "workbook_families": ["dam_2cc0046ebc_capstru.xlsx", "eus_140c5d9253_FinStmtEx.xlsx"],
+      "weight": 1.0,
+      "runner": {"dataset": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/data/normalized-harbor/v2-enhanced-financial-1565"}
+    }
+  ],
+  "heldout_task_ids": [
+    "Financial_Model/fina_Debu_04_c0",
+    "Financial_Model/fina_Fina_dam_2cc0046ebc_capstru_c1",
+    "Financial_Model/fina_Fina_eus_3fdc873ac8_0211Score_c0"
+  ],
+  "initial_evidence": [
+    {
+      "path": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/coevolution-full-v07-deepseekpro-fsmfix-20260911/v06/h0d1/Financial_Model_fina_Debu_01_c0/runs/Financial_Model/fina_Debu_01_c0/spreadsheet-harness-financial/trajectory.jsonl",
+      "task_id": "Financial_Model/fina_Debu_01_c0",
+      "task_type": "Financial_Model",
+      "workbook_family": "spreadsheet/01_Debugging/01_golden.xlsx"
+    }
+  ],
+  "evaluation_binding": {
+    "protocol": "paired_official_evaluator_v4",
+    "model": "DeepSeek-V4-Pro",
+    "provider": "http://10.130.138.46:8010/v1",
+    "dataset_revision": "harbor-financial-v06-v2-enhanced-normalized-20260911",
+    "evaluator_sha256": "04a2a75b29805ab40efe93e202384c365d1d32b9c924c1a4aed56e41249facb0",
+    "max_model_calls": 8,
+    "max_total_tokens": null,
+    "task_timeout_seconds": 1800,
+    "seed": 20260911
+  },
+  "promotion": {
+    "delta": 0.001,
+    "epsilon": 0.0,
+    "confidence": 0.90,
+    "bootstrap_samples": 200,
+    "min_pairs_per_context": 2
+  },
+  "first_group": "domain",
+  "max_rounds": 3,
+  "max_candidates_per_round": 1,
+  "proposer_command": ["/data/zju-160/tongzeyuan/spreadsheet-harness/.venv/bin/python", "/data/zju-160/tongzeyuan/spreadsheet-harness/tools/propose_financial_implementation_20260911.py", "{request}", "{response}"],
+  "evaluator_command": ["/data/zju-160/tongzeyuan/spreadsheet-harness/.venv/bin/python", "/data/zju-160/tongzeyuan/spreadsheet-harness/tools/evaluate_continuous_financial_20260911.py", "{request}", "{response}"],
+  "command_timeout_seconds": 7200,
+  "static_checks": [["/data/zju-160/tongzeyuan/spreadsheet-harness/.venv/bin/python", "-m", "compileall", "-q", "{source}"]]
+}

@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.drawing.image import Image as WorkbookImage
+from PIL import Image as PillowImage
 
 from spreadsheet_harness import code_interpreter
 from spreadsheet_harness.agent import ResponseTurn, SpreadsheetAgent
@@ -20,6 +22,99 @@ from spreadsheet_harness.openpyxl_compat import load_workbook as compat_load_wor
 from spreadsheet_harness.render import sheet_inventory_identity
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry
+
+
+def test_runtime_helper_view_xlsx_and_inspect_range_compatibility(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "runtime-view"
+    workspace.mkdir()
+    workbook = workspace / "input.xlsx"
+    shutil.copy2(sample_workbook, workbook)
+    interpreter = LocalCodeInterpreter(workspace, workbook)
+
+    result = interpreter.run(
+        """print(sheet_harness.view_xlsx(mode="list"))
+print(sheet_harness.view_xlsx(sheet=" sales ", start_row=1, end_row=2, cols="A:B"))
+print(sheet_harness.view_xlsx(sheet="Sales", start_row=1, end_row=1, start_col="B", end_col=3))
+wb = sheet_harness.load_workbook()
+print(sheet_harness.view_xlsx(wb, sheet="Sales", start_row=2, end_row=2, cols="A:B"))
+overview = sheet_harness.workbook_overview(wb)
+assert overview[0]["dimensions"] == overview[0]["dimension"]
+print(sheet_harness.inspect_range("A1:B2", " sales ", wb)["range"])
+large = sheet_harness.inspect_range("Sales", "A1:D200", wb, max_cells=8)
+print(large["range"], large["requested_range"], large["requested_cell_count"], large["truncated"])
+assert sheet_harness.get_worksheet_by_name(wb, " sales ").title == "Sales"
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True
+    assert "Sheets: ['Sales'" in result["stdout"]
+    assert "Sheet: Sales\n" in result["stdout"]
+    assert "Row 1:" in result["stdout"]
+    assert "Row 2: ['Apple', 2]" in result["stdout"]
+    assert "A1:B2\n" in result["stdout"]
+    assert result["stdout"].rstrip().endswith("A1:D2 A1:D200 800 True")
+
+
+def test_runtime_helper_preserves_images_across_digest_and_repeated_save(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "runtime-image-save"
+    workspace.mkdir()
+    image_path = workspace / "pixel.png"
+    PillowImage.new("RGB", (2, 2), (10, 20, 30)).save(image_path)
+    workbook_path = workspace / "input.xlsx"
+    workbook = Workbook()
+    workbook.active.add_image(WorkbookImage(image_path), "A1")
+    workbook.save(workbook_path)
+    workbook.close()
+
+    interpreter = LocalCodeInterpreter(workspace, workbook_path)
+    result = interpreter.run(
+        """wb = sheet_harness.load_workbook()
+wb.active["B2"] = "changed"
+sheet_harness.save_workbook(wb)
+sheet_harness.save_workbook(wb)
+wb.close()
+"""
+    )
+
+    assert result["ok"] is True, result
+    saved = load_workbook(workbook_path)
+    try:
+        assert saved.active["B2"].value == "changed"
+        assert len(saved.active._images) == 1
+    finally:
+        saved.close()
+
+
+def test_runtime_helper_save_is_noop_without_semantic_edit(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "runtime-save"
+    workspace.mkdir()
+    workbook = workspace / "input.xlsx"
+    shutil.copy2(sample_workbook, workbook)
+    interpreter = LocalCodeInterpreter(workspace, workbook)
+
+    unchanged = interpreter.run(
+        "wb = sheet_harness.load_workbook(); sheet_harness.save_workbook(wb); wb.close()"
+    )
+    edited = interpreter.run(
+        "wb = sheet_harness.load_workbook(); wb['Sales']['B2'] = 'changed'; "
+        "sheet_harness.save_workbook(wb); wb.close()"
+    )
+
+    assert unchanged["ok"] is True
+    assert unchanged["workbook_changed"] is False
+    assert unchanged["managed_mutation_attempted"] is False
+    assert edited["ok"] is True
+    assert edited["workbook_changed"] is True
+    assert edited["managed_mutation_attempted"] is True
 
 
 def test_outer_sandbox_limits_defer_host_uid_process_limit(monkeypatch: Any) -> None:

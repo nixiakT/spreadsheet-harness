@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import warnings
 import zipfile
 from pathlib import Path
@@ -90,6 +91,268 @@ def test_restore_ooxml_data_tables_recovers_libreoffice_destroyed_region(
     assert report == {"regions": 1, "cells": 4}
 
 
+def test_restore_ooxml_data_tables_recovers_string_result_cache(
+    tmp_path: Path,
+) -> None:
+    """String-valued tables (e.g. multiple/percentage labels) keep TABLE caches."""
+    source = tmp_path / "source-string.xlsx"
+    converted = tmp_path / "converted-string.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = "2.4x/19%"  # result cell referenced by the table anchor
+    sheet["A2"] = 0.1
+    sheet["B1"] = 0.2
+    sheet["B2"] = DataTableFormula(ref="B2:C3", dt2D=True, r1="D1", r2="D2")
+    sheet["C2"] = "#REF!"
+    sheet["B3"] = "#REF!"
+    sheet["C3"] = "#REF!"
+    workbook.save(source)
+    workbook.close()
+
+    workbook = load_workbook(source, data_only=False)
+    sheet = workbook["Model"]
+    for coordinate in ("B2", "C2", "B3", "C3"):
+        sheet[coordinate] = "=TABLE($D$1,$D$2)"
+    workbook.save(converted)
+    workbook.close()
+
+    report = render_module._restore_ooxml_data_tables(source, converted)
+    values = load_workbook(converted, data_only=True)
+    assert values["Model"]["B2"].value == "2.4x/19%"
+    assert values["Model"]["C3"].value == "2.4x/19%"
+    values.close()
+    assert report == {"regions": 1, "cells": 4}
+
+
+def test_restore_ooxml_data_table_uses_calculated_numeric_anchor(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source-anchor.xlsx"
+    converted = tmp_path / "converted-anchor.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = 0
+    sheet["B1"] = 0.1
+    sheet["A2"] = 0.2
+    sheet["B2"] = DataTableFormula(
+        ref="B2:C3",
+        dt2D=True,
+        r1="E1",
+        r2="E2",
+    )
+    sheet["C2"] = 11.0
+    sheet["B3"] = 12.0
+    sheet["C3"] = 13.0
+    workbook.save(source)
+    workbook.close()
+    shutil.copy2(source, converted)
+
+    report = render_module._restore_ooxml_data_tables(
+        source,
+        converted,
+        anchor_values={("Model", "B2"): 42.5},
+    )
+
+    values = load_workbook(converted, data_only=True)
+    assert values["Model"]["B2"].value == 42.5
+    values.close()
+    formulas = load_workbook(converted, data_only=False)
+    assert formulas["Model"]["B2"].value == 42.5
+    formulas.close()
+    assert report == {"regions": 1, "cells": 4}
+
+
+def test_restore_ooxml_data_table_keeps_converted_style_for_anchor(
+    tmp_path: Path,
+) -> None:
+    """A compacted LibreOffice style table must not receive source style IDs."""
+    source = tmp_path / "source-high-style.xlsx"
+    converted = tmp_path / "converted-low-style.xlsx"
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = 0.1
+    sheet["A2"] = 0.2
+    sheet["B2"] = DataTableFormula(ref="B2:C3", dt2D=True, r1="A1", r2="A2")
+    sheet["C2"] = 11.0
+    sheet["B3"] = 12.0
+    sheet["C3"] = 13.0
+    # Allocate a style ID that a later LibreOffice export can compact away.
+    from openpyxl.styles import Font
+
+    for index in range(24):
+        sheet.cell(row=10 + index, column=1).font = Font(name=f"SourceFont{index}")
+    sheet["B2"].font = Font(name="HighStyleAnchor")
+    workbook.save(source)
+    workbook.close()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["B2"] = 42.0
+    sheet["C2"] = 11.0
+    sheet["B3"] = 12.0
+    sheet["C3"] = 13.0
+    workbook.save(converted)
+    workbook.close()
+
+    report = render_module._restore_ooxml_data_tables(
+        source,
+        converted,
+        anchor_values={("Model", "B2"): 42.5},
+    )
+
+    output = load_workbook(converted, data_only=False)
+    assert output["Model"]["B2"].value == 42.5
+    output.close()
+    assert report == {"regions": 1, "cells": 4}
+
+
+def test_restore_ooxml_array_formula_keeps_container_and_converted_body(
+    tmp_path: Path,
+) -> None:
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    source = tmp_path / "source-array.xlsx"
+    converted = tmp_path / "converted-array.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = ArrayFormula(ref="A1:A2", text="=ROW(A1:A2)")
+    sheet["A2"] = 2.0
+    workbook.save(source)
+    workbook.close()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = "=ROW(A1:A2)"
+    sheet["A2"] = 22.0
+    workbook.save(converted)
+    workbook.close()
+
+    report = render_module._restore_ooxml_array_formulas(source, converted)
+
+    output = load_workbook(converted, data_only=False)
+    assert isinstance(output["Model"]["A1"].value, ArrayFormula)
+    assert output["Model"]["A1"].value.text == "=ROW(A1:A2)"
+    assert output["Model"]["A2"].value == 22.0
+    output.close()
+    assert report == {"regions": 1, "cells": 2}
+
+
+def test_restore_array_formula_kind_keeps_recalculated_cache(tmp_path: Path) -> None:
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    source = tmp_path / "source-array-kind.xlsx"
+    converted = tmp_path / "converted-array-kind.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["B2"] = ArrayFormula(ref="B2:B2", text="=AVERAGE(A1:A3/100)")
+    workbook.save(source)
+    workbook.close()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["B2"] = "=AVERAGE(A1:A3/100)"
+    workbook.save(converted)
+    workbook.close()
+    with zipfile.ZipFile(converted) as package:
+        part = render_module._worksheet_parts_by_name(package)["Model"]
+        root = ElementTree.fromstring(package.read(part))
+        namespace = root.tag[1:].split("}", 1)[0]
+        value = next(
+            cell.find(f"{{{namespace}}}v")
+            for cell in root.iter(f"{{{namespace}}}c")
+            if cell.attrib.get("r") == "B2"
+        )
+        assert value is not None
+        value.text = "0.42"
+        xml = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+    render_module._replace_ooxml_parts(converted, {part: xml})
+
+    assert render_module._restore_array_formula_kinds(source, converted) == 1
+    formula_book = load_workbook(converted, data_only=False)
+    assert isinstance(formula_book["Model"]["B2"].value, ArrayFormula)
+    formula_book.close()
+    value_book = load_workbook(converted, data_only=True)
+    assert value_book["Model"]["B2"].value == 0.42
+    value_book.close()
+
+
+def test_restore_ooxml_formula_text_keeps_recalculated_cache(tmp_path: Path) -> None:
+    source = tmp_path / "source-formula.xlsx"
+    converted = tmp_path / "converted-formula.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = "=XIRR(A2:A3,B2:B3)"
+    workbook.save(source)
+    workbook.close()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = "=com.sun.star.sheet.addin.Analysis.getXirr(A2:A3,B2:B3)"
+    workbook.save(converted)
+    workbook.close()
+
+    assert render_module._restore_ooxml_formula_text(source, converted) == 1
+    output = load_workbook(converted, data_only=False)
+    assert output["Model"]["A1"].value == "=XIRR(A2:A3,B2:B3)"
+    output.close()
+
+
+def test_final_data_table_scenario_preserves_formula_inputs(tmp_path: Path) -> None:
+    path = tmp_path / "scenario.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["C11"] = "=C20"
+    sheet["C20"] = 10.0
+    sheet["C31"] = 0.1
+    cases = [
+        render_module._DataTableAnchorCase(
+            sheet="Model",
+            anchor="AG18",
+            result_cell="AF17",
+            row_input="C20",
+            column_input="C31",
+            row_header_value=0.14,
+            column_header_value=12.2,
+            final_row_header_value=0.34,
+            final_column_header_value=16.2,
+        ),
+        render_module._DataTableAnchorCase(
+            sheet="Model",
+            anchor="AG45",
+            result_cell="AF44",
+            row_input="C11",
+            column_input="C20",
+            row_header_value=10.2,
+            column_header_value=9.8,
+            final_row_header_value=18.2,
+            final_column_header_value=17.8,
+        ),
+    ]
+
+    selected = render_module._apply_data_table_final_scenario_inputs(workbook, cases)
+    workbook.save(path)
+    workbook.close()
+
+    output = load_workbook(path, data_only=False)
+    assert output["Model"]["C11"].value == "=C20"
+    assert output["Model"]["C20"].value == 18.2
+    assert output["Model"]["C31"].value == 0.1
+    output.close()
+    assert selected == {"Model": {"C11"}}
+
+
 def test_patch_font_colors_ooxml_preserves_unrelated_package_parts(
     tmp_path: Path,
 ) -> None:
@@ -170,6 +433,141 @@ def test_restore_ooxml_cell_contents_preserves_target_font_style(
     output.close()
 
 
+def test_restore_ooxml_cell_contents_decodes_package_local_shared_strings(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source-shared-strings.xlsx"
+    target = tmp_path / "target-shared-strings.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["A1"] = "alpha"
+    worksheet["A2"] = "beta"
+    worksheet["B1"] = "=1+1"
+    workbook.save(source)
+    workbook.close()
+    shutil.copy2(source, target)
+    mutated = load_workbook(target, data_only=False)
+    mutated["Model"]["B1"] = "=1+2"
+    mutated.save(target)
+    mutated.close()
+
+    spreadsheet_namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    package_relationship_namespace = (
+        "http://schemas.openxmlformats.org/package/2006/relationships"
+    )
+    content_type_namespace = (
+        "http://schemas.openxmlformats.org/package/2006/content-types"
+    )
+
+    def use_shared_strings(path: Path, strings: list[str], indices: dict[str, int]) -> None:
+        temporary = path.with_name(f".{path.name}.tmp")
+        with zipfile.ZipFile(path, "r") as source_package, zipfile.ZipFile(
+            temporary, "w"
+        ) as target_package:
+            replacements: dict[str, bytes] = {}
+            sheet = ElementTree.fromstring(source_package.read("xl/worksheets/sheet1.xml"))
+            for cell in sheet.iter(f"{{{spreadsheet_namespace}}}c"):
+                coordinate = cell.attrib.get("r")
+                if coordinate not in indices:
+                    continue
+                cell.set("t", "s")
+                for child in list(cell):
+                    cell.remove(child)
+                value = ElementTree.SubElement(
+                    cell, f"{{{spreadsheet_namespace}}}v"
+                )
+                value.text = str(indices[coordinate])
+            replacements["xl/worksheets/sheet1.xml"] = ElementTree.tostring(
+                sheet, encoding="utf-8", xml_declaration=True
+            )
+
+            relationships = ElementTree.fromstring(
+                source_package.read("xl/_rels/workbook.xml.rels")
+            )
+            relationship_ids = {item.attrib.get("Id") for item in relationships}
+            relationship_id = "rIdSharedStrings"
+            assert relationship_id not in relationship_ids
+            ElementTree.SubElement(
+                relationships,
+                f"{{{package_relationship_namespace}}}Relationship",
+                {
+                    "Id": relationship_id,
+                    "Type": (
+                        "http://schemas.openxmlformats.org/officeDocument/2006/"
+                        "relationships/sharedStrings"
+                    ),
+                    "Target": "sharedStrings.xml",
+                },
+            )
+            replacements["xl/_rels/workbook.xml.rels"] = ElementTree.tostring(
+                relationships, encoding="utf-8", xml_declaration=True
+            )
+
+            content_types = ElementTree.fromstring(
+                source_package.read("[Content_Types].xml")
+            )
+            ElementTree.SubElement(
+                content_types,
+                f"{{{content_type_namespace}}}Override",
+                {
+                    "PartName": "/xl/sharedStrings.xml",
+                    "ContentType": (
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sharedStrings+xml"
+                    ),
+                },
+            )
+            replacements["[Content_Types].xml"] = ElementTree.tostring(
+                content_types, encoding="utf-8", xml_declaration=True
+            )
+
+            shared_strings = ElementTree.Element(
+                f"{{{spreadsheet_namespace}}}sst",
+                {"count": str(len(indices)), "uniqueCount": str(len(strings))},
+            )
+            for text in strings:
+                item = ElementTree.SubElement(
+                    shared_strings, f"{{{spreadsheet_namespace}}}si"
+                )
+                node = ElementTree.SubElement(
+                    item, f"{{{spreadsheet_namespace}}}t"
+                )
+                node.text = text
+            replacements["xl/sharedStrings.xml"] = ElementTree.tostring(
+                shared_strings, encoding="utf-8", xml_declaration=True
+            )
+
+            for info in source_package.infolist():
+                target_package.writestr(
+                    info,
+                    replacements.pop(info.filename, source_package.read(info.filename)),
+                )
+            for name, payload in replacements.items():
+                target_package.writestr(name, payload)
+        temporary.replace(path)
+
+    use_shared_strings(source, ["alpha", "beta"], {"A1": 0, "A2": 1})
+    use_shared_strings(
+        target,
+        ["inserted", "alpha", "changed"],
+        {"A1": 1, "A2": 2},
+    )
+
+    restored = render_module.restore_ooxml_cell_contents(
+        source,
+        target,
+        selected_coordinates={"Model": ["A1", "A2", "B1"]},
+    )
+
+    assert restored == 2
+    output = load_workbook(target, data_only=False)
+    assert output["Model"]["A1"].value == "alpha"
+    assert output["Model"]["A2"].value == "beta"
+    assert output["Model"]["B1"].value == "=1+1"
+    output.close()
+
+
 def test_transplant_formula_caches_preserves_formula_and_font_style(
     tmp_path: Path,
 ) -> None:
@@ -181,7 +579,7 @@ def test_transplant_formula_caches_preserves_formula_and_font_style(
     worksheet = workbook.active
     worksheet.title = "Model"
     worksheet["A1"] = 2
-    worksheet["B1"] = "=A1*3"
+    worksheet["B1"] = "=+A1*3"
     worksheet["B1"].font = Font(color="FFFF0000")
     workbook.save(target)
     workbook.close()
@@ -195,11 +593,15 @@ def test_transplant_formula_caches_preserves_formula_and_font_style(
     namespace = render_module._xml_namespace(root.tag)
     cell_tag = f"{{{namespace}}}c"
     value_tag = f"{{{namespace}}}v"
+    formula_tag = f"{{{namespace}}}f"
     formula_cell = next(
         cell for cell in root.iter(cell_tag) if cell.attrib.get("r") == "B1"
     )
     value = formula_cell.find(value_tag)
     assert value is not None
+    formula = formula_cell.find(formula_tag)
+    assert formula is not None
+    formula.text = "A1*3"
     value.text = "6"
     ElementTree.register_namespace("", namespace)
     render_module._replace_ooxml_parts(
@@ -214,12 +616,71 @@ def test_transplant_formula_caches_preserves_formula_and_font_style(
 
     assert transplanted == 1
     formula_workbook = load_workbook(target, data_only=False)
-    assert formula_workbook["Model"]["B1"].value == "=A1*3"
+    assert formula_workbook["Model"]["B1"].value == "=+A1*3"
     assert formula_workbook["Model"]["B1"].font.color.rgb == "FFFF0000"
     formula_workbook.close()
     value_workbook = load_workbook(target, data_only=True)
     assert value_workbook["Model"]["B1"].value == 6
     value_workbook.close()
+
+
+def test_transplant_formula_caches_can_include_data_table_body(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "data-table-target.xlsx"
+    recalculated = tmp_path / "data-table-recalculated.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["A1"] = DataTableFormula(ref="A1:B2", dt2D=True, r1="C1", r2="C2")
+    worksheet["B1"] = 11
+    worksheet["A2"] = 12
+    worksheet["B2"] = 13
+    workbook.save(target)
+    workbook.close()
+    recalculated.write_bytes(target.read_bytes())
+
+    with zipfile.ZipFile(recalculated) as package:
+        part = render_module._worksheet_parts_by_name(package)["Model"]
+        root = render_module._parse_inventory_xml(
+            package.read(part), label="test recalculated data table"
+        )
+    namespace = render_module._xml_namespace(root.tag)
+    cell_tag = f"{{{namespace}}}c"
+    value_tag = f"{{{namespace}}}v"
+    replacements = {"A1": "21", "B1": "22", "A2": "23", "B2": "24"}
+    for cell in root.iter(cell_tag):
+        if cell.attrib.get("r") not in replacements:
+            continue
+        value = cell.find(value_tag)
+        if value is None:
+            value = ElementTree.SubElement(cell, value_tag)
+        value.text = replacements[str(cell.attrib["r"])]
+        cell.attrib.pop("t", None)
+    ElementTree.register_namespace("", namespace)
+    render_module._replace_ooxml_parts(
+        recalculated,
+        {part: ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)},
+    )
+
+    transplanted = render_module.transplant_ooxml_formula_cached_values(
+        recalculated,
+        target,
+        include_data_table_regions=True,
+    )
+
+    assert transplanted == 4
+    formulas = load_workbook(target, data_only=False)
+    assert isinstance(formulas["Model"]["A1"].value, DataTableFormula)
+    formulas.close()
+    values = load_workbook(target, data_only=True)
+    assert [values["Model"][cell].value for cell in ("A1", "B1", "A2", "B2")] == [
+        21,
+        22,
+        23,
+        24,
+    ]
+    values.close()
 
 
 def _minimal_workbook_xml(
@@ -784,17 +1245,24 @@ def test_recalculation_uses_private_copy_and_atomic_replace(
     metadata = recalculate_workbook(source, source)
 
     assert seen_sources and seen_sources[0] != source.resolve()
-    assert sha256_file(source) == original_hash
+    assert sha256_file(source) == metadata["output_sha256"]
     assert metadata["backend"] == "libreoffice-headless"
+    assert metadata["calculation_mode"] == "uno-calculate-all"
+    assert metadata["iterative_calculation"] == {
+        "enabled": True,
+        "steps": 100,
+        "minimum_change": 0.0001,
+        "source_requested": False,
+    }
     assert metadata["version"] == "LibreOffice test"
     assert metadata["source_sha256"] == original_hash
-    assert metadata["output_sha256"] == original_hash
     assert metadata["destination_path"] == str(source.resolve())
     assert metadata["atomic_replace"] is True
     assert metadata["published"] is True
     integrity = metadata["sheet_inventory_integrity"]
     assert integrity["matched"] is True
-    assert integrity["pre"] == integrity["post"]
+    assert integrity["pre"]["sheets"] == integrity["post"]["sheets"]
+    assert integrity["pre"]["inventory_sha256"] == integrity["post"]["inventory_sha256"]
 
 
 def test_recalculation_validates_chartsheet_package_without_openpyxl_loader(
@@ -1024,6 +1492,32 @@ def test_libreoffice_recalculation_updates_formula_without_changing_sheet_identi
     integrity = metadata["sheet_inventory_integrity"]
     assert integrity["matched"] is True
     assert integrity["pre"]["sheets"] == integrity["post"]["sheets"]
+
+
+@pytest.mark.skipif(find_libreoffice() is None, reason="LibreOffice is not installed")
+def test_libreoffice_recalculation_forces_manual_workbook_calculate_all(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "manual-formulas.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = 20
+    sheet["B1"] = "=A1+22"
+    workbook.calculation.calcMode = "manual"
+    workbook.calculation.fullCalcOnLoad = False
+    workbook.calculation.forceFullCalc = False
+    workbook.save(source)
+    workbook.close()
+
+    metadata = recalculate_workbook(source, source)
+
+    recalculated = load_workbook(source, data_only=True, read_only=True)
+    try:
+        assert recalculated["Model"]["B1"].value == 42
+    finally:
+        recalculated.close()
+    assert metadata["calculation_mode"] == "uno-calculate-all"
 
 
 @pytest.mark.skipif(find_libreoffice() is None, reason="LibreOffice is not installed")

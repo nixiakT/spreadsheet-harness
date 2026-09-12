@@ -91,6 +91,45 @@ sheet-harness benchmark v2-compare \
 `run.json` 和评测结果。`status=completed` 只表示执行完成，正确性应以
 `official_score` 为准。
 
+Financial calibration bundles from the v0.6 generator and the enhanced v2
+release use Harbor's one-task-per-directory layout.  They can be passed to
+the same v2 runner directly; the harness safely materializes only the task
+metadata and input/golden workbook pair:
+
+```bash
+sheet-harness benchmark v2-compare \
+  --dataset benchmarks/data/SpreadsheetBench-v2-enhanced-Financial_Model-1565.tar.gz \
+  --category Financial_Model \
+  --task-id Financial_Model/fina_Fina_dam_12ec3ea6c4_fcff2st_c0 \
+  --arm spreadsheet-harness-financial \
+  --max-model-calls 50 --max-turns-per-arm 50 \
+  --max-output-tokens unlimited \
+  --temperature 0 --top-p 1 --enable-thinking \
+  --output benchmarks/results/financial-smoke
+```
+
+`unlimited`（也可写 `0` 或 `none`）表示不向 provider 发送 `max_tokens`；总
+model-call、total-token 和 task-timeout budget 仍然生效。
+
+Use `benchmark harbor-normalize SOURCE --output DIR` when a persistent
+canonical `Financial_Model/dataset.json` is needed.  Both supplied archives
+are marked `dataset_role=calibration_only`; keep them out of held-out claims.
+
+四臂 co-evolution 结果可以用同一个只读汇总器生成 paired win/tie/loss、资源成本
+以及 `G_H`、`G_D`、`G_joint`、`I`。它按任务目录读取 `summary.json`，未完成的 arm
+不会被静默当成 0：
+
+```bash
+.venv/bin/python tools/report_coevolution_metrics.py \
+  --arm h0d0=benchmarks/results/coevolution-validation/h0d0 \
+  --arm h1d0=benchmarks/results/coevolution-validation/h1d0 \
+  --arm h0d1=benchmarks/results/coevolution-validation/h0d1 \
+  --arm h1d1=benchmarks/results/coevolution-validation/h1d1 \
+  --metric accuracy \
+  --output benchmarks/results/coevolution-validation/report.json \
+  --markdown benchmarks/results/coevolution-validation/report.md
+```
+
 查看插件组合或生成候选 skill：
 
 ```bash
@@ -109,3 +148,26 @@ ruff check .
 benchmark 结果必须同时记录数据集、模型、provider protocol、计算后端、插件
 组合 hash 和代码/skill manifest；不同协议或计算引擎的结果不能直接混成同一
 排行榜数字。
+
+### 插件级持续进化
+
+`evolve generate/promote` 是旧的单个 skill 候选流程；完整的插件自进化使用持久化、
+契约约束的控制器。它可更新插件的 prompt、description、bounded config 和实现文件，
+在隔离 revision 中完成候选构建，按 replay/transfer/regression 三种配对上下文验证，
+通过 bootstrap 置信下界后才原子晋升，并支持断点恢复、回滚和 held-out 冻结：
+
+```bash
+sheet-harness evolve continuous-init config.json evolution-workspace
+sheet-harness evolve continuous-evidence config.json evolution-workspace evidence.json
+sheet-harness evolve continuous-run config.json evolution-workspace --rounds 10
+sheet-harness evolve continuous-status evolution-workspace
+sheet-harness evolve continuous-freeze config.json evolution-workspace
+```
+
+配置中的 `proposer_command` 和 `evaluator_command` 是受控适配器（使用
+`{request}`、`{response}`、`{directory}` 占位符）。控制器固定契约、任务划分、评估绑定、
+阈值和状态迁移；适配器只能返回结构化候选或验证报告，不能扩大写入权限。要将已晋升
+revision 用于 SpreadsheetBench-v2，可把其 `composition.json` 传给
+`benchmark v2-compare --composition-file ours=... --skill-root revision/artifact/skills`；金融模型插件的实现坐标还包括
+`src/spreadsheet_harness/financial_model_repairs.py`，因此不再局限于 `SKILL.md`。
+可直接复制并填写 [`examples/continuous_evolution_config.example.json`](examples/continuous_evolution_config.example.json)。

@@ -11,6 +11,7 @@ from spreadsheet_harness.plugins import (
     ARM_COMPOSITIONS,
     PLUGEOLVE_SEED_COMPOSITION,
     SPREADSHEET_HARNESS_BASIC_COMPOSITION,
+    SPREADSHEET_HARNESS_CORE_COMPOSITION,
     SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION,
     CompositionEvaluation,
     CompositionSpec,
@@ -83,6 +84,19 @@ def test_financial_ablation_compositions_differ_by_one_domain_plugin() -> None:
     assert set(financial.skill_names) - set(basic.skill_names) == {
         "spreadsheet-financial-model"
     }
+
+
+def test_core_composition_enables_exactly_one_general_skill() -> None:
+    plan = execution_plan(
+        default_plugin_registry().resolve(SPREADSHEET_HARNESS_CORE_COMPOSITION)
+    )
+
+    assert plan.tool_mode == "code-plus-formula-validation"
+    assert plan.profile_mode == "compact"
+    assert plan.policy == "ours"
+    assert plan.skill_names == ("spreadsheet-core",)
+    assert plan.require_formula_runtime_validation is True
+    assert plan.repair_date_text is True
 
 
 def test_formula_runtime_verifier_requires_scope_aware_native_tools() -> None:

@@ -336,15 +336,17 @@ def _response_text(response: Any, stage: str) -> tuple[str, str | None]:
 
 
 def _model_payload(
-    model: str, instructions: str, text: str, max_output_tokens: int
+    model: str, instructions: str, text: str, max_output_tokens: int | None
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "model": model,
         "instructions": instructions,
         "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}],
-        "max_output_tokens": max_output_tokens,
         "store": False,
     }
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = max_output_tokens
+    return payload
 
 
 def _normalize_skill(text: str) -> str:
@@ -386,8 +388,8 @@ def generate_candidate(
     candidate_id: str | None = None,
     skill_name: str = "spreadsheet-core",
     base_skill: str | Path | None = None,
-    lesson_max_output_tokens: int = 4_000,
-    consolidation_max_output_tokens: int = 8_000,
+    lesson_max_output_tokens: int | None = 4_000,
+    consolidation_max_output_tokens: int | None = 8_000,
 ) -> Candidate:
     """Generate per-trajectory lessons, then consolidate a candidate SKILL.md.
 
@@ -414,13 +416,20 @@ def generate_candidate(
     generation_dict = getattr(client_config, "generation_dict", None)
     generation = generation_dict() if callable(generation_dict) else {}
 
-    def model_payload(instructions: str, text: str, max_output_tokens: int) -> dict[str, Any]:
+    def model_payload(
+        instructions: str, text: str, max_output_tokens: int | None
+    ) -> dict[str, Any]:
         payload = _model_payload(resolved_model, instructions, text, max_output_tokens)
         return apply_generation(payload) if callable(apply_generation) else payload
 
     if not skill_name.strip():
         raise ValueError("skill_name must not be empty")
-    if lesson_max_output_tokens < 1 or consolidation_max_output_tokens < 1:
+    if (
+        lesson_max_output_tokens is not None
+        and lesson_max_output_tokens < 1
+        or consolidation_max_output_tokens is not None
+        and consolidation_max_output_tokens < 1
+    ):
         raise ValueError("max output token limits must be positive")
     resolved_id = _safe_candidate_id(candidate_id, evidences, resolved_model)
     candidate_parent = _candidate_parent(output_root)
@@ -487,6 +496,10 @@ def generate_candidate(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model": resolved_model,
         "generation": generation,
+        "output_limits": {
+            "lesson_max_output_tokens": lesson_max_output_tokens,
+            "consolidation_max_output_tokens": consolidation_max_output_tokens,
+        },
         "skill_name": skill_name.strip(),
         "base_skill": str(base_skill) if base_skill is not None else None,
         "base_skill_sha256": base_skill_sha256,

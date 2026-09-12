@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import re
 import signal
 import threading
 import time
@@ -444,40 +445,56 @@ def _responses_input_to_chat_messages(
         return messages
     if not isinstance(input_items, list):
         raise HarnessError("Chat Completions adapter requires list or string input")
+    pending_tool_calls: list[dict[str, Any]] = []
+    pending_tool_reasoning: str | None = None
+
+    def flush_tool_calls() -> None:
+        nonlocal pending_tool_calls, pending_tool_reasoning
+        if not pending_tool_calls:
+            return
+        assistant_message: dict[str, Any] = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": pending_tool_calls,
+        }
+        if pending_tool_reasoning is not None:
+            assistant_message["reasoning_content"] = pending_tool_reasoning
+        messages.append(assistant_message)
+        pending_tool_calls = []
+        pending_tool_reasoning = None
+
     for item in input_items:
         if not isinstance(item, dict):
             raise HarnessError("Chat Completions adapter input items must be objects")
         item_type = item.get("type")
         if item_type == "function_call":
-            assistant_message = {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": str(item.get("call_id") or item.get("id") or ""),
-                        "type": "function",
-                        "function": {
-                            "name": str(item.get("name", "")),
-                            "arguments": (
-                                item.get("arguments")
-                                if isinstance(item.get("arguments"), str)
-                                else json.dumps(
-                                    item.get("arguments", {}),
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                            ),
-                        },
-                    }
-                ],
-            }
+            pending_tool_calls.append(
+                {
+                    "id": str(item.get("call_id") or item.get("id") or ""),
+                    "type": "function",
+                    "function": {
+                        "name": str(item.get("name", "")),
+                        "arguments": (
+                            item.get("arguments")
+                            if isinstance(item.get("arguments"), str)
+                            else json.dumps(
+                                item.get("arguments", {}),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        ),
+                    },
+                }
+            )
             reasoning_content = item.get("provider_reasoning_content")
             if isinstance(reasoning_content, str):
-                assistant_message["reasoning_content"] = reasoning_content
-            elif any(name in model.casefold() for name in ("kimi", "minimax")):
-                assistant_message["reasoning_content"] = " "
-            messages.append(assistant_message)
+                pending_tool_reasoning = reasoning_content
+            elif pending_tool_reasoning is None and any(
+                name in model.casefold() for name in ("kimi", "minimax")
+            ):
+                pending_tool_reasoning = " "
             continue
+        flush_tool_calls()
         if item_type == "function_call_output":
             messages.append(
                 {
@@ -498,6 +515,7 @@ def _responses_input_to_chat_messages(
         elif role == "assistant" and any(name in model.casefold() for name in ("kimi", "minimax")):
             chat_message["reasoning_content"] = " "
         messages.append(chat_message)
+    flush_tool_calls()
     return messages
 
 
@@ -643,7 +661,16 @@ def _chat_message_to_output(message: dict[str, Any]) -> tuple[list[dict[str, Any
         if isinstance(reasoning_content, str):
             function_call["provider_reasoning_content"] = reasoning_content
         output.append(function_call)
-    if text or not output:
+    # Some reasoning providers (notably MiniMax through LiteLLM) return a
+    # whitespace-only content field alongside a valid tool call.  Replaying
+    # that as a second assistant message separates the tool result from its
+    # tool call, which the provider correctly rejects as an invalid sequence.
+    # A Chat Completions assistant tool-call message may contain explanatory
+    # text, but replaying that text as a second assistant message places it
+    # between ``tool_calls`` and the corresponding role=tool result.  Keep the
+    # tool-call message atomic; the short rationale is already captured in the
+    # harness history summary and is not needed for provider replay.
+    if not output:
         assistant_output = {
             "type": "message",
             "role": "assistant",
@@ -2964,7 +2991,9 @@ def _formula_runtime_validation_prompt(
     if diagnostics is not None:
         escaped_diagnostics = diagnostics.replace("<", "\\u003c").replace(">", "\\u003e")
         prompt += (
-            "\n<untrusted_formula_validation_diagnostics>\n"
+            " If the diagnostics report an invalid or incomplete prior validation, repair the "
+            "formula cells before calling recalculate_and_read again.\n"
+            "<untrusted_formula_validation_diagnostics>\n"
             f"{escaped_diagnostics}\n"
             "</untrusted_formula_validation_diagnostics>"
         )
@@ -2998,6 +3027,36 @@ def _failed_tool_requires_edit_recovery(
     return False
 
 
+def _code_interpreter_intends_workbook_edit(arguments: dict[str, Any]) -> bool:
+    """Recognize a code call that intends to persist workbook edits.
+
+    The read-only inspection deadline must not reject the first actual edit.
+    Runtime hash and mutation-marker checks remain authoritative after execution;
+    this predicate only decides whether a call may pass the preflight gate.
+    """
+
+    code = arguments.get("code")
+    if not isinstance(code, str):
+        return False
+    persists = bool(
+        re.search(r"\bsheet_harness\.save_workbook\s*\(", code)
+        or re.search(r"\b(?:workbook|wb)\.save\s*\(", code)
+    )
+    mutates = bool(
+        re.search(r"(?:\[[^\n]+\]|\.value|\.formula)\s*=", code)
+        or re.search(
+            r"\.(?:fill|font|border|alignment|protection|number_format|comment|hyperlink)\s*=",
+            code,
+        )
+        or re.search(
+            r"\.(?:append|add_chart|add_image|add_table|add_data_validation|"
+            r"merge_cells|unmerge_cells|insert_rows|delete_rows|insert_cols|delete_cols)\s*\(",
+            code,
+        )
+    )
+    return persists and mutates
+
+
 class SpreadsheetAgent:
     def __init__(
         self,
@@ -3006,7 +3065,7 @@ class SpreadsheetAgent:
         *,
         skills: SkillRegistry | None = None,
         max_turns: int = 30,
-        max_output_tokens: int = 16_000,
+        max_output_tokens: int | None = 16_000,
         max_elapsed_seconds: float | None = None,
         base_instructions: str | None = None,
         budget: RunBudget | None = None,
@@ -3152,6 +3211,7 @@ class SpreadsheetAgent:
         )
         workbook_changed = False
         read_only_code_calls_before_edit = 0
+        agent_code_edit_made = False
         last_workbook_change_reminder_turn = 0
 
         def refresh_workbook_changed() -> bool:
@@ -3247,6 +3307,10 @@ class SpreadsheetAgent:
         pending_formula_validation: set[FormulaCoordinate] = set()
         pending_formula_expected_presence: dict[FormulaCoordinate, bool] = {}
         latest_formula_validation_diagnostics: str | None = None
+        # A formula mutation must be checked before the model resumes broad
+        # inspection. A completed recalculation clears this one-shot route so a
+        # failed validation can be repaired before validation is attempted again.
+        formula_validation_immediately_required = False
         if callable(formula_scope_setter):
             formula_scope_setter(pending_formula_validation)
 
@@ -3404,6 +3468,7 @@ class SpreadsheetAgent:
                     self.required_tool_termination
                     and request_timings
                     and forced_prefix_index >= len(self.forced_tool_prefix)
+                    and self.max_output_tokens is not None
                     and self.budget is not None
                     and self.budget.max_total_tokens is not None
                     and self.budget.max_total_tokens >= 10 * self.max_output_tokens
@@ -3417,18 +3482,32 @@ class SpreadsheetAgent:
                         "instructions": system,
                         "input": input_items,
                         "reasoning": {"effort": self.config.reasoning_effort},
-                        "max_output_tokens": self.max_output_tokens,
+                        **(
+                            {"max_output_tokens": self.max_output_tokens}
+                            if self.max_output_tokens is not None
+                            else {}
+                        ),
                     }
                 )
                 recovery_turn_code_forced = False
                 recovery_turn_formula_validation_forced = False
                 terminal_route_forced = False
+                terminal_after_forced_route = False
                 remaining_model_calls = (
                     self.budget.remaining_model_calls() if self.budget is not None else None
                 )
                 budget_terminal_turn = bool(
                     self.required_tool_termination
-                    and (remaining_model_calls == 1 or token_budget_terminal_turn)
+                    and (
+                        remaining_model_calls == 1
+                        or (
+                            self.config.api_protocol == "chat-completions"
+                            and forced_prefix_index >= len(self.forced_tool_prefix)
+                            and remaining_model_calls is not None
+                            and remaining_model_calls <= 2
+                        )
+                        or token_budget_terminal_turn
+                    )
                 )
                 final_agent_turn = turn_number == self.max_turns
                 recovery_slot_turn = bool(
@@ -3474,8 +3553,8 @@ class SpreadsheetAgent:
                     if (
                         forced_tool is None
                         and self.require_formula_runtime_validation
+                        and formula_validation_immediately_required
                         and pending_formula_validation
-                        and recovery_slot_turn
                     ):
                         recovery_turn_formula_validation_forced = True
                     if (
@@ -3498,50 +3577,79 @@ class SpreadsheetAgent:
                         final_agent_turn or budget_terminal_turn
                     ):
                         if forced_tool is not None:
-                            failure_detail = {
-                                "stage": self.stage,
-                                "turn": turn_number,
-                                "forced_prefix_index": forced_prefix_index,
-                                "next_forced_tool": forced_tool,
-                                "remaining_forced_tool_prefix": list(
-                                    self.forced_tool_prefix[forced_prefix_index:]
-                                ),
-                                "terminal_tool": TERMINAL_TOOL_NAME,
-                                "reservation_basis": [
-                                    basis
-                                    for basis, active in (
-                                        ("max_turns", final_agent_turn),
-                                        (
-                                            "max_model_calls",
-                                            budget_terminal_turn and not token_budget_terminal_turn,
-                                        ),
-                                        ("max_total_tokens", token_budget_terminal_turn),
-                                    )
-                                    if active
-                                ],
-                                "reason": "forced_prefix_incomplete_before_terminal",
-                            }
-                            session.recorder.record("agent.routing_failed", failure_detail)
-                            raise AgentRoutingError(
-                                "Forced tool prefix remained incomplete before the reserved "
-                                f"{TERMINAL_TOOL_NAME!r} route"
-                            )
-                        terminal_route_forced = True
-                        request_tool_schemas = [
-                            schema
-                            for schema in tool_schemas
-                            if schema.get("name") == TERMINAL_TOOL_NAME
-                        ]
-                        if supports_explicit_tool_choice:
-                            tool_choice = {
-                                "type": "function",
-                                "name": TERMINAL_TOOL_NAME,
-                            }
-                        if not self.terminal_result_required:
-                            request_max_output_tokens = min(
-                                request_max_output_tokens,
-                                _FINAL_TOOL_MAX_OUTPUT_TOKENS,
-                            )
+                            # A formula edit discovered on the penultimate turn still
+                            # needs one runtime validation call. On the final reserved
+                            # turn, perform that validation and accept it as the terminal
+                            # route when it clears the pending scope; there is no model
+                            # response slot left for a second acknowledgement call.
+                            if (
+                                forced_tool == "recalculate_and_read"
+                                and recovery_turn_formula_validation_forced
+                                and pending_formula_validation
+                            ):
+                                terminal_after_forced_route = True
+                            else:
+                                failure_detail = {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "forced_prefix_index": forced_prefix_index,
+                                    "next_forced_tool": forced_tool,
+                                    "remaining_forced_tool_prefix": list(
+                                        self.forced_tool_prefix[forced_prefix_index:]
+                                    ),
+                                    "terminal_tool": TERMINAL_TOOL_NAME,
+                                    "reservation_basis": [
+                                        basis
+                                        for basis, active in (
+                                            ("max_turns", final_agent_turn),
+                                            (
+                                                "max_model_calls",
+                                                budget_terminal_turn and not token_budget_terminal_turn,
+                                            ),
+                                            ("max_total_tokens", token_budget_terminal_turn),
+                                        )
+                                        if active
+                                    ],
+                                    "reason": "forced_prefix_incomplete_before_terminal",
+                                }
+                                session.recorder.record("agent.routing_failed", failure_detail)
+                                raise AgentRoutingError(
+                                    "Forced tool prefix remained incomplete before the reserved "
+                                    f"{TERMINAL_TOOL_NAME!r} route"
+                                )
+                        if not terminal_after_forced_route:
+                            terminal_route_forced = True
+                            request_tool_schemas = [
+                                schema
+                                for schema in tool_schemas
+                                if schema.get("name") == TERMINAL_TOOL_NAME
+                            ]
+                            if supports_explicit_tool_choice:
+                                tool_choice = {
+                                    "type": "function",
+                                    "name": TERMINAL_TOOL_NAME,
+                                }
+                            if not self.terminal_result_required and request_max_output_tokens is not None:
+                                request_max_output_tokens = min(
+                                    request_max_output_tokens,
+                                    _FINAL_TOOL_MAX_OUTPUT_TOKENS,
+                                )
+                        else:
+                            request_tool_schemas = [
+                                schema
+                                for schema in tool_schemas
+                                if schema.get("name") == forced_tool
+                            ]
+                            if supports_explicit_tool_choice:
+                                tool_choice = {
+                                    "type": "function",
+                                    "name": forced_tool,
+                                }
+                            if request_max_output_tokens is not None:
+                                request_max_output_tokens = min(
+                                    request_max_output_tokens,
+                                    _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
+                                )
                     elif forced_tool is not None:
                         request_tool_schemas = [
                             schema for schema in tool_schemas if schema.get("name") == forced_tool
@@ -3551,7 +3659,7 @@ class SpreadsheetAgent:
                                 "type": "function",
                                 "name": forced_tool,
                             }
-                        if forced_tool != "code_interpreter":
+                        if forced_tool != "code_interpreter" and request_max_output_tokens is not None:
                             request_max_output_tokens = min(
                                 request_max_output_tokens,
                                 _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
@@ -3573,7 +3681,8 @@ class SpreadsheetAgent:
                             )
                     elif self.required_tool_termination:
                         tool_choice = "auto"
-                    payload["max_output_tokens"] = request_max_output_tokens
+                    if request_max_output_tokens is not None:
+                        payload["max_output_tokens"] = request_max_output_tokens
                     payload.update(
                         {
                             "tools": request_tool_schemas,
@@ -3869,6 +3978,7 @@ class SpreadsheetAgent:
                     elif expected_forced_tool is None and recovery_turn_code_forced:
                         expected_forced_tool = "code_interpreter"
                 observed_forced_prefix_tool: str | None = None
+                deferred_forced_tool_mismatch = False
                 if expected_forced_tool is not None:
                     observed_forced_tools = [
                         str(function_call.get("name", "")) for function_call, _ in function_calls
@@ -3889,7 +3999,10 @@ class SpreadsheetAgent:
                         if (
                             expected_forced_tool == "recalculate_and_read"
                             and observed_forced_tools
-                            and all(name == "code_interpreter" for name in observed_forced_tools)
+                            and all(
+                                name in {"code_interpreter", "undo_last"}
+                                for name in observed_forced_tools
+                            )
                             and turn_number < self.max_turns
                         ):
                             session.recorder.record(
@@ -3902,7 +4015,27 @@ class SpreadsheetAgent:
                                     "observed_forced_tools": observed_forced_tools,
                                 },
                             )
-                            recent_items = list(turn.output)
+                            # Do not replay the assistant function call without its matching
+                            # function_call_output.  That produces an invalid Chat Completions
+                            # message sequence (and MiniMax rejects it with error 2013).  Let the
+                            # normal tool-execution path run this inspection call, then append the
+                            # validation prompt after its result has been paired below.
+                            deferred_forced_tool_mismatch = True
+                        # A model may try to submit immediately after a formula edit.
+                        # Keep the terminal call out of the tool history and ask for
+                        # runtime validation on the next turn; treating this as a fatal
+                        # forced-route mismatch wastes the entire editing arm.
+                        if (
+                            expected_forced_tool == "recalculate_and_read"
+                            and observed_forced_tools == [TERMINAL_TOOL_NAME]
+                            and pending_formula_validation
+                            and turn_number < self.max_turns
+                        ):
+                            # The terminal call was deliberately not executed, so it has no
+                            # matching function_call_output to replay.  Replaying it before the
+                            # validation prompt leaves an orphaned assistant tool call in the
+                            # next Chat Completions request and can trigger a provider 400.
+                            recent_items = []
                             recent_items.append(
                                 {
                                     "role": "user",
@@ -3921,7 +4054,51 @@ class SpreadsheetAgent:
                             recent_raw_tool_output_chars = 0
                             recent_image_bytes = 0
                             recent_image_count = 0
+                            session.recorder.record(
+                                "agent.pending_formula_terminal_reprompted",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "terminal_tool": TERMINAL_TOOL_NAME,
+                                    "pending": _pending_formula_summary(
+                                        pending_formula_validation
+                                    ),
+                                },
+                            )
                             continue
+                        # Chat-completions models occasionally spend the reserved
+                        # terminal turn on one final workbook inspection.  This is
+                        # recoverable when a model-call slot remains: execute the
+                        # inspection with its matching tool output, then force the
+                        # terminal acknowledgement on the next turn instead of
+                        # invalidating an otherwise valid artifact.
+                        if (
+                            expected_forced_tool == TERMINAL_TOOL_NAME
+                            and observed_forced_tools
+                            and all(
+                                name
+                                in {
+                                    "code_interpreter",
+                                    "recalculate_and_read",
+                                    # Read-only workbook inspection can be the model's
+                                    # final verification step before completion.
+                                    "inspect_range",
+                                    "view_xlsx",
+                                }
+                                for name in observed_forced_tools
+                            )
+                            and turn_number <= self.max_turns
+                        ):
+                            session.recorder.record(
+                                "agent.terminal_route_deferred",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "requested_forced_tool": expected_forced_tool,
+                                    "observed_forced_tools": observed_forced_tools,
+                                },
+                            )
+                            deferred_forced_tool_mismatch = True
                         if (
                             expected_forced_tool != TERMINAL_TOOL_NAME
                             and not observed_forced_tools
@@ -3963,7 +4140,12 @@ class SpreadsheetAgent:
                             recent_image_bytes = 0
                             recent_image_count = 0
                             session.recorder.record(
-                                "agent.empty_forced_tool_response_reprompted",
+                                (
+                                    "agent.pending_formula_text_reprompted"
+                                    if expected_forced_tool == "recalculate_and_read"
+                                    and pending_formula_validation
+                                    else "agent.empty_forced_tool_response_reprompted"
+                                ),
                                 {
                                     "stage": self.stage,
                                     "turn": turn_number,
@@ -3973,23 +4155,33 @@ class SpreadsheetAgent:
                                 },
                             )
                             continue
-                        session.recorder.record(
-                            "agent.routing_failed",
-                            {
-                                "stage": self.stage,
-                                "forced_turn": turn_number,
-                                "forced_prefix_index": forced_prefix_index,
-                                "requested_forced_tool": expected_forced_tool,
-                                "observed_forced_tools": observed_forced_tools,
-                            },
-                        )
-                        raise AgentRoutingError(
-                            f"Forced turn {turn_number} required exactly one tool type, "
-                            f"{expected_forced_tool!r}; observed {observed_forced_tools!r}"
-                        )
-                    assert observed_forced_tool is not None
-                    if not terminal_route_forced and forced_prefix_index < len(
+                        # A deferred mismatch is intentionally recoverable: the observed
+                        # inspection call is executed and the required validation/terminal
+                        # route is requested on the following turn.  Do not fall through to
+                        # the fatal routing error after setting the deferral flag.
+                        if not deferred_forced_tool_mismatch:
+                            session.recorder.record(
+                                "agent.routing_failed",
+                                {
+                                    "stage": self.stage,
+                                    "forced_turn": turn_number,
+                                    "forced_prefix_index": forced_prefix_index,
+                                    "requested_forced_tool": expected_forced_tool,
+                                    "observed_forced_tools": observed_forced_tools,
+                                },
+                            )
+                            raise AgentRoutingError(
+                                f"Forced turn {turn_number} required exactly one tool type, "
+                                f"{expected_forced_tool!r}; observed {observed_forced_tools!r}"
+                            )
+                    if not deferred_forced_tool_mismatch:
+                        assert observed_forced_tool is not None
+                    if (
+                        not deferred_forced_tool_mismatch
+                        and not terminal_route_forced
+                        and forced_prefix_index < len(
                         self.forced_tool_prefix
+                        )
                     ):
                         if forced_prefix_index == 0:
                             observed_first_tool = observed_forced_tool
@@ -4067,6 +4259,48 @@ class SpreadsheetAgent:
                         message = (
                             f"Terminal tool {TERMINAL_TOOL_NAME!r} returned invalid JSON: {exc}"
                         )
+                        if (
+                            not self.terminal_result_required
+                            and turn_number < self.max_turns
+                            and not budget_terminal_turn
+                            and (
+                                self.budget is None
+                                or self.budget.remaining_model_calls() > 0
+                            )
+                        ):
+                            # Do not replay the malformed terminal call: it has no matching
+                            # tool output. Ask the model for the protocol-mandated empty object
+                            # on a fresh terminal-only turn.
+                            recent_items = [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": (
+                                                f"Your previous {TERMINAL_TOOL_NAME} call had invalid "
+                                                "JSON and was not accepted. Call "
+                                                f"{TERMINAL_TOOL_NAME} exactly once now with the "
+                                                "literal empty JSON object {} and no prose."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ]
+                            recent_summaries = []
+                            recent_raw_tool_output_chars = 0
+                            recent_image_bytes = 0
+                            recent_image_count = 0
+                            session.recorder.record(
+                                "agent.invalid_terminal_reprompted",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "terminal_tool": TERMINAL_TOOL_NAME,
+                                    "reason": "invalid_json",
+                                },
+                            )
+                            continue
                         raise execution_failure(
                             message,
                             reason="terminal_submission_invalid",
@@ -4098,6 +4332,49 @@ class SpreadsheetAgent:
                         }
                     else:
                         if arguments != {}:
+                            if (
+                                not self.terminal_result_required
+                                and turn_number < self.max_turns
+                                and not budget_terminal_turn
+                                and (
+                                    self.budget is None
+                                    or self.budget.remaining_model_calls() > 0
+                                )
+                            ):
+                                # The terminal call is a protocol acknowledgement, so an
+                                # extra field is a recoverable formatting error. The invalid
+                                # call is intentionally omitted from replay because it has no
+                                # corresponding tool output in the conversation history.
+                                recent_items = [
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "input_text",
+                                                "text": (
+                                                    f"Your previous {TERMINAL_TOOL_NAME} call was "
+                                                    "rejected because it contained arguments. Call "
+                                                    f"{TERMINAL_TOOL_NAME} exactly once now with the "
+                                                    "literal empty JSON object {} and no prose."
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                ]
+                                recent_summaries = []
+                                recent_raw_tool_output_chars = 0
+                                recent_image_bytes = 0
+                                recent_image_count = 0
+                                session.recorder.record(
+                                    "agent.invalid_terminal_reprompted",
+                                    {
+                                        "stage": self.stage,
+                                        "turn": turn_number,
+                                        "terminal_tool": TERMINAL_TOOL_NAME,
+                                        "reason": "nonempty_arguments",
+                                    },
+                                )
+                                continue
                             raise execution_failure(
                                 f"Terminal tool {TERMINAL_TOOL_NAME!r} requires an empty "
                                 "acknowledgement object",
@@ -4666,6 +4943,14 @@ class SpreadsheetAgent:
                     return result
 
                 archived_tool_history.extend(recent_summaries)
+                # Preserve the assistant ``function_call`` items when replaying a
+                # tool turn.  The Chat Completions adapter converts these into an
+                # assistant message carrying ``tool_calls``; dropping them while
+                # retaining the subsequent ``function_call_output`` produces an
+                # invalid sequence (a role=tool message with no preceding
+                # assistant tool_calls), which LiteLLM rejects with HTTP 400.
+                # Rebuild function-call items below so no-argument calls can be
+                # sanitized before replay. Non-call output is retained verbatim.
                 next_recent_items = [
                     item for item in turn.output if item.get("type") != "function_call"
                 ]
@@ -4680,6 +4965,11 @@ class SpreadsheetAgent:
                 )
                 turn_had_failed_edit = False
                 turn_formula_prompt_needed = False
+                if deferred_forced_tool_mismatch and pending_formula_validation:
+                    # The required validation route remains pending after the deferred
+                    # code_interpreter call.  Ask for it only after the call's tool result is
+                    # included in the next request.
+                    turn_formula_prompt_needed = True
                 for function_call, call_id in function_calls:
                     ensure_within_deadline()
                     calls += 1
@@ -4708,12 +4998,12 @@ class SpreadsheetAgent:
                         parsed_arguments = arguments
                         edit_deadline_rejected = bool(
                             name == "code_interpreter"
-                            and self.require_workbook_change
                             and self.max_read_only_code_calls_before_edit is not None
-                            and not refresh_workbook_changed()
+                            and not agent_code_edit_made
                             and not recovery_turn_code_forced
                             and read_only_code_calls_before_edit
                             >= self.max_read_only_code_calls_before_edit
+                            and not _code_interpreter_intends_workbook_edit(arguments)
                         )
                         try:
                             outcome = (
@@ -4736,6 +5026,7 @@ class SpreadsheetAgent:
                                 ),
                                 turns=turn_number,
                                 observed_terminal_tool=None,
+                                terminal_submissions=(1 if self.required_tool_termination else 0),
                             )
                             exc.agent_result = result
                             exc.agent_stage = self.stage
@@ -4759,10 +5050,10 @@ class SpreadsheetAgent:
                                 "workbook_mutation_attempted": False,
                                 "workbook_changed": False,
                                 "error": (
-                                    "Edit deadline reached: this code_interpreter call must make "
-                                    "the requested workbook edits and call "
-                                    "sheet_harness.save_workbook(wb). Reuse prior inspection "
-                                    "evidence; another read-only scan is not allowed."
+                                    "Read-only inspection deadline reached. Reuse prior evidence: "
+                                    "either make the requested workbook edits and call "
+                                    "sheet_harness.save_workbook(wb), or submit the completed "
+                                    "result. Another read-only scan is not allowed."
                                 ),
                             }
                             session.recorder.record(
@@ -4778,8 +5069,11 @@ class SpreadsheetAgent:
                         else:
                             assert outcome is not None
                             outcome_data = outcome.data
-                            if name == "code_interpreter" and not refresh_workbook_changed():
-                                read_only_code_calls_before_edit += 1
+                            if name == "code_interpreter":
+                                if outcome_data.get("workbook_changed") is True:
+                                    agent_code_edit_made = True
+                                elif not agent_code_edit_made:
+                                    read_only_code_calls_before_edit += 1
                         summary_arguments = arguments
                     if _failed_tool_requires_edit_recovery(
                         name,
@@ -4820,6 +5114,7 @@ class SpreadsheetAgent:
                         formula_scope_setter(pending_formula_validation)
                         if changed_formulas:
                             latest_formula_validation_diagnostics = None
+                            formula_validation_immediately_required = True
                             turn_formula_prompt_needed = bool(pending_formula_validation)
                             changed_ordered = sorted(changed_formulas)
                             changed_sample = changed_ordered[
@@ -4910,6 +5205,8 @@ class SpreadsheetAgent:
                             },
                         )
                     if self.require_formula_runtime_validation and name == "recalculate_and_read":
+                        if outcome_data.get("ok") is True:
+                            formula_validation_immediately_required = False
                         turn_formula_prompt_needed = bool(pending_formula_validation)
                         if outcome_data.get("ok") is True:
                             updated_inventory = formula_inventory(session.workbook_path)
@@ -5338,6 +5635,61 @@ class SpreadsheetAgent:
                             "edit_recovery_guidance_added": can_recover_with_code,
                         },
                     )
+                # Providers occasionally ignore a terminal-only tool choice on the
+                # last available turn and perform one final inspection instead. If
+                # that inspection completed cleanly, the artifact is already durable
+                # and there is no model-call slot left for a redundant acknowledgement.
+                # Accept this narrowly: pending formula validation, spreadsheet errors,
+                # failed edits, or an unchanged required artifact must still fail.
+                if (
+                    (deferred_forced_tool_mismatch or terminal_after_forced_route)
+                    and (
+                        expected_forced_tool == TERMINAL_TOOL_NAME
+                        or terminal_after_forced_route
+                    )
+                    and turn_number == self.max_turns
+                ):
+                    outstanding_calculation = _calculation_outstanding_summary(
+                        outstanding_calculation_coordinates,
+                        outstanding_calculation_ranges,
+                    )
+                    implicit_terminal_allowed = bool(
+                        not pending_formula_validation
+                        and not outstanding_calculation["total_count"]
+                        and not turn_had_failed_edit
+                        and not stalled_edit_recovery_active
+                        and (
+                            not self.require_workbook_change
+                            or changed_after_tools
+                        )
+                    )
+                    if implicit_terminal_allowed:
+                        terminal_response = {
+                            "status": "accepted",
+                            "response_id": last_id,
+                            "acknowledgement": {},
+                            "implicit": True,
+                            "observed_tools": observed_forced_tools,
+                        }
+                        result = partial_result(
+                            final_text=_TERMINAL_SUCCESS_TEXT,
+                            turns=turn_number,
+                            observed_terminal_tool=TERMINAL_TOOL_NAME,
+                            terminal_submissions=1,
+                            terminal_response=terminal_response,
+                        )
+                        session.recorder.record(
+                            "agent.terminal_submitted_implicitly",
+                            {
+                                "stage": self.stage,
+                                "turn": turn_number,
+                                "terminal_tool": TERMINAL_TOOL_NAME,
+                                "observed_tools": observed_forced_tools,
+                                "terminal_response": terminal_response,
+                            },
+                        )
+                        session.recorder.record("agent.completed", result.to_dict())
+                        return result
                 if turn_formula_prompt_needed and pending_formula_validation:
                     next_recent_items.append(
                         {

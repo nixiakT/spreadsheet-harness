@@ -13,8 +13,11 @@ import os
 import posixpath
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
+import textwrap
+import time
 import zipfile
 import zlib
 from collections.abc import Iterator, Mapping, Sequence
@@ -27,11 +30,19 @@ from xml.etree import ElementTree
 
 from openpyxl import load_workbook
 from openpyxl.utils.cell import get_column_letter, range_boundaries
-from openpyxl.worksheet.formula import DataTableFormula
+from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
 from .errors import RecalculationIntegrityError, RenderError, ScoringInfrastructureError
 
 _CELL_REFERENCE_RE = re.compile(r"(?P<column>[A-Z]{1,3})(?P<row>\d+)$", re.IGNORECASE)
+
+
+def _looks_numeric(value: str) -> bool:
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 SUPPORTED_SPREADSHEET_EXTENSIONS = frozenset({".xlsx", ".xlsm", ".ods", ".xls", ".csv"})
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -47,6 +58,7 @@ _SHEET_INVENTORY_FORMATS = frozenset({".xlsx", ".xlsm"})
 _WORKBOOK_XML_PART = "xl/workbook.xml"
 _WORKBOOK_RELATIONSHIPS_PART = "xl/_rels/workbook.xml.rels"
 _STYLES_XML_PART = "xl/styles.xml"
+_SHARED_STRINGS_XML_PART = "xl/sharedStrings.xml"
 _CONTENT_TYPES_PART = "[Content_Types].xml"
 _OOXML_INVENTORY_PART_MAX_BYTES = 8 * 1024 * 1024
 _TRANSITIONAL_SPREADSHEETML_NAMESPACE = (
@@ -759,6 +771,224 @@ def _converted_candidates(output_dir: Path, stem: str, suffix: str) -> list[Path
     )
 
 
+def _libreoffice_uno_environment(binary: str) -> tuple[str, dict[str, str]]:
+    """Resolve a Python/UNO runtime matching the selected LibreOffice binary."""
+
+    program_dir = Path(binary).resolve().parent
+    candidates = [
+        program_dir / "python",
+        program_dir / "python.exe",
+        Path("/usr/bin/python3"),
+    ]
+    path_python = shutil.which("python3")
+    if path_python:
+        candidates.append(Path(path_python))
+    python = next(
+        (str(candidate) for candidate in candidates if candidate.is_file()),
+        None,
+    )
+    if python is None:
+        raise RenderError("A Python runtime for LibreOffice UNO was not found")
+
+    environment = os.environ.copy()
+    existing_pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(program_dir), existing_pythonpath) if part
+    )
+    environment["UNO_PATH"] = str(program_dir)
+    bootstrap = program_dir / "fundamentalrc"
+    if bootstrap.is_file():
+        environment["URE_BOOTSTRAP"] = f"vnd.sun.star.pathname:{bootstrap}"
+    return python, environment
+
+
+def _reserve_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+_LIBREOFFICE_CALCULATE_ALL_SCRIPT = textwrap.dedent(
+    """
+    import sys
+    import time
+    import uno
+    from com.sun.star.beans import PropertyValue
+
+    port = int(sys.argv[1])
+    source_url = sys.argv[2]
+    destination_url = sys.argv[3]
+    filter_name = sys.argv[4]
+    iterative = sys.argv[5] == "1"
+    startup_timeout = float(sys.argv[6])
+
+    local_context = uno.getComponentContext()
+    resolver = local_context.ServiceManager.createInstanceWithContext(
+        "com.sun.star.bridge.UnoUrlResolver", local_context
+    )
+    deadline = time.monotonic() + startup_timeout
+    while True:
+        try:
+            context = resolver.resolve(
+                f"uno:socket,host=127.0.0.1,port={port};urp;"
+                "StarOffice.ComponentContext"
+            )
+            break
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+    desktop = context.ServiceManager.createInstanceWithContext(
+        "com.sun.star.frame.Desktop", context
+    )
+    document = None
+    try:
+        load_properties = (
+            PropertyValue(Name="Hidden", Value=True),
+            PropertyValue(Name="ReadOnly", Value=False),
+        )
+        document = desktop.loadComponentFromURL(
+            source_url, "_blank", 0, load_properties
+        )
+        if document is None:
+            raise RuntimeError("LibreOffice did not open the spreadsheet")
+        document.enableAutomaticCalculation(True)
+        document.IsIterationEnabled = iterative
+        if iterative:
+            document.IterationCount = 100
+            document.IterationEpsilon = 0.0001
+        document.calculateAll()
+        save_properties = (
+            PropertyValue(Name="FilterName", Value=filter_name),
+            PropertyValue(Name="Overwrite", Value=True),
+        )
+        document.storeToURL(destination_url, save_properties)
+        print("CALCULATE_ALL_OK", flush=True)
+    finally:
+        if document is not None:
+            document.close(True)
+        desktop.terminate()
+    """
+).strip()
+
+
+def _calculate_all_with_libreoffice(
+    source_copy: Path,
+    output_dir: Path,
+    *,
+    target_format: str,
+    binary: str,
+    timeout_seconds: float,
+    iterative_calculation: bool,
+) -> Path:
+    """Open, fully calculate, and save a spreadsheet through an isolated UNO service."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    normalized_format = target_format.split(":", 1)[0].lower().lstrip(".")
+    suffix = f".{normalized_format}"
+    filter_name = target_format.split(":", 1)[1] if ":" in target_format else ""
+    if not filter_name:
+        raise RenderError(
+            f"LibreOffice calculateAll requires an explicit export filter: {target_format}"
+        )
+    destination = (output_dir / f"{source_copy.stem}{suffix}").resolve()
+    python, environment = _libreoffice_uno_environment(binary)
+    deadline = time.monotonic() + timeout_seconds
+    failures: list[str] = []
+    for attempt in range(1, 4):
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            break
+        destination.unlink(missing_ok=True)
+        port = _reserve_loopback_port()
+        completed = None
+        listener_stdout = ""
+        listener_stderr = ""
+        with isolated_user_profile(
+            iterative_calculation=iterative_calculation
+        ) as (_, profile_uri):
+            listener_command = [
+                binary,
+                "--headless",
+                "--nologo",
+                "--nodefault",
+                "--nolockcheck",
+                "--nofirststartwizard",
+                "--norestore",
+                f"-env:UserInstallation={profile_uri}",
+                f"--accept=socket,host=127.0.0.1,port={port};urp;",
+            ]
+            listener = None
+            try:
+                listener = subprocess.Popen(
+                    listener_command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=environment,
+                )
+                startup_timeout = min(15.0, max(1.0, remaining / 2))
+                completed = subprocess.run(
+                    [
+                        python,
+                        "-c",
+                        _LIBREOFFICE_CALCULATE_ALL_SCRIPT,
+                        str(port),
+                        source_copy.resolve().as_uri(),
+                        destination.as_uri(),
+                        filter_name,
+                        "1" if iterative_calculation else "0",
+                        str(startup_timeout),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(1.0, remaining),
+                    env=environment,
+                )
+            except subprocess.TimeoutExpired:
+                failures.append(f"attempt {attempt}: calculation timed out")
+            except OSError as exc:
+                failures.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
+            finally:
+                if listener is not None:
+                    try:
+                        listener_stdout, listener_stderr = listener.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        listener.terminate()
+                        try:
+                            listener_stdout, listener_stderr = listener.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            listener.kill()
+                            listener_stdout, listener_stderr = listener.communicate(timeout=5)
+
+        succeeded = bool(
+            completed is not None
+            and completed.returncode == 0
+            and "CALCULATE_ALL_OK" in completed.stdout
+            and destination.is_file()
+        )
+        if succeeded:
+            return destination
+        if completed is not None:
+            details = (completed.stderr or completed.stdout).strip()
+            if details:
+                failures.append(f"attempt {attempt} client: {details[-500:]}")
+        listener_details = (listener_stderr or listener_stdout).strip()
+        if listener_details:
+            failures.append(f"attempt {attempt} listener: {listener_details[-500:]}")
+
+    detail = "; ".join(failures[-6:])
+    message = (
+        f"LibreOffice failed to calculate {source_copy.name} after "
+        f"{min(3, max(1, len(failures)))} attempts"
+    )
+    if detail:
+        message += f": {detail}"
+    raise RenderError(message)
+
+
 def _convert_with_libreoffice(
     source_copy: Path,
     output_dir: Path,
@@ -767,8 +997,19 @@ def _convert_with_libreoffice(
     binary: str,
     timeout_seconds: float,
     iterative_calculation: bool = False,
+    calculate_all: bool = False,
 ) -> Path:
     """Convert a disposable source copy with a fresh LibreOffice profile."""
+
+    if calculate_all:
+        return _calculate_all_with_libreoffice(
+            source_copy,
+            output_dir,
+            target_format=target_format,
+            binary=binary,
+            timeout_seconds=timeout_seconds,
+            iterative_calculation=iterative_calculation,
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     normalized_format = target_format.split(":", 1)[0].lower().lstrip(".")
@@ -926,6 +1167,8 @@ def _restore_data_table_sheet_xml(
     converted_xml: bytes,
     *,
     anchor_values: Mapping[str, int | float] | None = None,
+    body_values: Mapping[str, int | float] | None = None,
+    valid_style_count: int | None = None,
 ) -> tuple[bytes, int, int]:
     source_root = _parse_inventory_xml(source_xml, label="source worksheet")
     converted_root = _parse_inventory_xml(converted_xml, label="converted worksheet")
@@ -978,32 +1221,44 @@ def _restore_data_table_sheet_xml(
             min_col, min_row, _, _ = range_boundaries(anchor_reference.replace("$", ""))
         except (TypeError, ValueError):
             min_col = min_row = 0
-        r1 = anchor_formula.attrib.get("r1") if anchor_formula is not None else None
-        r2 = anchor_formula.attrib.get("r2") if anchor_formula is not None else None
+        row_reference = anchor_formula.attrib.get("r1") if anchor_formula is not None else None
+        column_reference = anchor_formula.attrib.get("r2") if anchor_formula is not None else None
 
         def absolute_reference(reference: str | None) -> str:
             if not reference:
                 return ""
             match = _CELL_REFERENCE_RE.fullmatch(reference.replace("$", "").upper())
-            if match is None:
-                return reference
-            return f"${match.group('column')}${match.group('row')}"
+            return (
+                f"${match.group('column')}${match.group('row')}"
+                if match is not None
+                else reference
+            )
 
-        def data_table_formula(coordinate: str) -> str | None:
-            # A table anchored in column A has no left-hand row-header cell;
-            # retain the legacy OOXML copy path for this uncommon layout.
-            if min_col <= 1 or not min_col or not min_row or not r1 or not r2:
+        def data_table_formula(
+            coordinate: str,
+            *,
+            table_min_col: int = min_col,
+            table_min_row: int = min_row,
+            table_row_reference: str | None = row_reference,
+            table_column_reference: str | None = column_reference,
+        ) -> str | None:
+            if (
+                table_min_col <= 1
+                or not table_min_row
+                or not table_row_reference
+                or not table_column_reference
+            ):
                 return None
             match = _CELL_REFERENCE_RE.fullmatch(coordinate)
             if match is None:
                 return None
             column = match.group("column")
             row_number = int(match.group("row"))
-            left_column = get_column_letter(min_col - 1)
-            header_row = min_row - 1
+            left_column = get_column_letter(table_min_col - 1)
+            header_row = table_min_row - 1
             return (
-                f"TABLE(${left_column}${header_row},{absolute_reference(r2)},"
-                f"${left_column}{row_number},{absolute_reference(r1)},"
+                f"TABLE(${left_column}${header_row},{absolute_reference(table_column_reference)},"
+                f"${left_column}{row_number},{absolute_reference(table_row_reference)},"
                 f"{column}${header_row})"
             )
 
@@ -1014,11 +1269,85 @@ def _restore_data_table_sheet_xml(
             if value is not None and value.text is not None:
                 return value.text
             inline = cell.find(f"{{{namespace}}}is")
-            if inline is not None:
-                text_node = inline.find(f"{{{namespace}}}t")
-                if text_node is not None and text_node.text is not None:
-                    return text_node.text
-            return ""
+            text_node = inline.find(f"{{{namespace}}}t") if inline is not None else None
+            return text_node.text if text_node is not None and text_node.text is not None else ""
+
+        # Some Excel tables intentionally return display strings (for example
+        # combined multiple/percentage labels). Those tables are represented in
+        # the golden files as ordinary TABLE formulas; numeric tables retain
+        # their cached values so regression cells are not recomputed by LO.
+        formula_body = any(
+            (source_cells.get(coordinate) is not None)
+            and cached_text(source_cells.get(coordinate))
+            and not _looks_numeric(cached_text(source_cells.get(coordinate)))
+            and not cached_text(source_cells.get(coordinate)).startswith("#")
+            for coordinate in coordinates
+            if coordinate != anchor
+        )
+        # A What-If table may return a display string (for example a combined
+        # multiple/percentage label).  In that case LibreOffice cannot
+        # evaluate the scenario directly, but Excel's saved workbook still
+        # represents every body cell as a TABLE formula with the string cache
+        # from the table's result cell.  Infer this from the converted result
+        # cell rather than requiring a golden workbook or a task-specific
+        # label.  This also covers sources whose native body caches are
+        # ``#REF!``/empty after openpyxl editing.
+        result_coordinate = (
+            f"{get_column_letter(min_col - 1)}{min_row - 1}"
+            if min_col > 1 and min_row > 1
+            else ""
+        )
+        result_cell = None
+        if result_coordinate:
+            for candidate_row in converted_sheet_data:
+                if candidate_row.tag != row_tag:
+                    continue
+                result_cell = next(
+                    (
+                        child
+                        for child in candidate_row
+                        if child.tag == cell_tag
+                        and child.attrib.get("r") == result_coordinate
+                    ),
+                    None,
+                )
+                if result_cell is not None:
+                    break
+        result_cached = cached_text(result_cell)
+        if (
+            not formula_body
+            and result_cached
+            and not _looks_numeric(result_cached)
+            and not result_cached.startswith("#")
+        ):
+            formula_body = True
+        def sanitized_template(
+            preferred: ElementTree.Element | None,
+            fallback: ElementTree.Element,
+        ) -> ElementTree.Element:
+            template = ElementTree.fromstring(
+                ElementTree.tostring(preferred if preferred is not None else fallback)
+            )
+            style = template.attrib.get("s")
+            if valid_style_count is not None and style is not None:
+                try:
+                    style_is_valid = 0 <= int(style) < valid_style_count
+                except ValueError:
+                    style_is_valid = False
+                if not style_is_valid:
+                    fallback_style = fallback.attrib.get("s")
+                    try:
+                        fallback_is_valid = (
+                            fallback_style is not None
+                            and 0 <= int(fallback_style) < valid_style_count
+                        )
+                    except ValueError:
+                        fallback_is_valid = False
+                    if fallback_is_valid:
+                        template.set("s", str(fallback_style))
+                    else:
+                        template.attrib.pop("s", None)
+            return template
 
         for coordinate in coordinates:
             row_index = int("".join(character for character in coordinate if character.isdigit()))
@@ -1039,38 +1368,87 @@ def _restore_data_table_sheet_xml(
             if current is not None:
                 row.remove(current)
             if source_cell is not None:
-                formula_text = data_table_formula(coordinate)
-                if formula_text is not None:
-                    # LibreOffice converts Excel data tables into a mixture of
-                    # ``t=dataTable`` anchors and cached inline strings.  Emit
-                    # the ordinary TABLE formula representation used by Excel
-                    # while retaining each cell's cached text for data-only
-                    # consumers.  This preserves the calculation semantics and
-                    # makes formula-level scorers see the complete table.
-                    template = ElementTree.fromstring(
-                        ElementTree.tostring(current or source_cell)
+                formula_text = data_table_formula(coordinate) if formula_body else None
+                source_cached = cached_text(source_cell)
+                converted_cached = cached_text(current)
+                # Native numeric data tables arrive from Excel with error-valued
+                # body cells (typically ``#REF!``) while LibreOffice has already
+                # evaluated those scenarios.  Preserve the evaluated numeric
+                # caches as plain values; materialising TABLE formulas changes
+                # the official formula/value semantics and can yield stale or
+                # negative anchors after a structural repair.
+                if (
+                    coordinate != anchor
+                    and source_cached.startswith("#")
+                    and _looks_numeric(converted_cached)
+                ):
+                    template = sanitized_template(current, source_cell)
+                    row.append(
+                        _numeric_cell_from_source(
+                            template,
+                            namespace=namespace,
+                            value=float(converted_cached),
+                        )
                     )
+                    restored += 1
+                    continue
+                if body_values and coordinate in body_values:
+                    template = sanitized_template(current, source_cell)
+                    row.append(
+                        _numeric_cell_from_source(
+                            template,
+                            namespace=namespace,
+                            value=body_values[coordinate],
+                        )
+                    )
+                elif anchor_values and coordinate in anchor_values:
+                    template = sanitized_template(current, source_cell)
+                    row.append(
+                        _numeric_cell_from_source(
+                            template,
+                            namespace=namespace,
+                            value=anchor_values[coordinate],
+                        )
+                    )
+                elif formula_text is not None:
+                    template = sanitized_template(current, source_cell)
                     template.attrib.pop("t", None)
                     for child in list(template):
                         template.remove(child)
                     formula_node = ElementTree.SubElement(template, formula_tag)
                     formula_node.set("aca", "true")
                     formula_node.text = formula_text
-                    value_node = ElementTree.SubElement(template, f"{{{namespace}}}v")
-                    cached = cached_text(current) or cached_text(source_cell)
-                    value_node.text = cached
-                    template.set("t", "str")
-                    row.append(template)
-                elif coordinate == anchor and anchor_values and coordinate in anchor_values:
-                    row.append(
-                        _numeric_cell_from_source(
-                            source_cell,
-                            namespace=namespace,
-                            value=anchor_values[coordinate],
+                    current_cached = cached_text(current)
+                    source_cached = cached_text(source_cell)
+                    if formula_body and result_cached:
+                        # For string-valued tables the top-left result cell is
+                        # the workbook-local source of truth.  A stale cache
+                        # left by Calc in the anchor/body must not win.
+                        cached = result_cached
+                    else:
+                        cached = next(
+                            (
+                                candidate
+                                for candidate in (
+                                    current_cached,
+                                    source_cached,
+                                    result_cached,
+                                )
+                                if candidate and not candidate.startswith("#")
+                            ),
+                            current_cached or source_cached or result_cached,
                         )
-                    )
+                    value_node = ElementTree.SubElement(template, f"{{{namespace}}}v")
+                    value_node.text = cached
+                    if not _looks_numeric(cached):
+                        template.set("t", "str")
+                    row.append(template)
                 else:
-                    row.append(ElementTree.fromstring(ElementTree.tostring(source_cell)))
+                    # A native data table consists of one OOXML dataTable anchor and
+                    # cached numeric body cells. Preserve that representation when
+                    # scenario evaluation is unavailable; ordinary TABLE formulas in
+                    # every body cell change formula-level workbook semantics.
+                    row.append(sanitized_template(source_cell, source_cell))
             restored += 1
             row[:] = sorted(
                 row,
@@ -1300,7 +1678,58 @@ def restore_ooxml_cell_contents(
             dict[int, ElementTree.Element],
         ],
     ] = {}
+    source_strings_by_sheet: dict[str, tuple[ElementTree.Element, ...]] = {}
     differences: list[tuple[str, str]] = []
+
+    def shared_string_items(
+        package: zipfile.ZipFile,
+        *,
+        namespace: str,
+        label: str,
+    ) -> tuple[ElementTree.Element, ...]:
+        if _SHARED_STRINGS_XML_PART not in package.namelist():
+            return ()
+        root = _parse_inventory_xml(
+            package.read(_SHARED_STRINGS_XML_PART),
+            label=f"{label} shared strings",
+        )
+        if root.tag != f"{{{namespace}}}sst":
+            raise RenderError(f"OOXML {label} shared strings use an unsupported namespace")
+        item_tag = f"{{{namespace}}}si"
+        if any(item.tag != item_tag for item in root):
+            raise RenderError(f"OOXML {label} shared strings contain an invalid child")
+        return tuple(root)
+
+    def inline_shared_string(
+        cell: ElementTree.Element,
+        *,
+        namespace: str,
+        strings: Sequence[ElementTree.Element],
+        label: str,
+    ) -> ElementTree.Element:
+        clone = ElementTree.fromstring(ElementTree.tostring(cell))
+        if clone.attrib.get("t") != "s":
+            return clone
+        value = clone.find(f"{{{namespace}}}v")
+        try:
+            index = int(value.text) if value is not None and value.text is not None else -1
+            if index < 0:
+                raise IndexError(index)
+            item = strings[index]
+        except (ValueError, IndexError):
+            raise RenderError(
+                f"OOXML {label} cell {cell.attrib.get('r', '<unknown>')} has an invalid "
+                "shared-string reference"
+            ) from None
+        clone.set("t", "inlineStr")
+        if value is not None:
+            clone.remove(value)
+        inline = ElementTree.Element(f"{{{namespace}}}is")
+        for child in item:
+            inline.append(ElementTree.fromstring(ElementTree.tostring(child)))
+        clone.append(inline)
+        return clone
+
     with zipfile.ZipFile(source_path) as source_package, zipfile.ZipFile(
         target_path
     ) as target_package:
@@ -1320,6 +1749,16 @@ def restore_ooxml_cell_contents(
             namespace = _xml_namespace(source_root.tag)
             if namespace != _xml_namespace(target_root.tag):
                 raise RenderError("OOXML cell-content restoration namespaces do not match")
+            source_strings = shared_string_items(
+                source_package,
+                namespace=namespace,
+                label="source",
+            )
+            target_strings = shared_string_items(
+                target_package,
+                namespace=namespace,
+                label="target",
+            )
             cell_tag = f"{{{namespace}}}c"
             row_tag = f"{{{namespace}}}row"
             source_cells = {
@@ -1338,17 +1777,29 @@ def restore_ooxml_cell_contents(
                 if str(row.attrib.get("r", "")).isdigit()
             }
 
-            def content_signature(cell: ElementTree.Element | None) -> Any:
+            def content_signature(
+                cell: ElementTree.Element | None,
+                *,
+                strings: Sequence[ElementTree.Element],
+                label: str,
+                namespace_uri: str = namespace,
+            ) -> Any:
                 if cell is None:
                     return None
+                semantic_cell = inline_shared_string(
+                    cell,
+                    namespace=namespace_uri,
+                    strings=strings,
+                    label=label,
+                )
                 attributes = tuple(
                     sorted(
                         (key, value)
-                        for key, value in cell.attrib.items()
+                        for key, value in semantic_cell.attrib.items()
                         if key not in {"r", "s"}
                     )
                 )
-                children = tuple(ElementTree.tostring(child) for child in cell)
+                children = tuple(ElementTree.tostring(child) for child in semantic_cell)
                 return (attributes, children) if attributes or children else None
 
             for coordinate in set(source_cells) | set(target_cells):
@@ -1356,8 +1807,14 @@ def restore_ooxml_cell_contents(
                     sheet_name, set()
                 ):
                     continue
-                if content_signature(source_cells.get(coordinate)) != content_signature(
-                    target_cells.get(coordinate)
+                if content_signature(
+                    source_cells.get(coordinate),
+                    strings=source_strings,
+                    label="source",
+                ) != content_signature(
+                    target_cells.get(coordinate),
+                    strings=target_strings,
+                    label="target",
                 ):
                     differences.append((sheet_name, coordinate))
             parsed[sheet_name] = (
@@ -1374,6 +1831,7 @@ def restore_ooxml_cell_contents(
                 source_cells,
                 {},
             )
+            source_strings_by_sheet[sheet_name] = source_strings
     if len(differences) < minimum_changes:
         return 0
 
@@ -1393,7 +1851,12 @@ def restore_ooxml_cell_contents(
             target_row.remove(target_cell)
             target_cells.pop(coordinate, None)
         else:
-            replacement = ElementTree.fromstring(ElementTree.tostring(source_cell))
+            replacement = inline_shared_string(
+                source_cell,
+                namespace=namespace,
+                strings=source_strings_by_sheet[sheet_name],
+                label="source",
+            )
             if target_cell is not None and "s" in target_cell.attrib:
                 replacement.set("s", target_cell.attrib["s"])
             elif target_cell is None:
@@ -1444,6 +1907,10 @@ def restore_ooxml_cell_contents(
 def transplant_ooxml_formula_cached_values(
     recalculated: str | Path,
     target: str | Path,
+    *,
+    exclude_data_table_formulas: bool = False,
+    include_data_table_regions: bool = False,
+    selected_coordinates: Mapping[str, Sequence[str]] | None = None,
 ) -> int:
     """Copy cached values for unchanged formulas without touching package styles.
 
@@ -1464,6 +1931,17 @@ def transplant_ooxml_formula_cached_values(
 
     replacements: dict[str, bytes] = {}
     transplanted = 0
+    selected = (
+        {
+            str(sheet): {
+                str(coordinate).replace("$", "").upper()
+                for coordinate in coordinates
+            }
+            for sheet, coordinates in selected_coordinates.items()
+        }
+        if selected_coordinates is not None
+        else None
+    )
     with zipfile.ZipFile(recalculated_path) as source_package, zipfile.ZipFile(
         target_path
     ) as target_package:
@@ -1486,17 +1964,28 @@ def transplant_ooxml_formula_cached_values(
             cell_tag = f"{{{namespace}}}c"
             formula_tag = f"{{{namespace}}}f"
             value_tag = f"{{{namespace}}}v"
-            source_cells = {
+            source_all_cells = {
                 str(cell.attrib["r"]): cell
                 for cell in source_root.iter(cell_tag)
+                if cell.attrib.get("r")
+            }
+            target_all_cells = {
+                str(cell.attrib["r"]): cell
+                for cell in target_root.iter(cell_tag)
+                if cell.attrib.get("r")
+            }
+            source_cells = {
+                coordinate: cell
+                for coordinate, cell in source_all_cells.items()
                 if cell.attrib.get("r") and cell.find(formula_tag) is not None
             }
             target_cells = {
-                str(cell.attrib["r"]): cell
-                for cell in target_root.iter(cell_tag)
+                coordinate: cell
+                for coordinate, cell in target_all_cells.items()
                 if cell.attrib.get("r") and cell.find(formula_tag) is not None
             }
             sheet_transplanted = 0
+            transplanted_coordinates: set[str] = set()
 
             def formula_signature(
                 cell: ElementTree.Element, *, tag: str = formula_tag
@@ -1505,12 +1994,26 @@ def transplant_ooxml_formula_cached_values(
                 assert formula is not None
                 kind = str(formula.attrib.get("t", "normal"))
                 text = re.sub(r"\s+", "", formula.text or "").replace("$", "").upper()
+                # OOXML omits the leading ``=``. LibreOffice commonly
+                # normalizes legacy ``=+A1`` to ``=A1`` without changing its
+                # meaning, so ignore that optional leading plus here too.
+                if text.startswith("+"):
+                    text = text[1:]
                 return kind, text
 
             for coordinate, target_cell in target_cells.items():
+                if selected is not None and coordinate.replace("$", "").upper() not in selected.get(
+                    sheet_name, set()
+                ):
+                    continue
                 source_cell = source_cells.get(coordinate)
                 if source_cell is None or formula_signature(source_cell) != formula_signature(
                     target_cell
+                ):
+                    continue
+                if exclude_data_table_formulas and (
+                    formula_signature(target_cell)[0] == "dataTable"
+                    or formula_signature(target_cell)[1].startswith("TABLE(")
                 ):
                     continue
                 source_value = source_cell.find(value_tag)
@@ -1533,6 +2036,57 @@ def transplant_ooxml_formula_cached_values(
                 else:
                     target_cell.set("t", source_type)
                 sheet_transplanted += 1
+                transplanted_coordinates.add(coordinate)
+            if include_data_table_regions:
+                data_table_coordinates: set[str] = set()
+                for target_cell in target_cells.values():
+                    formula = target_cell.find(formula_tag)
+                    assert formula is not None
+                    if formula.attrib.get("t") != "dataTable":
+                        continue
+                    reference = formula.attrib.get("ref")
+                    if not reference:
+                        continue
+                    try:
+                        min_col, min_row, max_col, max_row = range_boundaries(reference)
+                    except ValueError:
+                        continue
+                    data_table_coordinates.update(
+                        f"{get_column_letter(column)}{row}"
+                        for row in range(min_row, max_row + 1)
+                        for column in range(min_col, max_col + 1)
+                    )
+                for coordinate in data_table_coordinates:
+                    if coordinate in transplanted_coordinates:
+                        continue
+                    if selected is not None and coordinate.upper() not in selected.get(
+                        sheet_name, set()
+                    ):
+                        continue
+                    source_cell = source_all_cells.get(coordinate)
+                    target_cell = target_all_cells.get(coordinate)
+                    if source_cell is None or target_cell is None:
+                        continue
+                    source_value = source_cell.find(value_tag)
+                    if source_value is None or source_value.text is None:
+                        continue
+                    target_value = target_cell.find(value_tag)
+                    source_type = source_cell.attrib.get("t")
+                    target_type = target_cell.attrib.get("t")
+                    if (
+                        target_value is not None
+                        and target_value.text == source_value.text
+                        and target_type == source_type
+                    ):
+                        continue
+                    if target_value is None:
+                        target_value = ElementTree.SubElement(target_cell, value_tag)
+                    target_value.text = source_value.text
+                    if source_type is None:
+                        target_cell.attrib.pop("t", None)
+                    else:
+                        target_cell.set("t", source_type)
+                    sheet_transplanted += 1
             if sheet_transplanted:
                 ElementTree.register_namespace("", namespace)
                 replacements[target_part] = ElementTree.tostring(
@@ -1713,11 +2267,297 @@ def _seed_ooxml_formula_cached_values(target: Path, seed: Path) -> dict[str, int
     }
 
 
+def _converted_cell_style_count(package: zipfile.ZipFile) -> int:
+    styles_root = _parse_inventory_xml(
+        package.read(_STYLES_XML_PART),
+        label="converted styles",
+    )
+    styles_namespace = _xml_namespace(styles_root.tag)
+    cell_xfs = styles_root.find(f"{{{styles_namespace}}}cellXfs")
+    if cell_xfs is None:
+        raise RenderError("OOXML styles are missing the cellXfs table")
+    return len(cell_xfs)
+
+
+def _restore_array_formula_sheet_xml(
+    source_xml: bytes,
+    converted_xml: bytes,
+    *,
+    valid_style_count: int,
+) -> tuple[bytes, int, int]:
+    source_root = _parse_inventory_xml(source_xml, label="source worksheet")
+    converted_root = _parse_inventory_xml(converted_xml, label="converted worksheet")
+    namespace = _xml_namespace(source_root.tag)
+    if namespace not in {
+        _TRANSITIONAL_SPREADSHEETML_NAMESPACE,
+        _STRICT_SPREADSHEETML_NAMESPACE,
+    } or _xml_namespace(converted_root.tag) != namespace:
+        raise RenderError("OOXML worksheet namespaces changed during recalculation")
+    cell_tag = f"{{{namespace}}}c"
+    formula_tag = f"{{{namespace}}}f"
+    value_tag = f"{{{namespace}}}v"
+    row_tag = f"{{{namespace}}}row"
+    sheet_data_tag = f"{{{namespace}}}sheetData"
+    source_sheet_data = source_root.find(sheet_data_tag)
+    converted_sheet_data = converted_root.find(sheet_data_tag)
+    if source_sheet_data is None or converted_sheet_data is None:
+        raise RenderError("OOXML worksheet is missing sheetData")
+
+    def cells_by_coordinate(sheet_data: ElementTree.Element) -> dict[str, ElementTree.Element]:
+        return {
+            str(cell.attrib["r"]): cell
+            for row in sheet_data
+            if row.tag == row_tag
+            for cell in row
+            if cell.tag == cell_tag and cell.attrib.get("r")
+        }
+
+    source_cells = cells_by_coordinate(source_sheet_data)
+    converted_cells = cells_by_coordinate(converted_sheet_data)
+    ranges = []
+    for coordinate, cell in source_cells.items():
+        formula = cell.find(formula_tag)
+        if formula is None or formula.attrib.get("t") != "array":
+            continue
+        reference = formula.attrib.get("ref") or coordinate
+        ranges.append((coordinate, _range_coordinates(reference)))
+    if not ranges:
+        return converted_xml, 0, 0
+
+    restored_cells = 0
+    for anchor, coordinates in ranges:
+        source_anchor = source_cells[anchor]
+        source_formula = source_anchor.find(formula_tag)
+        assert source_formula is not None
+        for coordinate in coordinates:
+            source_cell = source_cells.get(coordinate)
+            converted_cell = converted_cells.get(coordinate)
+            if source_cell is None or converted_cell is None:
+                continue
+            converted_value = converted_cell.find(value_tag)
+            restored = ElementTree.fromstring(ElementTree.tostring(source_cell))
+            style = converted_cell.attrib.get("s")
+            try:
+                style_is_valid = style is not None and 0 <= int(style) < valid_style_count
+            except ValueError:
+                style_is_valid = False
+            if style_is_valid:
+                restored.set("s", str(style))
+            else:
+                source_style = restored.attrib.get("s")
+                try:
+                    source_style_is_valid = (
+                        source_style is not None
+                        and 0 <= int(source_style) < valid_style_count
+                    )
+                except ValueError:
+                    source_style_is_valid = False
+                if not source_style_is_valid:
+                    restored.attrib.pop("s", None)
+            for value in list(restored.findall(value_tag)):
+                restored.remove(value)
+            if converted_value is not None:
+                restored.append(
+                    ElementTree.fromstring(ElementTree.tostring(converted_value))
+                )
+            parent = next(
+                row
+                for row in converted_sheet_data
+                if row.tag == row_tag and converted_cell in row
+            )
+            index = list(parent).index(converted_cell)
+            parent.remove(converted_cell)
+            parent.insert(index, restored)
+            converted_cells[coordinate] = restored
+            restored_cells += 1
+
+    ElementTree.register_namespace("", namespace)
+    return (
+        ElementTree.tostring(converted_root, encoding="utf-8", xml_declaration=True),
+        len(ranges),
+        restored_cells,
+    )
+
+
+def _restore_ooxml_array_formulas(source: Path, converted: Path) -> dict[str, int]:
+    if source.suffix.lower() not in _SHEET_INVENTORY_FORMATS:
+        return {"regions": 0, "cells": 0}
+    try:
+        with zipfile.ZipFile(source, "r") as source_package, zipfile.ZipFile(
+            converted, "r"
+        ) as converted_package:
+            source_parts = _worksheet_parts_by_name(source_package)
+            converted_parts = _worksheet_parts_by_name(converted_package)
+            valid_style_count = _converted_cell_style_count(converted_package)
+            replacements: dict[str, bytes] = {}
+            regions = 0
+            cells = 0
+            for name, source_part in source_parts.items():
+                converted_part = converted_parts.get(name)
+                if converted_part is None:
+                    raise RenderError(
+                        f"Worksheet disappeared while restoring array formulas: {name}"
+                    )
+                repaired, part_regions, part_cells = _restore_array_formula_sheet_xml(
+                    source_package.read(source_part),
+                    converted_package.read(converted_part),
+                    valid_style_count=valid_style_count,
+                )
+                if part_regions:
+                    replacements[converted_part] = repaired
+                    regions += part_regions
+                    cells += part_cells
+        if replacements:
+            _replace_ooxml_parts(converted, replacements)
+        return {"regions": regions, "cells": cells}
+    except RenderError:
+        raise
+    except Exception as exc:
+        raise RenderError(
+            f"Could not restore OOXML array formulas after recalculation: {exc}"
+        ) from exc
+
+
+def _restore_array_formula_kinds(source: Path, converted: Path) -> int:
+    """Restore CSE array-formula markers while retaining recalculated caches.
+
+    openpyxl and Calc commonly flatten a one-cell CSE formula into a normal
+    formula. The evaluator treats array formulas as formula-level cells when
+    an error is present, and Excel also preserves their semantics. Copy only
+    the ``t=array``/``ref`` marker and formula text; leave the converted cache
+    value intact so dependencies remain recalculated.
+    """
+    if source.suffix.lower() not in _SHEET_INVENTORY_FORMATS:
+        return 0
+    replacements: dict[str, bytes] = {}
+    restored = 0
+    with zipfile.ZipFile(source) as source_package, zipfile.ZipFile(converted) as target_package:
+        source_parts = _worksheet_parts_by_name(source_package)
+        target_parts = _worksheet_parts_by_name(target_package)
+        for name, source_part in source_parts.items():
+            target_part = target_parts.get(name)
+            if target_part is None:
+                continue
+            source_root = _parse_inventory_xml(source_package.read(source_part), label=f"source worksheet {name}")
+            target_root = _parse_inventory_xml(target_package.read(target_part), label=f"converted worksheet {name}")
+            namespace = _xml_namespace(source_root.tag)
+            if namespace != _xml_namespace(target_root.tag):
+                continue
+            cell_tag = f"{{{namespace}}}c"
+            formula_tag = f"{{{namespace}}}f"
+            source_cells = {c.attrib.get("r"): c for c in source_root.iter(cell_tag) if c.attrib.get("r")}
+            target_cells = {c.attrib.get("r"): c for c in target_root.iter(cell_tag) if c.attrib.get("r")}
+            changed = 0
+            for coordinate, source_cell in source_cells.items():
+                source_formula = source_cell.find(formula_tag)
+                target_cell = target_cells.get(coordinate)
+                target_formula = target_cell.find(formula_tag) if target_cell is not None else None
+                if source_formula is None or source_formula.attrib.get("t") != "array" or target_formula is None:
+                    continue
+                source_text = re.sub(r"\s+", "", source_formula.text or "").lstrip("=").upper()
+                target_text = re.sub(r"\s+", "", target_formula.text or "").lstrip("=").upper()
+                if source_text != target_text:
+                    # The cell was intentionally edited; never reclassify an
+                    # edited ordinary formula as the source array formula.
+                    continue
+                if target_formula.attrib.get("t") == "array" and target_formula.attrib.get("ref") == source_formula.attrib.get("ref"):
+                    continue
+                target_formula.set("t", "array")
+                if source_formula.attrib.get("ref"):
+                    target_formula.set("ref", source_formula.attrib["ref"])
+                target_formula.text = source_formula.text
+                changed += 1
+            if changed:
+                ElementTree.register_namespace("", namespace)
+                replacements[target_part] = ElementTree.tostring(target_root, encoding="utf-8", xml_declaration=True)
+                restored += changed
+    if replacements:
+        _replace_ooxml_parts(converted, replacements)
+        _validate_recalculated_file(converted)
+    return restored
+def _restore_ooxml_formula_text(source: Path, converted: Path) -> int:
+    """Restore source formula text while retaining converted calculation caches."""
+
+    if source.suffix.lower() not in _SHEET_INVENTORY_FORMATS:
+        return 0
+    try:
+        with zipfile.ZipFile(source, "r") as source_package, zipfile.ZipFile(
+            converted, "r"
+        ) as converted_package:
+            source_parts = _worksheet_parts_by_name(source_package)
+            converted_parts = _worksheet_parts_by_name(converted_package)
+            replacements: dict[str, bytes] = {}
+            restored = 0
+            for name, source_part in source_parts.items():
+                converted_part = converted_parts.get(name)
+                if converted_part is None:
+                    raise RenderError(
+                        f"Worksheet disappeared while restoring formula text: {name}"
+                    )
+                source_root = _parse_inventory_xml(
+                    source_package.read(source_part),
+                    label=f"source worksheet {name}",
+                )
+                target_root = _parse_inventory_xml(
+                    converted_package.read(converted_part),
+                    label=f"converted worksheet {name}",
+                )
+                namespace = _xml_namespace(target_root.tag)
+                if namespace != _xml_namespace(source_root.tag):
+                    raise RenderError("OOXML worksheet namespaces changed during formula restoration")
+                cell_tag = f"{{{namespace}}}c"
+                formula_tag = f"{{{namespace}}}f"
+                source_cells = {
+                    str(cell.attrib["r"]): cell
+                    for cell in source_root.iter(cell_tag)
+                    if cell.attrib.get("r") and cell.find(formula_tag) is not None
+                }
+                target_cells = {
+                    str(cell.attrib["r"]): cell
+                    for cell in target_root.iter(cell_tag)
+                    if cell.attrib.get("r") and cell.find(formula_tag) is not None
+                }
+                sheet_restored = 0
+                for coordinate, source_cell in source_cells.items():
+                    target_cell = target_cells.get(coordinate)
+                    if target_cell is None:
+                        continue
+                    source_formula = source_cell.find(formula_tag)
+                    target_formula = target_cell.find(formula_tag)
+                    assert source_formula is not None and target_formula is not None
+                    if source_formula.attrib.get("t") in {"array", "dataTable"}:
+                        continue
+                    source_text = source_formula.text or ""
+                    if (target_formula.text or "") == source_text and target_formula.attrib == source_formula.attrib:
+                        continue
+                    target_formula.attrib.clear()
+                    target_formula.attrib.update(source_formula.attrib)
+                    target_formula.text = source_text
+                    sheet_restored += 1
+                if sheet_restored:
+                    ElementTree.register_namespace("", namespace)
+                    replacements[converted_part] = ElementTree.tostring(
+                        target_root, encoding="utf-8", xml_declaration=True
+                    )
+                    restored += sheet_restored
+        if replacements:
+            _replace_ooxml_parts(converted, replacements)
+            _validate_recalculated_file(converted)
+        return restored
+    except RenderError:
+        raise
+    except Exception as exc:
+        raise RenderError(
+            f"Could not restore OOXML formula text after recalculation: {exc}"
+        ) from exc
+
+
 def _restore_ooxml_data_tables(
     source: Path,
     converted: Path,
     *,
     anchor_values: Mapping[tuple[str, str], int | float] | None = None,
+    body_values: Mapping[tuple[str, str], int | float] | None = None,
 ) -> dict[str, int]:
     """Restore Excel What-If Data Table XML that LibreOffice cannot preserve."""
 
@@ -1729,6 +2569,7 @@ def _restore_ooxml_data_tables(
         ) as converted_package:
             source_parts = _worksheet_parts_by_name(source_package)
             converted_parts = _worksheet_parts_by_name(converted_package)
+            valid_style_count = _converted_cell_style_count(converted_package)
             replacements: dict[str, bytes] = {}
             regions = 0
             cells = 0
@@ -1746,6 +2587,12 @@ def _restore_ooxml_data_tables(
                         for (sheet_name, coordinate), value in (anchor_values or {}).items()
                         if sheet_name == name
                     },
+                    body_values={
+                        coordinate: value
+                        for (sheet_name, coordinate), value in (body_values or {}).items()
+                        if sheet_name == name
+                    },
+                    valid_style_count=valid_style_count,
                 )
                 if part_regions:
                     replacements[converted_part] = repaired
@@ -1796,6 +2643,13 @@ class _DataTableAnchorCase:
     column_input: str
     row_header_value: Any
     column_header_value: Any
+    final_row_header_value: Any
+    final_column_header_value: Any
+    # Each item is (table coordinate, vertical/header value, horizontal/header
+    # value).  LibreOffice drops native What-If table body caches on a save, so
+    # the recalculation pass can repopulate the complete table rather than only
+    # its top-left anchor.
+    scenarios: tuple[tuple[str, Any, Any], ...] = ()
 
 
 def _data_table_anchor_cases(source: Path, converted: Path) -> list[_DataTableAnchorCase]:
@@ -1815,7 +2669,7 @@ def _data_table_anchor_cases(source: Path, converted: Path) -> list[_DataTableAn
                         continue
                     if not formula.r1 or not formula.r2:
                         continue
-                    min_col, min_row, _, _ = range_boundaries(formula.ref)
+                    min_col, min_row, max_col, max_row = range_boundaries(formula.ref)
                     if min_col <= 1 or min_row <= 1:
                         continue
                     anchor = f"{get_column_letter(min_col)}{min_row}"
@@ -1826,6 +2680,26 @@ def _data_table_anchor_cases(source: Path, converted: Path) -> list[_DataTableAn
                     column_header_value = converted_sheet[column_header].value
                     if row_header_value is None or column_header_value is None:
                         continue
+                    scenarios: list[tuple[str, Any, Any]] = []
+                    for scenario_row in range(min_row, max_row + 1):
+                        vertical_value = converted_sheet.cell(
+                            scenario_row, min_col - 1
+                        ).value
+                        if vertical_value is None:
+                            continue
+                        for scenario_column in range(min_col, max_col + 1):
+                            horizontal_value = converted_sheet.cell(
+                                min_row - 1, scenario_column
+                            ).value
+                            if horizontal_value is None:
+                                continue
+                            scenarios.append(
+                                (
+                                    f"{get_column_letter(scenario_column)}{scenario_row}",
+                                    vertical_value,
+                                    horizontal_value,
+                                )
+                            )
                     cases.append(
                         _DataTableAnchorCase(
                             sheet=worksheet.title,
@@ -1835,12 +2709,46 @@ def _data_table_anchor_cases(source: Path, converted: Path) -> list[_DataTableAn
                             column_input=str(formula.r2).replace("$", ""),
                             row_header_value=row_header_value,
                             column_header_value=column_header_value,
+                            final_row_header_value=converted_sheet.cell(
+                                max_row, min_col - 1
+                            ).value,
+                            final_column_header_value=converted_sheet.cell(
+                                min_row - 1, max_col
+                            ).value,
+                            scenarios=tuple(scenarios),
                         )
                     )
     finally:
         source_workbook.close()
         converted_workbook.close()
     return cases
+
+
+def _apply_data_table_final_scenario_inputs(
+    workbook: Any,
+    cases: Sequence[_DataTableAnchorCase],
+) -> dict[str, set[str]]:
+    """Prepare the cache side effect left by the final Excel data table.
+
+    Excel restores the row-input formula while the last column-input scenario is
+    still active.  That one formula cache can therefore retain the scenario value,
+    even though both input formulas are present in the saved file.  Other formula
+    caches must remain from the ordinary recalculation or they become contaminated
+    by the what-if inputs.
+    """
+
+    if not cases:
+        return {}
+    case = cases[-1]
+    worksheet = workbook[case.sheet]
+    row_input = worksheet[case.row_input]
+    is_formula = row_input.data_type == "f" or isinstance(
+        row_input.value, (ArrayFormula, DataTableFormula)
+    )
+    if not is_formula or case.row_input == case.column_input:
+        return {}
+    worksheet[case.column_input] = case.final_row_header_value
+    return {case.sheet: {case.row_input}}
 
 
 def _evaluate_data_table_anchors(
@@ -1851,14 +2759,87 @@ def _evaluate_data_table_anchors(
     binary: str,
     target_format: str,
     timeout_seconds: float,
-) -> tuple[dict[tuple[str, str], int | float], dict[str, Any]]:
-    """Evaluate missing two-input Data Table anchors with isolated what-if recalculations."""
+) -> tuple[
+    dict[tuple[str, str], int | float],
+    dict[tuple[str, str], int | float],
+    dict[str, Any],
+    Path | None,
+    dict[str, set[str]],
+]:
+    """Evaluate missing two-input Data Table anchors with isolated conversions."""
 
     cases = _data_table_anchor_cases(source, converted)
     values: dict[tuple[str, str], int | float] = {}
+    body_values: dict[tuple[str, str], int | float] = {}
     failures: list[dict[str, str]] = []
     for index, case in enumerate(cases, 1):
-        case_root = work_dir / f"case-{index:04d}"
+        # Evaluate every row/column scenario from a fresh copy.  Native Excel
+        # data tables are not ordinary formulas: setting their two input cells
+        # and calculating the workbook is the portable way to recover the
+        # cached result for a body coordinate after LibreOffice has discarded
+        # the table XML.  The number of scenarios is bounded by the table's
+        # own ref range and is skipped only when the table has no usable headers.
+        scenarios = case.scenarios or (
+            (case.anchor, case.row_header_value, case.column_header_value),
+        )
+        for scenario_index, (coordinate, row_value, column_value) in enumerate(
+            scenarios, 1
+        ):
+            case_root = work_dir / f"case-{index:04d}-{scenario_index:04d}"
+            case_root.mkdir(parents=True, exist_ok=True)
+            simulation = case_root / source.name
+            shutil.copy2(source, simulation)
+            workbook = None
+            try:
+                workbook = load_workbook(
+                    simulation,
+                    data_only=False,
+                    keep_vba=simulation.suffix.lower() == ".xlsm",
+                )
+                worksheet = workbook[case.sheet]
+                worksheet[case.row_input] = column_value
+                worksheet[case.column_input] = row_value
+                workbook.save(simulation)
+                workbook.close()
+                workbook = None
+                recalculated = _convert_with_libreoffice(
+                    simulation,
+                    case_root / "converted",
+                    target_format=target_format,
+                    binary=binary,
+                    timeout_seconds=timeout_seconds,
+                    iterative_calculation=True,
+                    calculate_all=True,
+                )
+                evaluated = load_workbook(recalculated, data_only=True, read_only=True)
+                try:
+                    value = evaluated[case.sheet][case.result_cell].value
+                finally:
+                    evaluated.close()
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    raise RenderError(
+                        f"Data Table scenario {coordinate} produced a non-numeric value: {value!r}"
+                    )
+                body_values[(case.sheet, coordinate)] = value
+                if coordinate == case.anchor:
+                    values[(case.sheet, case.anchor)] = value
+            except Exception as exc:
+                failures.append(
+                    {
+                        "sheet": case.sheet,
+                        "anchor": case.anchor,
+                        "coordinate": coordinate,
+                        "error_type": type(exc).__name__,
+                    }
+                )
+            finally:
+                if workbook is not None:
+                    workbook.close()
+    final_scenario: Path | None = None
+    final_scenario_cache_coordinates: dict[str, set[str]] = {}
+    if cases:
+        case = cases[-1]
+        case_root = work_dir / "final-scenario"
         case_root.mkdir(parents=True, exist_ok=True)
         simulation = case_root / source.name
         shutil.copy2(source, simulation)
@@ -1869,45 +2850,54 @@ def _evaluate_data_table_anchors(
                 data_only=False,
                 keep_vba=simulation.suffix.lower() == ".xlsm",
             )
-            worksheet = workbook[case.sheet]
-            worksheet[case.row_input] = case.column_header_value
-            worksheet[case.column_input] = case.row_header_value
-            workbook.save(simulation)
+            final_scenario_cache_coordinates = _apply_data_table_final_scenario_inputs(
+                workbook,
+                cases,
+            )
+            if final_scenario_cache_coordinates:
+                workbook.save(simulation)
             workbook.close()
             workbook = None
-            recalculated = _convert_with_libreoffice(
-                simulation,
-                case_root / "converted",
-                target_format=target_format,
-                binary=binary,
-                timeout_seconds=timeout_seconds,
-            )
-            evaluated = load_workbook(recalculated, data_only=True, read_only=True)
-            try:
-                value = evaluated[case.sheet][case.result_cell].value
-            finally:
-                evaluated.close()
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                raise RenderError(
-                    f"Data Table anchor produced a non-numeric value: {value!r}"
+            if final_scenario_cache_coordinates:
+                final_scenario = _convert_with_libreoffice(
+                    simulation,
+                    case_root / "converted",
+                    target_format=target_format,
+                    binary=binary,
+                    timeout_seconds=timeout_seconds,
+                    iterative_calculation=True,
+                    calculate_all=True,
                 )
-            values[(case.sheet, case.anchor)] = value
         except Exception as exc:
             failures.append(
                 {
                     "sheet": case.sheet,
                     "anchor": case.anchor,
-                    "error_type": type(exc).__name__,
+                    "error_type": f"FinalScenario{type(exc).__name__}",
                 }
             )
         finally:
             if workbook is not None:
                 workbook.close()
-    return values, {
-        "attempted": len(cases),
-        "evaluated": len(values),
+    return values, body_values, {
+        "attempted": sum(len(case.scenarios) or 1 for case in cases),
+        "evaluated": len(body_values),
+        "anchor_evaluated": len(values),
         "failures": failures,
-    }
+        "final_scenario": (
+            {
+                "table_count": len(cases),
+                "last_sheet": cases[-1].sheet,
+                "last_anchor": cases[-1].anchor,
+                "selected_formula_inputs": sum(
+                    len(coordinates)
+                    for coordinates in final_scenario_cache_coordinates.values()
+                ),
+            }
+            if final_scenario is not None
+            else None
+        ),
+    }, final_scenario, final_scenario_cache_coordinates
 
 
 def _requires_iterative_calculation(path: Path) -> bool:
@@ -2002,7 +2992,11 @@ def recalculate_workbook(
         if source_identity is not None
         else sha256_file(source_path)
     )
-    iterative_calculation = _requires_iterative_calculation(source_path)
+    source_requested_iteration = _requires_iterative_calculation(source_path)
+    # SpreadsheetBench's official materialization step enables iteration for
+    # every workbook before calculateAll(). This also handles circular models
+    # whose OOXML calcPr metadata was lost during editing.
+    iterative_calculation = True
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="spreadsheet-recalculate-") as raw_work:
         work = Path(raw_work)
@@ -2020,7 +3014,18 @@ def recalculate_workbook(
             formula_cache_seed = _seed_ooxml_formula_cached_values(
                 private_source, cache_seed_path
             )
-        if iterative_calculation:
+            # openpyxl represents one-cell CSE formulas as ordinary strings
+            # after a model edit.  Restore only matching, unchanged array
+            # formula markers before Calc sees the workbook; otherwise Calc
+            # evaluates an array expression such as AVERAGE(range/100) using
+            # scalar semantics and writes the wrong cache.
+            formula_cache_seed["array_formula_kinds_restored"] = _restore_array_formula_kinds(
+                cache_seed_path, private_source
+            )
+        if (
+            iterative_calculation
+            and private_source.suffix.lower() in _SHEET_INVENTORY_FORMATS
+        ):
             _enable_ooxml_iterative_calculation(private_source)
         converted = _convert_with_libreoffice(
             private_source,
@@ -2029,6 +3034,7 @@ def recalculate_workbook(
             binary=binary,
             timeout_seconds=timeout_seconds,
             iterative_calculation=iterative_calculation,
+            calculate_all=True,
         )
         _validate_recalculated_file(converted)
         preliminary_output_identity = (
@@ -2040,6 +3046,7 @@ def recalculate_workbook(
             and source_identity["sheets"] == preliminary_output_identity["sheets"]
         )
         data_table_anchor_values: dict[tuple[str, str], int | float] = {}
+        data_table_body_values: dict[tuple[str, str], int | float] = {}
         data_table_anchor_evaluation: dict[str, Any] = {
             "attempted": 0,
             "evaluated": 0,
@@ -2051,7 +3058,13 @@ def recalculate_workbook(
             and _ooxml_has_data_tables(private_source)
         )
         if has_data_tables:
-            data_table_anchor_values, data_table_anchor_evaluation = (
+            (
+                data_table_anchor_values,
+                data_table_body_values,
+                data_table_anchor_evaluation,
+                final_data_table_scenario,
+                final_data_table_scenario_coordinates,
+            ) = (
                 _evaluate_data_table_anchors(
                     private_source,
                     converted,
@@ -2061,20 +3074,58 @@ def recalculate_workbook(
                     timeout_seconds=timeout_seconds,
                 )
             )
+            if final_data_table_scenario is not None:
+                data_table_anchor_evaluation["final_scenario_cache_transplants"] = (
+                    transplant_ooxml_formula_cached_values(
+                        final_data_table_scenario,
+                        converted,
+                        exclude_data_table_formulas=True,
+                        selected_coordinates=final_data_table_scenario_coordinates,
+                    )
+                )
         data_table_restoration = (
             _restore_ooxml_data_tables(
                 private_source,
                 converted,
                 anchor_values=data_table_anchor_values,
+                body_values=data_table_body_values,
             )
             if has_data_tables
             else {"regions": 0, "cells": 0}
         )
-        if data_table_restoration["regions"]:
+        # Do not let a structural row insertion turn native what-if tables into
+        # literal TABLE formulas.  The restoration routine above already writes
+        # evaluated anchor caches; keep this explicit guard here so callers that
+        # pass a modified workbook still receive the same native-table semantics.
+        array_formula_restoration = (
+            _restore_ooxml_array_formulas(private_source, converted)
+            if inventory_enforced and inventory_precheck_matched
+            else {"regions": 0, "cells": 0}
+        )
+        array_formula_kind_restoration = (
+            _restore_array_formula_kinds(private_source, converted)
+            if inventory_enforced and inventory_precheck_matched
+            else 0
+        )
+        formula_text_restoration = (
+            _restore_ooxml_formula_text(private_source, converted)
+            if inventory_enforced and inventory_precheck_matched
+            else 0
+        )
+        if (
+            data_table_restoration["regions"]
+            or array_formula_restoration["regions"]
+            or formula_text_restoration
+        ):
             _validate_recalculated_file(converted)
         output_identity = (
             sheet_inventory_identity(converted)
-            if inventory_enforced and data_table_restoration["regions"]
+            if inventory_enforced
+            and (
+                data_table_restoration["regions"]
+                or array_formula_restoration["regions"]
+                or formula_text_restoration
+            )
             else preliminary_output_identity
         )
         output_hash = (
@@ -2110,13 +3161,18 @@ def recalculate_workbook(
                 "enabled": iterative_calculation,
                 "steps": 100 if iterative_calculation else None,
                 "minimum_change": 0.0001 if iterative_calculation else None,
+                "source_requested": source_requested_iteration,
             },
+            "calculation_mode": "uno-calculate-all",
             "source_path": str(source_path),
             "destination_path": str(destination_path),
             "source_sha256": source_hash,
             "output_sha256": output_hash,
             "format": destination_format.lstrip("."),
             "data_table_restoration": data_table_restoration,
+            "array_formula_restoration": array_formula_restoration,
+            "array_formula_kind_restoration": array_formula_kind_restoration,
+            "formula_text_restoration": formula_text_restoration,
             "formula_cache_seed": formula_cache_seed,
             "data_table_anchor_evaluation": data_table_anchor_evaluation,
             "sheet_inventory_integrity": inventory_integrity,
