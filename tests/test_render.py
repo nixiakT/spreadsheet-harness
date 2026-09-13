@@ -51,6 +51,25 @@ def _save_workbook(path: Path, *, two_sheets: bool = True) -> None:
     workbook.close()
 
 
+def test_cyclic_graph_nodes_handles_deep_dependency_chain_iteratively() -> None:
+    graph = {f"A{index}": {f"A{index + 1}"} for index in range(1, 2_500)}
+    graph["A2500"] = set()
+
+    assert render_module._cyclic_graph_nodes(graph) == set()
+
+
+def test_cyclic_graph_nodes_returns_only_members_of_cycles() -> None:
+    graph = {
+        "A1": {"A2"},
+        "A2": {"A3"},
+        "A3": {"A2", "A4"},
+        "A4": set(),
+        "B1": {"B1"},
+    }
+
+    assert render_module._cyclic_graph_nodes(graph) == {"A2", "A3", "B1"}
+
+
 def test_restore_ooxml_data_tables_recovers_libreoffice_destroyed_region(
     tmp_path: Path,
 ) -> None:
@@ -306,6 +325,60 @@ def test_restore_ooxml_formula_text_keeps_recalculated_cache(tmp_path: Path) -> 
     output = load_workbook(converted, data_only=False)
     assert output["Model"]["A1"].value == "=XIRR(A2:A3,B2:B3)"
     output.close()
+
+
+def test_restore_ooxml_formula_text_recovers_materialized_formula_and_cache(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source-materialized-formula.xlsx"
+    converted = tmp_path / "converted-materialized-formula.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = "=1+1"
+    sheet["A2"] = '="cached text"'
+    sheet["A3"] = "#N/A"
+    workbook.save(source)
+    workbook.close()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["A1"] = 2.0
+    sheet["A2"] = "cached text"
+    sheet["A3"] = "=#N/A"
+    workbook.save(converted)
+    workbook.close()
+    # Mirror Calc's literal-error representation, which carries an error cache.
+    with zipfile.ZipFile(converted) as package:
+        part = render_module._worksheet_parts_by_name(package)["Model"]
+        root = ElementTree.fromstring(package.read(part))
+        namespace = root.tag[1:].split("}", 1)[0]
+        error_cell = next(
+            cell
+            for cell in root.iter(f"{{{namespace}}}c")
+            if cell.attrib.get("r") == "A3"
+        )
+        error_cell.set("t", "e")
+        value = error_cell.find(f"{{{namespace}}}v")
+        assert value is not None
+        value.text = "#N/A"
+        xml = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+    render_module._replace_ooxml_parts(converted, {part: xml})
+
+    # Literal error cells are left in Calc's evaluator-compatible formula form;
+    # they are not rewritten back to the source's ``t="e"``-only encoding.
+    assert render_module._restore_ooxml_formula_text(source, converted) == 2
+    formula_book = load_workbook(converted, data_only=False)
+    assert formula_book["Model"]["A1"].value == "=1+1"
+    assert formula_book["Model"]["A2"].value == '="cached text"'
+    assert formula_book["Model"]["A3"].value == "=#N/A"
+    formula_book.close()
+    value_book = load_workbook(converted, data_only=True)
+    assert value_book["Model"]["A1"].value == 2.0
+    assert value_book["Model"]["A2"].value == "cached text"
+    assert value_book["Model"]["A3"].value == "#N/A"
+    value_book.close()
 
 
 def test_final_data_table_scenario_preserves_formula_inputs(tmp_path: Path) -> None:

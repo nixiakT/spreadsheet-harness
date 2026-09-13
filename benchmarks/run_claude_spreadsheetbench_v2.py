@@ -70,6 +70,16 @@ def run_one(
         except Exception:
             old = {}
     reuse_output = workbook_is_valid(output_path)
+    # On a resume, preserve a task that already has a complete artifact and
+    # official score.  Re-running LibreOffice/evaluation for every old task is
+    # both unnecessary and can leave a shared soffice process wedged; only
+    # tasks without a completed status are sent back through the model loop.
+    if (
+        old.get("status") == "completed"
+        and isinstance(old.get("official_score"), dict)
+        and reuse_output
+    ):
+        return old
     input_source = (dataset / category / str(task["spreadsheet_path"])).resolve(strict=True)
     input_path = task_root / "input.xlsx"
     if not input_path.exists():
@@ -118,8 +128,15 @@ def run_one(
                 continue
             if event.get("limit_exceeded"):
                 exceeded = True
-            elif event.get("request_index") and event.get("upstream_status") == 200:
-                count = max(count, int(event["request_index"]))
+            elif (
+                event.get("request_index")
+                and "upstream_attempt" not in event
+                and "response_bytes" not in event
+                and "error" not in event
+            ):
+                # Count accepted requests across all proxy lifetimes instead
+                # of taking max(request_index), which resets after a restart.
+                count += 1
         return count, exceeded
 
     def invoke(prompt: str, resume_id: str | None = None) -> int:
@@ -284,8 +301,21 @@ def main() -> int:
             with ThreadPoolExecutor(max_workers=args.parallelism) as pool:
                 futures = {pool.submit(run_one, t, dataset=args.dataset, run_root=args.run_root, runtime_root=Path(temp), proxy_port=port, skill=args.skill, model=args.model, max_turns=args.max_turns, max_output_tokens=args.max_output_tokens, task_timeout=args.task_timeout, evaluator=ROOT / "benchmarks/vendor/spreadsheetbench2-official-83d415c/evaluation/evaluation.py", recalculate_before_evaluation=args.recalculate_before_evaluation, api_key_file=args.api_key_file): t["_task_id"] for t in tasks}
                 for future in as_completed(futures):
-                    result = future.result(); results.append(result)
-                    print(json.dumps({"task_id": result["task_id"], "status": result["status"], "turns": result["turns"]}, ensure_ascii=False), flush=True)
+                    # Keep the batch alive if an individual task hits an
+                    # unexpected worker/evaluator exception.  The task can be
+                    # resumed safely from its workspace on a later pass.
+                    task_key = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:  # pragma: no cover - defensive
+                        result = {
+                            "schema_version": 1,
+                            "task_id": task_key.replace("__", "/", 1),
+                            "status": "failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    results.append(result)
+                    print(json.dumps({"task_id": result["task_id"], "status": result["status"], "turns": result.get("turns", 0)}, ensure_ascii=False), flush=True)
             results.sort(key=lambda item: item["task_id"])
             (args.run_root / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
             print(json.dumps({"selected": len(results), "completed": sum(r["status"] == "completed" for r in results), "run_root": str(args.run_root)}), flush=True)

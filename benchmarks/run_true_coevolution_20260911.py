@@ -773,6 +773,8 @@ def skill_sha(root: Path, skill_name: str) -> str:
 
 
 def materialize_final_roots(result_root: Path, baseline: Path, joint: Path) -> dict[str, Path]:
+    if not joint.is_dir():
+        raise RuntimeError(f"Joint incumbent skill root is missing: {joint}")
     roots: dict[str, Path] = {}
     for arm in FINAL_ARMS:
         destination = result_root / "skill-roots/final" / arm
@@ -796,6 +798,7 @@ def write_final_report(
     experiment: Experiment,
     tasks: Sequence[Task],
     round_records: Sequence[Mapping[str, Any]],
+    final_roots: Mapping[str, Path] | None = None,
 ) -> dict[str, Any]:
     arm_rows = {
         arm: experiment.result_rows("heldout", arm, tasks) for arm in FINAL_ARMS
@@ -820,6 +823,29 @@ def write_final_report(
             "target_rounds": len(round_records),
             "heldout_limit": len(tasks),
             "accelerated_modification_gate": -0.06,
+        },
+        "factorial": {
+            "valid": bool(
+                final_roots
+                and all(
+                    (final_roots[arm] / "spreadsheet-structure/SKILL.md").is_file()
+                    and (final_roots[arm] / "spreadsheet-financial-model/SKILL.md").is_file()
+                    for arm in FINAL_ARMS
+                )
+            ),
+            "arm_skill_hashes": {
+                arm: {
+                    "structure": sha256_file(
+                        final_roots[arm] / "spreadsheet-structure/SKILL.md"
+                    ),
+                    "financial_model": sha256_file(
+                        final_roots[arm] / "spreadsheet-financial-model/SKILL.md"
+                    ),
+                }
+                for arm in FINAL_ARMS
+            }
+            if final_roots
+            else {},
         },
         "accepted_rounds": list(round_records),
         "heldout": {"metrics": metrics, "interactions": interaction_groups, "rows": arm_rows},
@@ -1106,9 +1132,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "the coordinate was not advanced"
             )
 
+    # A factorial report is meaningful only after every requested coordinate
+    # update has actually been accepted.  The old accelerated run was allowed
+    # to evaluate four labels after stopping at the first H update, which made
+    # h0d1 silently reuse D0 and h1d1 silently reuse the H1+D0 root.  Refuse to
+    # materialize/report those aliases instead of presenting them as a joint
+    # H1+D1 result.
+    if len(accepted_records) < args.target_rounds:
+        state.update(
+            {
+                "status": "incomplete-factorial",
+                "required_rounds": args.target_rounds,
+                "accepted_rounds_count": len(accepted_records),
+                "updated_at": utc_now(),
+            }
+        )
+        atomic_json(state_path, state)
+        raise RuntimeError(
+            "Cannot produce a factorial H/D report before all requested coordinate updates "
+            f"are accepted ({len(accepted_records)}/{args.target_rounds})"
+        )
+    if args.target_rounds >= 2 and not any(
+        record.get("coordinate") == "domain" for record in accepted_records
+    ):
+        raise RuntimeError("Cannot produce h0d1/h1d1 without an accepted domain (D1) update")
+
     final_roots = materialize_final_roots(result_root, baseline, current_root)
     experiment.run_matrix("heldout", final_roots, heldout_tasks)
-    report = write_final_report(experiment, heldout_tasks, accepted_records)
+    report = write_final_report(experiment, heldout_tasks, accepted_records, final_roots)
     state.update({"status": "complete", "completed_at": utc_now()})
     atomic_json(state_path, state)
     overall = report["heldout"]["interactions"]["all"]

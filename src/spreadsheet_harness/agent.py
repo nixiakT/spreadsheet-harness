@@ -15,11 +15,13 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
+from openpyxl import load_workbook
 
 from .budget import RunBudget
 from .config import ProviderConfig
@@ -2416,6 +2418,28 @@ def _redact_model_visible(value: Any, *, secrets: tuple[str, ...] = ()) -> Any:
     return redact_sensitive_text(str(value), secrets=secrets)
 
 
+def _baseline_error_coordinates(path: str | Path) -> set[FormulaCoordinate]:
+    """Collect pre-existing cached spreadsheet errors, including constant cells.
+
+    Formula OOXML inventory only contains cells with ``<f>`` nodes; many legacy
+    workbooks store error results as literal cached values after a prior Excel or
+    LibreOffice save.  Those cells must be treated as baseline errors too.
+    """
+    errors: set[FormulaCoordinate] = set()
+    try:
+        workbook = load_workbook(Path(path), data_only=True, read_only=True)
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and value.strip().upper().startswith("#"):
+                        errors.add((worksheet.title, cell.coordinate))
+        workbook.close()
+    except Exception:
+        return errors
+    return errors
+
+
 def _edit_recovery_diagnostics(
     outcome_data: dict[str, Any],
     *,
@@ -2599,6 +2623,7 @@ def _sparse_formula_validation_is_complete_clean(
     pending: set[FormulaCoordinate],
     *,
     expected_formula_cells_present: int,
+    baseline_error_coordinates: set[FormulaCoordinate] | None = None,
 ) -> bool:
     scope = outcome_data.get("validation_scope")
     calculation_errors = outcome_data.get("calculation_errors")
@@ -2608,10 +2633,32 @@ def _sparse_formula_validation_is_complete_clean(
     coordinate_count = scope.get("coordinate_count")
     present = scope.get("formula_cells_present")
     absent = scope.get("formula_cells_absent")
-    error_count = calculation_errors.get("count")
+    # LibreOffice reports workbook-wide errors even when the validation scope is
+    # explicitly limited to the pending formula cells.  Existing models often
+    # contain intentional/error-valued helper formulas outside the edited set
+    # (for example CAGR rows with zero denominators).  Those unrelated errors
+    # must not keep a valid edit in recovery forever.  Judge cleanliness against
+    # errors whose coordinates are actually inside the pending scope.
+    raw_errors = calculation_errors.get("coordinates")
+    scoped_errors = []
+    pending_keys = set(pending)
+    baseline_errors = baseline_error_coordinates or set()
+    if isinstance(raw_errors, list):
+        for item in raw_errors:
+            if not isinstance(item, dict):
+                continue
+            sheet = item.get("sheet")
+            coordinate = item.get("coordinate")
+            if isinstance(sheet, str) and isinstance(coordinate, str):
+                key = (sheet, coordinate)
+                if key in pending_keys and key not in baseline_errors:
+                    scoped_errors.append(item)
+    error_count = len(scoped_errors)
     return bool(
         outcome_data.get("ok") is True
-        and outcome_data.get("calculation_valid") is True
+        # ``calculation_valid`` is workbook-wide; it may be false solely due to
+        # pre-existing errors outside this scoped validation request.  The
+        # scoped error list above is the authoritative condition here.
         and scope.get("kind") == _PENDING_FORMULA_VALIDATION_SCOPE
         and isinstance(coordinate_count, int)
         and not isinstance(coordinate_count, bool)
@@ -2629,8 +2676,6 @@ def _sparse_formula_validation_is_complete_clean(
         and isinstance(error_count, int)
         and not isinstance(error_count, bool)
         and error_count == 0
-        and calculation_errors.get("coordinates") == []
-        and calculation_errors.get("coordinates_truncated") is False
     )
 
 
@@ -3077,6 +3122,7 @@ class SpreadsheetAgent:
         require_workbook_change: bool = False,
         allow_unchanged_terminal: bool = False,
         require_formula_runtime_validation: bool = False,
+        formula_runtime_baseline_path: str | Path | None = None,
         force_code_on_stalled_edit: bool = False,
         max_read_only_code_calls_before_edit: int | None = None,
         recover_output_limit: bool = False,
@@ -3107,6 +3153,11 @@ class SpreadsheetAgent:
         self.require_workbook_change = require_workbook_change
         self.allow_unchanged_terminal = allow_unchanged_terminal
         self.require_formula_runtime_validation = require_formula_runtime_validation
+        self.formula_runtime_baseline_path = (
+            Path(formula_runtime_baseline_path)
+            if formula_runtime_baseline_path is not None
+            else None
+        )
         self.force_code_on_stalled_edit = force_code_on_stalled_edit
         self.max_read_only_code_calls_before_edit = max_read_only_code_calls_before_edit
         self.recover_output_limit = recover_output_limit
@@ -3170,6 +3221,23 @@ class SpreadsheetAgent:
             )
         return instructions, manifest
 
+    def _forced_tool_output_limit(
+        self,
+        requested_max_output_tokens: int | None,
+        *,
+        compact_limit: int,
+    ) -> int | None:
+        """Keep reasoning headroom when explicit chat-template thinking is enabled.
+
+        Thinking tokens share the provider output budget with the eventual function
+        call on several OpenAI-compatible relays. Applying the normal 512-token
+        optimization there can truncate the reasoning before the forced call is
+        emitted, so a thinking request must retain its configured output budget.
+        """
+        if requested_max_output_tokens is None or self.config.enable_thinking is True:
+            return requested_max_output_tokens
+        return min(requested_max_output_tokens, compact_limit)
+
     def run(
         self,
         instruction: str,
@@ -3211,6 +3279,10 @@ class SpreadsheetAgent:
         )
         workbook_changed = False
         read_only_code_calls_before_edit = 0
+        # A preflight rejection is a one-shot nudge.  Repeating the same
+        # synthetic rejection on every subsequent model turn can consume the
+        # entire executor budget while producing no new workbook evidence.
+        read_only_deadline_rejected = False
         agent_code_edit_made = False
         last_workbook_change_reminder_turn = 0
 
@@ -3294,7 +3366,9 @@ class SpreadsheetAgent:
         outstanding_calculation_ranges: _CalculationRangeState = {}
         latest_calculation_validation_diagnostics: str | None = None
         initial_formula_inventory = (
-            formula_inventory(session.workbook_path)
+            formula_inventory(
+                self.formula_runtime_baseline_path or session.workbook_path
+            )
             if self.require_formula_runtime_validation
             else None
         )
@@ -3303,14 +3377,42 @@ class SpreadsheetAgent:
             if initial_formula_inventory is not None
             else {}
         )
-        formula_current: _FormulaHashState = dict(formula_baseline)
-        pending_formula_validation: set[FormulaCoordinate] = set()
-        pending_formula_expected_presence: dict[FormulaCoordinate, bool] = {}
+        formula_current_inventory = (
+            formula_inventory(session.workbook_path)
+            if self.require_formula_runtime_validation
+            else None
+        )
+        formula_current: _FormulaHashState = (
+            _formula_hash_state(formula_current_inventory)
+            if formula_current_inventory is not None
+            else {}
+        )
+        pending_formula_validation: set[FormulaCoordinate] = _formula_state_changes(
+            formula_baseline,
+            formula_current,
+        )
+        pending_formula_expected_presence: dict[FormulaCoordinate, bool] = {
+            coordinate: coordinate in formula_current
+            for coordinate in pending_formula_validation
+        }
         latest_formula_validation_diagnostics: str | None = None
+        baseline_error_coordinates: set[FormulaCoordinate] = set()
+        if initial_formula_inventory is not None:
+            for coordinate, state in initial_formula_inventory.cells.items():
+                cached = state.cached_value
+                if state.cached_type == "e" or (
+                    isinstance(cached, str) and cached.strip().startswith("#")
+                ):
+                    baseline_error_coordinates.add(coordinate)
+            baseline_error_coordinates.update(
+                _baseline_error_coordinates(
+                    self.formula_runtime_baseline_path or session.workbook_path
+                )
+            )
         # A formula mutation must be checked before the model resumes broad
         # inspection. A completed recalculation clears this one-shot route so a
         # failed validation can be repaired before validation is attempted again.
-        formula_validation_immediately_required = False
+        formula_validation_immediately_required = bool(pending_formula_validation)
         if callable(formula_scope_setter):
             formula_scope_setter(pending_formula_validation)
 
@@ -3420,6 +3522,13 @@ class SpreadsheetAgent:
                         else None
                     ),
                     "initial_formula_count": len(formula_baseline),
+                    "prepared_formula_count": len(formula_current),
+                    "pending_preexisting_formula_count": len(pending_formula_validation),
+                    "baseline_source": (
+                        str(self.formula_runtime_baseline_path)
+                        if self.formula_runtime_baseline_path is not None
+                        else "managed-workbook-at-stage-start"
+                    ),
                     "initial_state_sha256": (
                         initial_formula_inventory.state_sha256
                         if initial_formula_inventory is not None
@@ -3490,6 +3599,7 @@ class SpreadsheetAgent:
                     }
                 )
                 recovery_turn_code_forced = False
+                deadline_recovery_code_forced = False
                 recovery_turn_formula_validation_forced = False
                 terminal_route_forced = False
                 terminal_after_forced_route = False
@@ -3550,6 +3660,23 @@ class SpreadsheetAgent:
                     ):
                         forced_tool = "code_interpreter"
                         recovery_turn_code_forced = True
+                    # Once the one-shot read-only deadline nudge has been
+                    # delivered, do not leave the model in an unconstrained
+                    # inspection loop.  Route the next turn directly to the
+                    # editor and add an explicit save requirement; the tool
+                    # result itself remains the source of truth for whether a
+                    # mutation actually happened.
+                    if (
+                        forced_tool is None
+                        and self.require_workbook_change
+                        and self.max_read_only_code_calls_before_edit is not None
+                        and read_only_deadline_rejected
+                        and not agent_code_edit_made
+                        and "code_interpreter" in tool_names
+                    ):
+                        forced_tool = "code_interpreter"
+                        recovery_turn_code_forced = True
+                        deadline_recovery_code_forced = True
                     if (
                         forced_tool is None
                         and self.require_formula_runtime_validation
@@ -3630,9 +3757,9 @@ class SpreadsheetAgent:
                                     "name": TERMINAL_TOOL_NAME,
                                 }
                             if not self.terminal_result_required and request_max_output_tokens is not None:
-                                request_max_output_tokens = min(
+                                request_max_output_tokens = self._forced_tool_output_limit(
                                     request_max_output_tokens,
-                                    _FINAL_TOOL_MAX_OUTPUT_TOKENS,
+                                    compact_limit=_FINAL_TOOL_MAX_OUTPUT_TOKENS,
                                 )
                         else:
                             request_tool_schemas = [
@@ -3646,9 +3773,9 @@ class SpreadsheetAgent:
                                     "name": forced_tool,
                                 }
                             if request_max_output_tokens is not None:
-                                request_max_output_tokens = min(
+                                request_max_output_tokens = self._forced_tool_output_limit(
                                     request_max_output_tokens,
-                                    _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
+                                    compact_limit=_LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
                                 )
                     elif forced_tool is not None:
                         request_tool_schemas = [
@@ -3660,9 +3787,9 @@ class SpreadsheetAgent:
                                 "name": forced_tool,
                             }
                         if forced_tool != "code_interpreter" and request_max_output_tokens is not None:
-                            request_max_output_tokens = min(
+                            request_max_output_tokens = self._forced_tool_output_limit(
                                 request_max_output_tokens,
-                                _LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
+                                compact_limit=_LIGHT_FORCED_TOOL_MAX_OUTPUT_TOKENS,
                             )
                         if recovery_turn_formula_validation_forced:
                             input_items.append(
@@ -3674,6 +3801,24 @@ class SpreadsheetAgent:
                                             "text": _formula_runtime_validation_prompt(
                                                 pending_formula_validation,
                                                 latest_formula_validation_diagnostics,
+                                            ),
+                                        }
+                                    ],
+                                }
+                            )
+                        if deadline_recovery_code_forced:
+                            input_items.append(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": (
+                                                "The read-only inspection deadline was already reached. "
+                                                "This call must perform the requested workbook edits, "
+                                                "call sheet_harness.save_workbook(wb), and verify the "
+                                                "changed targets; do not run another inspection-only "
+                                                "snippet."
                                             ),
                                         }
                                     ],
@@ -3820,6 +3965,51 @@ class SpreadsheetAgent:
                         and payload.get("parallel_tool_calls") is False
                     )
                     if exact_forced_terminal_route:
+                        # A few OpenAI-compatible relays cap the forced terminal
+                        # acknowledgement at a tiny output budget (often 512
+                        # tokens).  In that case the provider can return
+                        # ``finish_reason=length`` even though the workbook was
+                        # already saved and the preceding validation route was
+                        # clean.  Treat this as an implicit terminal acknowledgement
+                        # only when the artifact changed and no formula/error
+                        # validation remains pending.  This mirrors the existing
+                        # last-turn implicit-terminal policy and avoids turning a
+                        # durable, verified edit into a model execution failure.
+                        implicit_terminal_allowed = bool(
+                            self.require_workbook_change
+                            and refresh_workbook_changed()
+                            and not pending_formula_validation
+                            and not outstanding_calculation_coordinates
+                            and not outstanding_calculation_ranges
+                            and not stalled_edit_recovery_active
+                        )
+                        if implicit_terminal_allowed:
+                            terminal_response = {
+                                "status": "accepted",
+                                "response_id": exc.response_id,
+                                "acknowledgement": {},
+                                "implicit": True,
+                                "reason": "provider_terminal_output_limit",
+                            }
+                            result = partial_result(
+                                final_text=_TERMINAL_SUCCESS_TEXT,
+                                turns=turn_number,
+                                observed_terminal_tool=TERMINAL_TOOL_NAME,
+                                terminal_submissions=1,
+                                terminal_response=terminal_response,
+                            )
+                            session.recorder.record(
+                                "agent.terminal_submitted_implicitly",
+                                {
+                                    "stage": self.stage,
+                                    "turn": turn_number,
+                                    "terminal_tool": TERMINAL_TOOL_NAME,
+                                    "reason": "provider_terminal_output_limit",
+                                    "terminal_response": terminal_response,
+                                },
+                            )
+                            session.recorder.record("agent.completed", result.to_dict())
+                            return result
                         raise execution_failure(
                             "Terminal submit_result response was truncated by the provider "
                             "output limit.",
@@ -5001,6 +5191,7 @@ class SpreadsheetAgent:
                             and self.max_read_only_code_calls_before_edit is not None
                             and not agent_code_edit_made
                             and not recovery_turn_code_forced
+                            and not read_only_deadline_rejected
                             and read_only_code_calls_before_edit
                             >= self.max_read_only_code_calls_before_edit
                             and not _code_interpreter_intends_workbook_edit(arguments)
@@ -5044,6 +5235,7 @@ class SpreadsheetAgent:
                             )
                             raise
                         if edit_deadline_rejected:
+                            read_only_deadline_rejected = True
                             outcome_data = {
                                 "ok": False,
                                 "preflight_rejected": True,
@@ -5235,6 +5427,7 @@ class SpreadsheetAgent:
                                         outcome_data,
                                         formula_pending_before,
                                         expected_formula_cells_present=expected_present,
+                                        baseline_error_coordinates=baseline_error_coordinates,
                                     )
                                 )
                                 if sparse_clean:

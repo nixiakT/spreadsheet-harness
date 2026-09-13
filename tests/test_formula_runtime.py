@@ -185,6 +185,34 @@ def test_formula_inventory_ignores_backend_formula_spelling_normalization(
     assert after.state_sha256 == before.state_sha256
 
 
+def test_formula_inventory_ignores_literal_error_cells_rewritten_as_formulas(
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "literal-error-formula.xlsx"
+    _save_formula_workbook(workbook_path, "=#N/A")
+    rewritten_path = tmp_path / "literal-error-rewritten.xlsx"
+    with zipfile.ZipFile(workbook_path) as source, zipfile.ZipFile(
+        rewritten_path, "w"
+    ) as destination:
+        for member in source.infolist():
+            payload = source.read(member.filename)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                payload = payload.replace(
+                    b'<c r="A1"><f>#N/A</f><v /></c>',
+                    b'<c r="A1" t="e"><f>#N/A</f><v>#N/A</v></c>',
+                )
+            destination.writestr(member, payload)
+    literal_error = formula_inventory(rewritten_path)
+
+    # A genuine error-producing formula remains auditable; only a literal error
+    # cell rewritten by a recalculation backend is excluded.
+    _save_formula_workbook(workbook_path, "=NA()")
+    error_function = formula_inventory(workbook_path)
+
+    assert literal_error.cells == {}
+    assert set(error_function.cells) == {("Data", "A1")}
+
+
 def test_formula_runtime_report_marks_deleted_formula_coordinates_absent(
     tmp_path: Path,
 ) -> None:

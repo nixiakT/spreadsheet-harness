@@ -703,11 +703,25 @@ def execution_plan(composition: ResolvedComposition) -> PluginExecutionPlan:
         if plugin.contract.kind != "knowledge":
             continue
         try:
-            skill_names.append(knowledge_implementations[plugin.contract.implementation])
-        except KeyError as exc:
-            raise HarnessError(
-                f"No skill adapter for knowledge plugin {plugin.contract.name!r}"
-            ) from exc
+            skill_name = knowledge_implementations[plugin.contract.implementation]
+        except KeyError:
+            # Generated knowledge plugins use the same constrained
+            # ``knowledge.<skill-directory>`` ABI as built-ins. Keeping this
+            # fallback contract-based lets a generated plugin be materialized
+            # in an isolated skill root without adding runtime code or tools.
+            implementation = plugin.contract.implementation
+            if not implementation.startswith("knowledge."):
+                raise HarnessError(
+                    f"No skill adapter for knowledge plugin {implementation!r}"
+                ) from None
+            skill_name = implementation.removeprefix("knowledge.")
+            if not skill_name:
+                raise HarnessError(
+                    "Generated knowledge plugin has an empty skill name"
+                ) from None
+        if skill_name in skill_names:
+            raise HarnessError(f"Composition selects duplicate skill {skill_name!r}")
+        skill_names.append(skill_name)
 
     return PluginExecutionPlan(
         "single-stage",
@@ -1583,6 +1597,39 @@ def default_plugin_registry() -> PluginRegistry:
                     ("repeated-successes", "backend-workarounds", "transfer-evidence"),
                     ("experience-rule", "template-merge", "redundancy-prune"),
                     ("failure-replay", "neighbor-transfer", "workbook-regression"),
+                ),
+            ),
+            # Intentionally inactive in the built-in financial composition.
+            # This is the contract slot used by the co-evolution experiment
+            # for a newly generated coordination skill.  The implementation
+            # ABI is just ``knowledge.<skill-directory>``; the candidate still
+            # has to supply the SKILL.md and pass the same paired gates as an
+            # edit to an existing plugin.
+            PluginContract(
+                "skill-spreadsheet-coordination",
+                "0.1.0",
+                "knowledge",
+                "knowledge.spreadsheet-coordination",
+                frozenset({"knowledge.spreadsheet-coordination"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset(
+                    {"composition", "structure", "formula", "verification"}
+                ),
+                evolution_strategy=_strategy(
+                    (
+                        "plugin-activation-trace",
+                        "cross-plugin-contract",
+                        "failure-replay",
+                    ),
+                    ("coordination-rule", "skill-template", "handoff-rule"),
+                    (
+                        "composition-interface",
+                        "structure-formula",
+                        "verification-structure",
+                        "workbook-regression",
+                    ),
                 ),
             ),
             PluginContract(

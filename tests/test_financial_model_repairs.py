@@ -314,6 +314,78 @@ def test_complete_financial_model_runtime_actions_applies_constants_and_freeze_p
     repaired.close()
 
 
+def test_common_financial_ratio_repairs_use_local_anchors(tmp_path: Path) -> None:
+    """Common ratio clauses are filled without task-specific coordinates."""
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "output.xlsx"
+    workbook = Workbook()
+    financials = workbook.active
+    financials.title = "Financials"
+    financials["B62"] = "Reported EPS - Basic"
+    financials["B63"] = "Reported EPS - Diluted"
+    financials["B65"] = "Reported DPS"
+    financials["B66"] = "Payout Ratio"
+    for column in range(5, 8):
+        letter = get_column_letter(column)
+        financials[f"{letter}62"] = 2
+        financials[f"{letter}63"] = 2.5
+        financials[f"{letter}65"] = 1
+    financials["B59"] = "Weighted Avg No. of Eq. Shares - Basic"
+    financials["B88"] = "Long-term borrowings"
+    financials["B93"] = "Short-term borrowings"
+    financials["B99"] = "Minority interest"
+    financials["B101"] = "Total Equity"
+    for column in range(6, 8):
+        letter = get_column_letter(column)
+        financials[f"{letter}59"] = 10
+        financials[f"{letter}88"] = 20
+        financials[f"{letter}93"] = 5
+        financials[f"{letter}99"] = 2
+        financials[f"{letter}101"] = 100
+
+    assumptions = workbook.create_sheet("Assumptions")
+    assumptions["B18"] = "Total Revenue"
+    assumptions["B163"] = "Other long-term assets"
+    assumptions["B164"] = "As a % of revenue"
+    assumptions["K18"] = 200
+    assumptions["L18"] = 220
+    assumptions["K164"] = "=0.1"
+    assumptions["L164"] = "=0.1"
+
+    ratio = workbook.create_sheet("Ratio_Analysis ")
+    ratio["B26"] = "Debt / Total Cap"
+    ratio["B29"] = "EPS - Diluted"
+    ratio["B30"] = "DPS"
+    ratio["B31"] = "Book Value Per Share"
+    for column in range(6, 8):
+        letter = get_column_letter(column)
+        ratio[f"{letter}29"] = f"=Financials!{letter}63"
+        ratio[f"{letter}30"] = f"=Financials!{letter}65"
+
+    workbook.save(source)
+    workbook.save(output)
+    workbook.close()
+
+    instruction = (
+        "In the Financials sheet, calculate the Payout Ratio for all periods. "
+        "In the Assumptions sheet, calculate Other Long-Term Assets for 2014F–2018F. "
+        "In the Ratio Analysis sheet, calculate Book Value per Share, then calculate "
+        "Debt-to-Total Capital."
+    )
+    changes = complete_financial_model_runtime_actions(
+        output,
+        source_path=source,
+        instruction=instruction,
+    )
+    repaired = load_workbook(output, data_only=False)
+    assert repaired["Financials"]["E66"].value == "=E65/E63"
+    assert repaired["Assumptions"]["K163"].value == "=K164*K18"
+    assert repaired["Ratio_Analysis "]["F31"].value == "=+(Financials!F101-Financials!F99)/Financials!F59"
+    assert repaired["Ratio_Analysis "]["F26"].value == "=+(Financials!F93+Financials!F88)/(Financials!F101+Financials!F93+Financials!F88)"
+    assert any(item["target"] == "O66" for item in changes) is False
+    repaired.close()
+
+
 def test_complete_financial_model_runtime_actions_continues_metric_rows_and_links_peer_row(
     tmp_path: Path,
 ) -> None:

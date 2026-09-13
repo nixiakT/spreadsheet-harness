@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 from openpyxl import load_workbook
 
-from spreadsheet_harness.agent import ResponseTurn, SpreadsheetAgent
+from spreadsheet_harness.agent import (
+    ResponseTurn,
+    SpreadsheetAgent,
+    _sparse_formula_validation_is_complete_clean,
+)
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import AgentExecutionFailure
@@ -320,6 +324,66 @@ def test_formula_edit_cannot_submit_until_sparse_runtime_validation(
     serialized = json.dumps(formula_events, sort_keys=True)
     assert "=1+1" not in serialized
     assert "answer_position" not in serialized
+
+
+def test_sparse_validation_ignores_preexisting_errors_in_pending_scope() -> None:
+    pending = {("Sales", "H1")}
+    outcome = {
+        "ok": True,
+        "calculation_valid": False,
+        "calculation_errors": {
+            "count": 1,
+            "coordinates": [
+                {"sheet": "Sales", "coordinate": "H1", "error": "#DIV/0!"}
+            ],
+            "coordinates_truncated": False,
+        },
+        "validation_scope": {
+            "kind": "pending_formula_changes",
+            "coordinate_count": 1,
+            "coordinate_sha256": formula_coordinate_sha256(pending),
+            "coverage_complete": True,
+            "formula_cells_present": 1,
+            "formula_cells_absent": 0,
+        },
+    }
+
+    assert _sparse_formula_validation_is_complete_clean(
+        outcome,
+        pending,
+        expected_formula_cells_present=1,
+        baseline_error_coordinates={("Sales", "H1")},
+    )
+
+
+def test_sparse_validation_still_rejects_new_error_in_pending_scope() -> None:
+    pending = {("Sales", "H1")}
+    outcome = {
+        "ok": True,
+        "calculation_valid": False,
+        "calculation_errors": {
+            "count": 1,
+            "coordinates": [
+                {"sheet": "Sales", "coordinate": "H1", "error": "#DIV/0!"}
+            ],
+            "coordinates_truncated": False,
+        },
+        "validation_scope": {
+            "kind": "pending_formula_changes",
+            "coordinate_count": 1,
+            "coordinate_sha256": formula_coordinate_sha256(pending),
+            "coverage_complete": True,
+            "formula_cells_present": 1,
+            "formula_cells_absent": 0,
+        },
+    }
+
+    assert not _sparse_formula_validation_is_complete_clean(
+        outcome,
+        pending,
+        expected_formula_cells_present=1,
+        baseline_error_coordinates=set(),
+    )
 
 
 def test_clean_recalculation_before_formula_edit_does_not_satisfy_gate(

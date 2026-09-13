@@ -587,7 +587,7 @@ class SpreadsheetToolRegistry:
                                 "type": "integer",
                                 "minimum": 1,
                                 "maximum": 60,
-                                "default": 30,
+                                "default": 60,
                             },
                         },
                         ["code"],

@@ -254,6 +254,13 @@ def workbook_path() -> Path:
     return Path(os.environ["SHEET_WORKBOOK"])
 
 
+# Backward-compatible managed-path alias.  The harness prompt deliberately
+# prefers the no-argument load/save helpers, but models and older snippets may
+# still use ``sheet_harness.SHEET_WORKBOOK``.  Expose only the exact isolated
+# workbook path supplied by the runner (never a guessed or host path).
+SHEET_WORKBOOK = str(workbook_path())
+
+
 def workbook_sha256(path: str | Path | None = None) -> str:
     target = Path(path) if path is not None else workbook_path()
     digest = hashlib.sha256()
@@ -1709,7 +1716,11 @@ class LocalCodeInterpreter:
         workspace: Path,
         workbook: Path,
         *,
-        default_timeout: int = 30,
+        # Financial workbooks routinely need more than 30s for an isolated
+        # openpyxl load/save round-trip (especially while preserving charts).
+        # The per-call ceiling remains 60s; use the full budget by default so
+        # a valid edit is not rolled back merely because serialization is slow.
+        default_timeout: int = 60,
         max_output_chars: int = 20_000,
         require_isolation: bool = False,
         secrets: tuple[str, ...] = (),

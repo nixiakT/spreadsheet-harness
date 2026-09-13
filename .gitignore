@@ -14,3 +14,13 @@ benchmarks/data/
 benchmarks/results/
 diagnostics/
 .DS_Store
+
+# Local benchmark outputs, downloaded checkpoints, and scratch workbooks.
+models/
+results/
+tmp/
+benchmarks/logs/
+all_xlsx.zip
+
+# Ad-hoc benchmark launcher logs are reproducible run artifacts.
+benchmarks/*.log

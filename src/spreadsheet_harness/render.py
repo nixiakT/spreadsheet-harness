@@ -97,6 +97,13 @@ _LOCAL_FORMULA_REFERENCE = re.compile(
     r"(?<![A-Z0-9_!])\$?([A-Z]{1,3})\$?([1-9][0-9]*)",
     re.IGNORECASE,
 )
+_SPREADSHEET_ERROR_VALUES = frozenset(
+    {
+        "#BLOCKED!", "#BUSY!", "#CALC!", "#CONNECT!", "#DIV/0!", "#FIELD!",
+        "#GETTING_DATA", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#PYTHON!",
+        "#REF!", "#SPILL!", "#UNKNOWN!", "#VALUE!",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1792,6 +1799,20 @@ def restore_ooxml_cell_contents(
                     strings=strings,
                     label=label,
                 )
+                # LibreOffice may canonicalize a pre-existing literal error
+                # (``<c t="e"><v>#N/A</v></c>``) to an error formula with the
+                # same cached value (``<f>#N/A</f><v>#N/A</v>``).  These are
+                # semantically identical baseline content.  Treating them as
+                # drift would make the final input-content guard undo Calc's
+                # evaluator-compatible representation and costs every such
+                # cell in modification accuracy.
+                if semantic_cell.attrib.get("t") == "e":
+                    value_node = semantic_cell.find(f"{{{namespace_uri}}}v")
+                    formula_node = semantic_cell.find(f"{{{namespace_uri}}}f")
+                    cached = str(value_node.text or "").strip().upper() if value_node is not None else ""
+                    formula = str(formula_node.text or "").strip().upper() if formula_node is not None else ""
+                    if cached in _SPREADSHEET_ERROR_VALUES and formula == cached:
+                        semantic_cell.remove(formula_node)
                 attributes = tuple(
                     sorted(
                         (key, value)
@@ -2100,38 +2121,55 @@ def transplant_ooxml_formula_cached_values(
 
 
 def _cyclic_graph_nodes(graph: Mapping[str, set[str]]) -> set[str]:
-    indices: dict[str, int] = {}
-    lowlinks: dict[str, int] = {}
-    stack: list[str] = []
-    on_stack: set[str] = set()
-    cyclic: set[str] = set()
+    """Return nodes participating in a directed cycle.
 
-    def strong_connect(node: str) -> None:
-        index = len(indices)
-        indices[node] = lowlinks[node] = index
-        stack.append(node)
-        on_stack.add(node)
-        for neighbor in graph[node]:
-            if neighbor not in indices:
-                strong_connect(neighbor)
-                lowlinks[node] = min(lowlinks[node], lowlinks[neighbor])
-            elif neighbor in on_stack:
-                lowlinks[node] = min(lowlinks[node], indices[neighbor])
-        if lowlinks[node] != indices[node]:
-            return
-        component: list[str] = []
+    This used to be a recursive Tarjan SCC implementation.  Financial models
+    commonly contain dependency chains longer than Python's default recursion
+    limit (one workbook here has a chain over 1,000 cells), causing a late
+    ``RecursionError`` or spending hours in repeated retries.  Kosaraju's
+    algorithm below is iterative, so its stack usage is bounded by the graph
+    size and it has the same O(V+E) semantics without recursion limits.
+    """
+    visited: set[str] = set()
+    order: list[str] = []
+    for start in graph:
+        if start in visited:
+            continue
+        visited.add(start)
+        stack: list[tuple[str, bool]] = [(start, False)]
         while stack:
-            member = stack.pop()
-            on_stack.remove(member)
-            component.append(member)
-            if member == node:
-                break
-        if len(component) > 1 or node in graph[node]:
-            cyclic.update(component)
+            node, expanded = stack.pop()
+            if expanded:
+                order.append(node)
+                continue
+            stack.append((node, True))
+            for neighbor in graph.get(node, ()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append((neighbor, False))
 
-    for node in graph:
-        if node not in indices:
-            strong_connect(node)
+    reverse: dict[str, set[str]] = {node: set() for node in graph}
+    for node, neighbors in graph.items():
+        for neighbor in neighbors:
+            reverse.setdefault(neighbor, set()).add(node)
+
+    assigned: set[str] = set()
+    cyclic: set[str] = set()
+    for start in reversed(order):
+        if start in assigned:
+            continue
+        assigned.add(start)
+        component: list[str] = []
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in reverse.get(node, ()):
+                if neighbor not in assigned:
+                    assigned.add(neighbor)
+                    stack.append(neighbor)
+        if len(component) > 1 or any(node in graph.get(node, ()) for node in component):
+            cyclic.update(component)
     return cyclic
 
 
@@ -2186,9 +2224,32 @@ def _seed_ooxml_formula_cached_values(target: Path, seed: Path) -> dict[str, int
                 target_cells = formula_cells(target_root, target_namespace)
                 seed_cells = formula_cells(seed_root, seed_namespace)
                 formula_coordinates = set(target_cells)
+                # ``ReadOnlyWorksheet.__getitem__`` performs a fresh row scan
+                # for every coordinate.  The old implementation called it
+                # once per formula (and again while restoring caches), which
+                # turns a workbook with tens of thousands of formulas into an
+                # effectively quadratic CPU loop.  Materialize the formula
+                # values in one sequential pass instead; this preserves
+                # openpyxl's handling of shared/array formulas while keeping
+                # random lookups O(1).
+                target_formula_values: dict[str, Any] = {}
+                target_sheet = target_workbook[sheet_name]
+                for row in target_sheet.iter_rows():
+                    for cell in row:
+                        coordinate = getattr(cell, "coordinate", None)
+                        if coordinate in formula_coordinates:
+                            target_formula_values[coordinate] = cell.value
+                seed_formula_values: dict[str, Any] = {}
+                seed_sheet = seed_workbook[sheet_name]
+                seed_formula_coordinates = set(seed_cells)
+                for row in seed_sheet.iter_rows():
+                    for cell in row:
+                        coordinate = getattr(cell, "coordinate", None)
+                        if coordinate in seed_formula_coordinates:
+                            seed_formula_values[coordinate] = cell.value
                 graph: dict[str, set[str]] = {}
                 for coordinate in formula_coordinates:
-                    raw_formula = target_workbook[sheet_name][coordinate].value
+                    raw_formula = target_formula_values.get(coordinate)
                     formula = getattr(raw_formula, "text", raw_formula)
                     graph[coordinate] = {
                         f"{column.upper()}{row}"
@@ -2203,17 +2264,10 @@ def _seed_ooxml_formula_cached_values(target: Path, seed: Path) -> dict[str, int
                 sheet_seeded = 0
                 for coordinate, target_cell in target_cells.items():
                     seed_cell = seed_cells.get(coordinate)
-                    target_formula = getattr(
-                        target_workbook[sheet_name][coordinate].value,
-                        "text",
-                        target_workbook[sheet_name][coordinate].value,
-                    )
+                    target_raw_formula = target_formula_values.get(coordinate)
+                    target_formula = getattr(target_raw_formula, "text", target_raw_formula)
                     seed_formula = (
-                        getattr(
-                            seed_workbook[sheet_name][coordinate].value,
-                            "text",
-                            seed_workbook[sheet_name][coordinate].value,
-                        )
+                        getattr(seed_formula_values.get(coordinate), "text", seed_formula_values.get(coordinate))
                         if seed_cell is not None
                         else None
                     )
@@ -2476,7 +2530,15 @@ def _restore_array_formula_kinds(source: Path, converted: Path) -> int:
         _validate_recalculated_file(converted)
     return restored
 def _restore_ooxml_formula_text(source: Path, converted: Path) -> int:
-    """Restore source formula text while retaining converted calculation caches."""
+    """Restore source formulas while retaining converted calculation caches.
+
+    Calc occasionally materializes ordinary formulas as scalar values when it
+    serializes large or externally linked workbooks.  The source passed here is
+    the exact, already-edited workbook that Calc received, so every source
+    formula is authoritative even when the converted cell no longer has an
+    ``<f>`` node.  Reattach that node while keeping Calc's newly evaluated
+    ``<v>`` cache.
+    """
 
     if source.suffix.lower() not in _SHEET_INVENTORY_FORMATS:
         return 0
@@ -2486,6 +2548,20 @@ def _restore_ooxml_formula_text(source: Path, converted: Path) -> int:
         ) as converted_package:
             source_parts = _worksheet_parts_by_name(source_package)
             converted_parts = _worksheet_parts_by_name(converted_package)
+            converted_shared_strings: tuple[str, ...] = ()
+            if _SHARED_STRINGS_XML_PART in converted_package.namelist():
+                shared_root = _parse_inventory_xml(
+                    converted_package.read(_SHARED_STRINGS_XML_PART),
+                    label="converted shared strings",
+                )
+                shared_namespace = _xml_namespace(shared_root.tag)
+                converted_shared_strings = tuple(
+                    "".join(
+                        str(node.text or "")
+                        for node in item.iter(f"{{{shared_namespace}}}t")
+                    )
+                    for item in shared_root
+                )
             replacements: dict[str, bytes] = {}
             restored = 0
             for name, source_part in source_parts.items():
@@ -2515,7 +2591,7 @@ def _restore_ooxml_formula_text(source: Path, converted: Path) -> int:
                 target_cells = {
                     str(cell.attrib["r"]): cell
                     for cell in target_root.iter(cell_tag)
-                    if cell.attrib.get("r") and cell.find(formula_tag) is not None
+                    if cell.attrib.get("r")
                 }
                 sheet_restored = 0
                 for coordinate, source_cell in source_cells.items():
@@ -2524,16 +2600,62 @@ def _restore_ooxml_formula_text(source: Path, converted: Path) -> int:
                         continue
                     source_formula = source_cell.find(formula_tag)
                     target_formula = target_cell.find(formula_tag)
-                    assert source_formula is not None and target_formula is not None
+                    assert source_formula is not None
                     if source_formula.attrib.get("t") in {"array", "dataTable"}:
                         continue
                     source_text = source_formula.text or ""
-                    if (target_formula.text or "") == source_text and target_formula.attrib == source_formula.attrib:
+                    if (
+                        target_formula is not None
+                        and (target_formula.text or "") == source_text
+                        and target_formula.attrib == source_formula.attrib
+                    ):
                         continue
-                    target_formula.attrib.clear()
-                    target_formula.attrib.update(source_formula.attrib)
-                    target_formula.text = source_text
+                    if target_formula is None:
+                        # Formula results materialized as shared or inline
+                        # strings must become a valid formula cache rather than
+                        # retaining a shared-string index under ``t=str``.
+                        target_type = target_cell.attrib.get("t")
+                        value = target_cell.find(f"{{{namespace}}}v")
+                        if target_type == "s" and value is not None:
+                            try:
+                                shared_index = int(str(value.text))
+                                value.text = converted_shared_strings[shared_index]
+                            except (TypeError, ValueError, IndexError) as exc:
+                                raise RenderError(
+                                    "Converted formula cache has an invalid shared-string "
+                                    f"reference at {name}!{coordinate}"
+                                ) from exc
+                            target_cell.set("t", "str")
+                        elif target_type == "inlineStr":
+                            inline = target_cell.find(f"{{{namespace}}}is")
+                            cached_text = (
+                                "".join(
+                                    str(node.text or "")
+                                    for node in inline.iter(f"{{{namespace}}}t")
+                                )
+                                if inline is not None
+                                else ""
+                            )
+                            if inline is not None:
+                                target_cell.remove(inline)
+                            value = ElementTree.Element(f"{{{namespace}}}v")
+                            value.text = cached_text
+                            target_cell.append(value)
+                            target_cell.set("t", "str")
+                        target_formula = ElementTree.fromstring(
+                            ElementTree.tostring(source_formula)
+                        )
+                        value = target_cell.find(f"{{{namespace}}}v")
+                        target_cell.insert(
+                            list(target_cell).index(value) if value is not None else 0,
+                            target_formula,
+                        )
+                    else:
+                        target_formula.attrib.clear()
+                        target_formula.attrib.update(source_formula.attrib)
+                        target_formula.text = source_text
                     sheet_restored += 1
+
                 if sheet_restored:
                     ElementTree.register_namespace("", namespace)
                     replacements[converted_part] = ElementTree.tostring(

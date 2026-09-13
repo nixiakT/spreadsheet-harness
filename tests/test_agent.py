@@ -2312,8 +2312,16 @@ def test_agent_allows_submit_after_repair_and_covering_clean_validation(
     assert passed["payload"]["outstanding_after"]["total_count"] == 0
 
 
+@pytest.mark.parametrize(
+    ("enable_thinking", "expected_forced_output_tokens"),
+    [(False, 512), (True, 16_000)],
+)
 def test_agent_immediately_validates_formula_mutations_but_allows_repair(
-    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+    enable_thinking: bool,
+    expected_forced_output_tokens: int,
 ) -> None:
     client = _sequenced_calculation_client(
         [
@@ -2359,7 +2367,12 @@ def test_agent_immediately_validates_formula_mutations_but_allows_repair(
     )
 
     result = SpreadsheetAgent(
-        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ProviderConfig(
+            "https://example.test/v1",
+            "not-a-real-key",
+            "test-model",
+            enable_thinking=enable_thinking,
+        ),
         tools,  # type: ignore[arg-type]
         required_tool_termination=True,
         require_workbook_change=True,
@@ -2375,6 +2388,7 @@ def test_agent_immediately_validates_formula_mutations_but_allows_repair(
     assert [tool["name"] for tool in client.requests[1]["tools"]] == [
         "recalculate_and_read"
     ]
+    assert client.requests[1]["max_output_tokens"] == expected_forced_output_tokens
     assert "pending_formula_changes" in json.dumps(client.requests[1]["input"])
     assert client.requests[2]["tool_choice"] == "auto"
     assert {tool["name"] for tool in client.requests[2]["tools"]} == {
@@ -2386,6 +2400,86 @@ def test_agent_immediately_validates_formula_mutations_but_allows_repair(
         "type": "function",
         "name": "recalculate_and_read",
     }
+    assert client.requests[3]["max_output_tokens"] == expected_forced_output_tokens
+
+
+def test_agent_tracks_preexisting_warm_start_formula_against_source_baseline(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class WarmStartTools(_CalculationScenarioTools):
+        def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            if name != "recalculate_and_read":
+                return super().invoke(name, arguments)
+            pending = set(self.pending_formula_validation)
+            return ToolOutcome(
+                {
+                    "ok": True,
+                    "calculation_valid": True,
+                    "validation_scope": {
+                        "kind": "pending_formula_changes",
+                        "coordinate_count": len(pending),
+                        "coordinate_sha256": formula_coordinate_sha256(pending),
+                        "coverage_complete": True,
+                        "formula_cells_present": len(pending),
+                        "formula_cells_absent": 0,
+                        "cached_blank_count": 0,
+                        "calculation_errors": {
+                            "count": 0,
+                            "coordinates": [],
+                            "coordinates_truncated": False,
+                        },
+                    },
+                    "calculation_errors": {
+                        "count": 0,
+                        "coordinates": [],
+                        "coordinates_truncated": False,
+                    },
+                }
+            )
+
+    source = tmp_path / "source.xlsx"
+    source.write_bytes(sample_workbook.read_bytes())
+    session = WorkbookSession.create(source, tmp_path / "warm-start-formula-run")
+    workbook = load_workbook(session.workbook_path)
+    workbook["Sales"]["D4"] = "=B4*C4"
+    workbook.save(session.workbook_path)
+    workbook.close()
+    client = _sequenced_calculation_client(
+        [
+            {
+                "type": "tool",
+                "name": "recalculate_and_read",
+                "arguments": {"validation_scope": "pending_formula_changes"},
+            },
+            {"type": "tool", "name": "submit_result", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", client)
+    tools = WarmStartTools(session, [])
+
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,  # type: ignore[arg-type]
+        required_tool_termination=True,
+        require_formula_runtime_validation=True,
+        formula_runtime_baseline_path=source,
+        max_turns=2,
+    ).run("Verify the prepared formula")
+
+    assert result.final_text == "Spreadsheet task completed."
+    assert client.requests[0]["tool_choice"] == {
+        "type": "function",
+        "name": "recalculate_and_read",
+    }
+    trajectory = _calculation_trajectory(session)
+    passed = next(
+        event
+        for event in trajectory
+        if event["event"] == "agent.formula_runtime_validation_passed"
+    )
+    assert passed["payload"]["pending_before"]["coordinates"] == [
+        {"sheet": "Sales", "coordinate": "D4"}
+    ]
 
 
 def test_agent_drops_unexecuted_premature_submit_before_formula_validation_replay(
@@ -4184,8 +4278,16 @@ def test_required_tool_termination_rejects_prefix_on_last_shared_budget_call(
     }
 
 
+@pytest.mark.parametrize(
+    ("enable_thinking", "expected_terminal_output_tokens"),
+    [(False, 512), (True, 16_000)],
+)
 def test_reserved_submit_only_output_limit_is_auditable_execution_failure(
-    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+    enable_thinking: bool,
+    expected_terminal_output_tokens: int,
 ) -> None:
     class TruncatedTerminalClient:
         requests: list[dict[str, Any]] = []
@@ -4219,7 +4321,12 @@ def test_reserved_submit_only_output_limit_is_auditable_execution_failure(
 
     with pytest.raises(AgentExecutionFailure) as caught:
         SpreadsheetAgent(
-            ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+            ProviderConfig(
+                "https://example.test/v1",
+                "not-a-real-key",
+                "test-model",
+                enable_thinking=enable_thinking,
+            ),
             tools,
             max_turns=5,
             budget=budget,
@@ -4268,7 +4375,7 @@ def test_reserved_submit_only_output_limit_is_auditable_execution_failure(
         "type": "function",
         "name": "submit_result",
     }
-    assert request["max_output_tokens"] == 512
+    assert request["max_output_tokens"] == expected_terminal_output_tokens
     assert len(request["tools"]) == 1
     assert request["tools"][0]["name"] == "submit_result"
     assert request["tools"][0]["parameters"] == {

@@ -187,7 +187,29 @@ def main() -> None:
     settings.audit_lock = threading.Lock()
     settings.counter_lock = threading.Lock()
     settings.pace_lock = threading.Lock()
+    # Restore accepted request counts when resuming an existing benchmark.
+    # Without this, restarting the proxy resets every per-task ceiling and a
+    # task can silently exceed the configured turn limit across restarts.
     settings.task_counts = {}
+    if settings.audit and settings.audit.is_file():
+        for line in settings.audit.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            task_key = event.get("task_key")
+            if not isinstance(task_key, str):
+                continue
+            # The initial audit row is the only row for an accepted incoming
+            # request that has none of the attempt/response/limit annotations.
+            if (
+                event.get("request_index")
+                and "upstream_attempt" not in event
+                and "response_bytes" not in event
+                and "error" not in event
+                and not event.get("limit_exceeded")
+            ):
+                settings.task_counts[task_key] = settings.task_counts.get(task_key, 0) + 1
     settings.next_upstream_at = 0.0
     server = ThreadingHTTPServer(("127.0.0.1", settings.port), MessagesHandler)
     server.settings = settings  # type: ignore[attr-defined]

@@ -14,6 +14,10 @@ from openpyxl.cell.cell import MergedCell
 from PIL import Image
 
 from spreadsheet_harness import arms
+from spreadsheet_harness.financial_model_repairs import (
+    complete_consensus_formula_bands,
+    complete_financial_model_runtime_actions,
+)
 from spreadsheet_harness.agent import AgentResult, ResponseTurn
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
@@ -618,6 +622,8 @@ def test_ours_consumes_compact_profile_hint_without_skills(
     assert "does not return a list of names" in executor_instructions
     assert "sheet_harness.view_xlsx" in executor_instructions
     assert "Never dump an entire sheet" in executor_instructions
+    assert "compact clause ledger" in executor_instructions
+    assert "equal worksheet column letters" in executor_instructions
     assert "every source cell that already contains a value or formula is protected" in (
         executor_instructions
     )
@@ -1159,16 +1165,14 @@ def test_financial_plugin_warm_starts_domain_runtime_before_evidence(
     )
     assert "Deterministic Financial warm-start already completed" in executor_prompt
     assert "one bounded batch of sheet_harness.view_xlsx calls" in executor_prompt
-    assert [call["stage"] for call in FakeAgent.calls] == ["execute"]
-    bypassed = [
+    # Partial warm-starts retain the planner so it can identify the remaining
+    # clauses; only complete instruction-sheet coverage may bypass planning.
+    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
+    assert not [
         event
         for event in events
         if event["event"] == "harness.financial_planner.bypassed"
     ]
-    assert bypassed[-1]["payload"]["policy"] == (
-        "deterministic-warm-start-direct-executor-v1"
-    )
-    assert bypassed[-1]["payload"]["executor_turns"] == 8
 
 
 def test_financial_complete_runtime_coverage_bypasses_executor(
@@ -2702,6 +2706,42 @@ def test_financial_task_keyword_evidence_skips_debug_detector_and_compacts(
     assert "task_specific_repair_candidates" not in payload
 
 
+def test_financial_task_keyword_evidence_includes_local_dependency_rows(
+    tmp_path: Path,
+) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Debt Schedule"
+    worksheet["B1"] = "Debt Forecast"
+    worksheet["B9"] = "Opening Debt"
+    worksheet["B10"] = "Repayment"
+    worksheet["B11"] = "Closing Debt"
+    worksheet["B12"] = "Interest Expense"
+    worksheet["B13"] = "Interest Rate"
+    for column in range(3, 25):
+        worksheet.cell(3, column, 2020 + column)
+        worksheet.cell(9, column, 100)
+        worksheet.cell(10, column, -10)
+        worksheet.cell(11, column, f"={worksheet.cell(9, column).coordinate}+{worksheet.cell(10, column).coordinate}")
+        worksheet.cell(13, column, 0.1)
+    workbook_path = tmp_path / "financial-context.xlsx"
+    workbook.save(workbook_path)
+    workbook.close()
+
+    evidence = arms._task_keyword_evidence(
+        workbook_path,
+        "In the Debt Schedule sheet, calculate Interest Expense for all forecast years.",
+        ["Debt Schedule"],
+        task_category="Financial_Model",
+    )
+
+    payload = json.loads(evidence)
+    rows = {row["row"] for row in payload["sheets"][0]["rows"]}
+    assert {10, 11, 12, 13}.issubset(rows)
+    closing_row = next(row for row in payload["sheets"][0]["rows"] if row["row"] == 11)
+    assert any(cell["cell"] == "X11" for cell in closing_row["cells"])
+
+
 def test_cross_sheet_keyword_evidence_omits_speculative_offsets(tmp_path: Path) -> None:
     workbook_path = tmp_path / "Incorrect Cross Sheet References_input.xlsx"
     workbook = Workbook()
@@ -3120,6 +3160,134 @@ def test_spreadsheet_core_skill_blocks_unverified_formula_submission() -> None:
     assert "`list_sheets`" not in skill
     assert "`format_range`" not in skill
     assert "data_only=True" in skill
+
+
+def test_consensus_formula_bands_fill_horizontal_and_vertical_runs(tmp_path: Path) -> None:
+    source = tmp_path / "band-source.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    # Horizontal band: B2 and E2 prove C2:D2.
+    sheet["B2"] = "=B1*2"
+    sheet["E2"] = "=E1*2"
+    # Vertical band: G2 and G5 prove G3:G4.
+    sheet["G2"] = "=G1+1"
+    sheet["G5"] = "=G4+1"
+    for coord in ("B2", "C2", "D2", "E2", "G2", "G3", "G4", "G5"):
+        sheet[coord].style = sheet["B2"].style
+    workbook.save(source)
+    workbook.close()
+
+    session_path = tmp_path / "band-output.xlsx"
+    session_path.write_bytes(source.read_bytes())
+    changed = complete_consensus_formula_bands(session_path, source_path=source)
+    assert {item["target"] for item in changed} == {"C2", "D2", "G3", "G4"}
+    output = load_workbook(session_path, data_only=False)
+    try:
+        assert output["Model"]["C2"].value == "=C1*2"
+        assert output["Model"]["D2"].value == "=D1*2"
+        assert output["Model"]["G3"].value == "=G2+1"
+        assert output["Model"]["G4"].value == "=G3+1"
+    finally:
+        output.close()
+
+
+def test_consensus_formula_bands_refuse_source_values_or_nonconsensus(tmp_path: Path) -> None:
+    source = tmp_path / "band-guard-source.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Model"
+    sheet["B2"] = "=B1*2"
+    sheet["E2"] = "=E1*3"  # translates differently; must not guess.
+    sheet["H2"] = "=H1+1"
+    sheet["H5"] = "=H4+1"
+    sheet["H3"] = "source input"  # source non-empty blocks any candidate crossing it.
+    workbook.save(source)
+    workbook.close()
+
+    output_path = tmp_path / "band-guard-output.xlsx"
+    output_path.write_bytes(source.read_bytes())
+    # Create a blank in the output that is populated in source: it must remain untouched.
+    output = load_workbook(output_path)
+    output["Model"]["H3"] = None
+    output.save(output_path)
+    output.close()
+
+    changed = complete_consensus_formula_bands(output_path, source_path=source)
+    assert changed == []
+    checked = load_workbook(output_path, data_only=False)
+    try:
+        assert checked["Model"]["B2"].value == "=B1*2"
+        assert checked["Model"]["E2"].value == "=E1*3"
+        assert checked["Model"]["H3"].value is None
+        assert checked["Model"]["H3"].value is None
+    finally:
+        checked.close()
+
+
+def test_financial_runtime_fills_pbt_to_eps_block_from_statement_links(tmp_path: Path) -> None:
+    source = tmp_path / "pbt-source.xlsx"
+    workbook = Workbook()
+    model = workbook.active
+    model.title = "Consol_annual"
+    for row, label in {
+        6: "Net Sales", 25: "Operating Profit (EBIT)", 28: "Total Non-Operating Income (Expenses)",
+        34: "Profit Before Taxes (PBT)", 35: "Income Tax Expense (Gain)", 36: "Tax rate (%)",
+        37: "Net Income Before MI, Associates & Extraordinaries", 38: "Minority Interest",
+        39: "Profit & Loss from Associates", 40: "Net Income Before Extraordinaries", 41: "Extraordinaries",
+        42: "Net Income After Extraordinaries ARd Minorities", 43: "PAT Margin (%)",
+        44: "Dividend on Preferred Capital", 45: "Net income for Common Equity",
+        46: "Dividend on Common Equity including tax", 47: "Dividend per share", 49: "Retained Income",
+        50: "EPS", 51: "EPS Growth(%)", 96: "Fully Diluted No. of Shares",
+    }.items():
+        model.cell(row, 2).value = label
+    model["N6"] = "=IS_BS_CF!B4"; model["N25"] = "=IS_BS_CF!B28"; model["N28"] = "=IS_BS_CF!B32"; model["N96"] = "=IS_BS_CF!B55"
+    model["O6"] = "=IS_BS_CF!C4"; model["O25"] = "=IS_BS_CF!C28"; model["O28"] = "=IS_BS_CF!C32"; model["O96"] = "=IS_BS_CF!C55"
+    model["N2"] = 2013; model["O2"] = 2014
+    statement = workbook.create_sheet("IS_BS_CF")
+    for row, label in {4: "Total Revenues", 28: "EBIT", 32: "Total non operating (income) / expense", 40: "Tax", 47: "Minority Interest", 48: "Share of Associates", 51: "Exceptional item", 55: "Fully Diluted SOS", 56: "EPS after exceptional Items", 61: "Total dividend", 63: "Tax on dividend"}.items():
+        statement.cell(row, 1).value = label
+    workbook.save(source); workbook.close()
+    out = tmp_path / "pbt-output.xlsx"; out.write_bytes(source.read_bytes())
+    changed = complete_financial_model_runtime_actions(out, source_path=source, instruction="In the Consol_annual sheet, calculate all elements from PBT to EPS Growth (%) for all years.")
+    assert any(item["target"] == "N34" for item in changed)
+    checked = load_workbook(out, data_only=False)
+    try:
+        assert checked["Consol_annual"]["N34"].value == "=N25+N28"
+        assert checked["Consol_annual"]["O51"].value == "=IFERROR((O50/N50)-1,0)"
+    finally:
+        checked.close()
+
+
+def test_financial_metric_run_does_not_spill_into_prose_column(tmp_path: Path) -> None:
+    source = tmp_path / "wacc-source.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "WACC"
+    worksheet["B9"] = "Cost of Equity"
+    worksheet["B11"] = "Adjusted Cost of Equity"
+    worksheet["E9"] = 0.1
+    worksheet["E10"] = 0.01
+    worksheet["E11"] = "=E9+E10"
+    worksheet["F5"] = "https://example.test/source"
+    workbook.save(source)
+    workbook.close()
+
+    output = tmp_path / "wacc-output.xlsx"
+    output.write_bytes(source.read_bytes())
+    changed = complete_financial_model_runtime_actions(
+        output,
+        source_path=source,
+        instruction="In the WACC sheet, calculate Cost of Equity using CAPM.",
+    )
+
+    assert not any(item["target"] == "F11" for item in changed)
+    checked = load_workbook(output, data_only=False)
+    try:
+        assert checked["WACC"]["F11"].value is None
+    finally:
+        checked.close()
+
 
 
 def test_compact_ours_profile_keeps_bounded_values_formats_and_provenance() -> None:
