@@ -19,8 +19,15 @@ diagnostics/
 models/
 results/
 tmp/
+data/
 benchmarks/logs/
 all_xlsx.zip
 
 # Ad-hoc benchmark launcher logs are reproducible run artifacts.
 benchmarks/*.log
+
+# Generated one-off experiment controllers.
+benchmarks/run_gpt56_sol_candidate_generation_*.py
+
+# Local experiment helper scripts and generated caches.
+scripts/
