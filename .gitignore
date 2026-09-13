@@ -28,6 +28,9 @@ benchmarks/*.log
 
 # Generated one-off experiment controllers.
 benchmarks/run_gpt56_sol_candidate_generation_*.py
+benchmarks/run_expanded_multi_plugin_validation_*.py
+tools/prepare_trace2skill_spreadsheetbench_v2_full.py
 
 # Local experiment helper scripts and generated caches.
 scripts/
+.deps/
