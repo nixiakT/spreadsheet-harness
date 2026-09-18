@@ -40,10 +40,21 @@ def main() -> int:
         output_root=repo_root / "benchmarks/results/continuous-financial-plugin-evaluations" / workspace_root.name,
         max_model_calls=int(binding.get("max_model_calls", 8)),
         max_turns_per_arm=int(binding.get("max_turns", binding.get("max_model_calls", 50))),
-        max_total_tokens=None,
-        max_output_tokens=None,
+        # Keep the historical unlimited defaults for frozen protocols, while
+        # allowing a new screening protocol to pin a safe per-response cap.
+        max_total_tokens=(
+            int(binding["max_total_tokens"])
+            if binding.get("max_total_tokens") is not None
+            else None
+        ),
+        max_output_tokens=(
+            int(binding["max_output_tokens"])
+            if binding.get("max_output_tokens") is not None
+            else None
+        ),
         task_timeout_seconds=float(binding.get("task_timeout_seconds", 1800)),
         arm_order_seed=int(binding.get("seed", 20260911)),
+        parallelism=int(binding.get("parallelism", 1)),
         incumbent_cache_root=(
             Path(str(binding["incumbent_cache_root"]))
             if binding.get("incumbent_cache_root")

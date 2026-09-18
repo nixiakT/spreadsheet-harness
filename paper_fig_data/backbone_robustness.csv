@@ -3,8 +3,14 @@ DeepSeek-V4-Flash,Bare,Overall,Exact,,,,,,,
 DeepSeek-V4-Flash,Bare,Overall,Modification,,,,,,,
 Qwen3-Coder-480B,Bare,Overall,Exact,,,,,,,
 Qwen3-Coder-480B,Bare,Overall,Modification,,,,,,,
-Qwen3-Coder-480B,SHEETHARNESS-BASIC,Overall,Exact,,,,297,,41,benchmarks/results/ours-basic-qwen-v2-20260917
-Qwen3-Coder-480B,SHEETHARNESS-BASIC,Overall,Modification,,,,297,,41,benchmarks/results/ours-basic-qwen-v2-20260917
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Overall,Exact,4.42,,,297,294,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Overall,Modification,33.81,,,297,294,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Template,Exact,8.25,,,97,97,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Template,Modification,20.11,,,97,97,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Financial Modeling,Exact,0.00,,,100,97,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Financial Modeling,Modification,41.13,,,100,97,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Debugging,Exact,5.00,,,100,100,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+Qwen3-Coder-480B,SHEETHARNESS-BASIC,Debugging,Modification,39.99,,,100,100,41,benchmarks/results/ours-basic-qwen-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
 Qwen3-Coder-480B,SHEETHARNESS-FINANCIAL,Overall,Exact,,,,297,,41,benchmarks/results/ours-qwen-v2-run2-20260916
 Qwen3-Coder-480B,SHEETHARNESS-FINANCIAL,Overall,Modification,,,,297,,41,benchmarks/results/ours-qwen-v2-run2-20260916
 DeepSeek-V4-Flash,SHEETHARNESS-BASIC,Template,Exact,24.74,,,97,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
@@ -13,6 +19,14 @@ DeepSeek-V4-Flash,SHEETHARNESS-BASIC,Financial Modeling,Exact,4.00,,,100,100,41,
 DeepSeek-V4-Flash,SHEETHARNESS-BASIC,Financial Modeling,Modification,51.17,,,100,100,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
 DeepSeek-V4-Flash,SHEETHARNESS-BASIC,Debugging,Exact,7.14,,,100,98,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
 DeepSeek-V4-Flash,SHEETHARNESS-BASIC,Debugging,Modification,43.43,,,100,98,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Template,Exact,37.50,,,97,8,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Template,Modification,83.02,,,97,8,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Financial Modeling,Exact,10.42,,,100,96,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Financial Modeling,Modification,59.02,,,100,96,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Debugging,Exact,7.22,,,100,97,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Debugging,Modification,44.03,,,100,97,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Overall,Exact,9.95,,,297,201,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
+DeepSeek-V4-Flash,SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00,Overall,Modification,52.74,,,297,201,41,benchmarks/results/ours-basic-deepseek-v2-20260917/{*/results.json;continuation-4w/tasks/*/results.json}
 DeepSeek-V4-Flash,SHEETHARNESS-FINANCIAL,Template,Exact,19.59,,,97,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
 DeepSeek-V4-Flash,SHEETHARNESS-FINANCIAL,Template,Modification,68.55,,,97,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
 DeepSeek-V4-Flash,SHEETHARNESS-FINANCIAL,Financial Modeling,Exact,22.68,,,100,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json

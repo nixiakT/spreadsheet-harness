@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,12 +15,21 @@ from spreadsheet_harness.continuous_evolution import (
     DeterministicEvidenceRouter,
     EvidenceRef,
     EvolutionRoute,
+    RevisionStore,
+    RouteMutation,
     SpreadsheetBenchV2EvaluationAdapter,
+    _composition_from_document,
+    _kernel_manifest,
+    _kernel_manifest_sha256,
     distill_evidence,
     evaluate_validation_report,
 )
 from spreadsheet_harness.errors import HarnessError
-from spreadsheet_harness.plugins import BUILTIN_COMPOSITIONS, default_plugin_registry
+from spreadsheet_harness.plugins import (
+    BUILTIN_COMPOSITIONS,
+    KERNEL_CAPABILITIES,
+    default_plugin_registry,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -411,7 +421,10 @@ def test_evidence_distillation_causal_sketch_preserves_order_not_payload(tmp_pat
     encoded = json.dumps(packet)
     assert "DO-NOT-LEAK" not in encoded
     assert "SECRET-CELL" not in encoded
-    assert "42" not in encoded
+    # The audit packet retains a SHA-256 identity, whose hex text may contain
+    # arbitrary digit substrings such as ``42``.  Check the actual payload
+    # marker instead of a coincidental hash fragment.
+    assert "DO-NOT-LEAK-ANSWER=42" not in encoded
 
 
 def test_coordination_gap_routes_to_template_synthesis(tmp_path):
@@ -590,6 +603,248 @@ def test_validated_multi_plugin_handoff_failure_routes_to_synthesis(tmp_path):
     assert "multi-plugin-handoff-locally-validated-but-evaluator-failed" in route.reasons
 
 
+def test_router_emits_joint_route_for_interface_and_domain_failures(tmp_path):
+    """Interface evidence may select one harness and one domain target atomically."""
+
+    interface = tmp_path / "interface.jsonl"
+    interface.write_text(
+        json.dumps(
+            {
+                "event": "evaluation.completed",
+                "payload": {
+                    "passed": False,
+                    "error_category": "missing-evidence",
+                    "required_capability": "composition",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    domain = tmp_path / "domain.jsonl"
+    domain.write_text(
+        json.dumps(
+            {
+                "event": "evaluation.completed",
+                "payload": {"passed": False, "error_category": "formula"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    registry = default_plugin_registry()
+    route = DeterministicEvidenceRouter().route(
+        [
+            EvidenceRef(interface, "replay/interface", "formula", "family-interface"),
+            EvidenceRef(domain, "replay/domain", "formula", "family-domain"),
+        ],
+        registry=registry,
+        composition=BUILTIN_COMPOSITIONS["spreadsheet-harness-financial"],
+        groups={
+            "harness": ("skill-spreadsheet-coordination", "policy-ours"),
+            "domain": ("skill-spreadsheet-financial-model", "skill-spreadsheet-formula"),
+        },
+        # The preferred side must not suppress a joint interface update.
+        preferred_group="domain",
+    )
+
+    assert route is not None
+    assert route.scope == "joint"
+    mutations = route.mutation_items()
+    assert {item.group for item in mutations} == {"harness", "domain"}
+    assert {item.target_plugin for item in mutations} == {
+        "skill-spreadsheet-coordination",
+        "skill-spreadsheet-formula",
+    }
+    assert route.to_dict()["scope"] == "joint"
+    assert len(route.to_dict()["mutations"]) == 2
+
+
+def test_joint_evolution_route_roundtrips_without_losing_coordinates():
+    digest_harness = "a" * 64
+    digest_domain = "b" * 64
+    harness = RouteMutation(
+        "harness",
+        "synthesize",
+        "skill-spreadsheet-coordination",
+        "prompt",
+        (digest_harness,),
+        3,
+        ("interface",),
+    )
+    domain = RouteMutation(
+        "domain",
+        "edit",
+        "skill-spreadsheet-formula",
+        "prompt",
+        (digest_domain,),
+        2,
+        ("active-provider-produced-failed-workbook",),
+    )
+    route = EvolutionRoute(
+        "harness",
+        "synthesize",
+        "skill-spreadsheet-coordination",
+        "prompt",
+        (digest_harness,),
+        3,
+        ("interface",),
+        None,
+        "joint",
+        (harness, domain),
+    )
+
+    encoded = route.to_dict()
+    restored = EvolutionRoute.from_dict(encoded)
+
+    assert restored == route
+    assert restored.to_dict() == encoded
+    assert [item.group for item in restored.mutation_items()] == ["harness", "domain"]
+
+
+def test_joint_materialization_is_atomic_and_preserves_kernel_manifest(tmp_path, monkeypatch):
+    evidence = tmp_path / "trajectory.jsonl"
+    _trajectory(evidence, passed=False, marker="JOINT-")
+    registry = default_plugin_registry()
+    seed = tmp_path / "kernel-seed"
+    (seed / "src").mkdir(parents=True)
+    shutil.copytree(ROOT / "src/spreadsheet_harness", seed / "src/spreadsheet_harness")
+    shutil.copytree(ROOT / "skills", seed / "skills")
+    config_document = _config(evidence).to_dict()
+    config_document["groups"]["harness"].append("skill-spreadsheet-coordination")
+    config_document["kernel_manifest_sha256"] = _kernel_manifest_sha256(seed, registry)
+    config = ContinuousEvolutionConfig.from_document(config_document)
+    store = RevisionStore(tmp_path / "workspace")
+    state = store.initialize(config, registry)
+    incumbent = state["current_revision_sha256"]
+    incumbent_artifact = store.revision_dir(incumbent) / "artifact"
+    kernel_before = _kernel_manifest(incumbent_artifact, registry)
+    assert "src/spreadsheet_harness/kernel.py" in kernel_before
+    assert _kernel_manifest_sha256(incumbent_artifact, registry) == state["kernel_manifest_sha256"]
+
+    coordination_path = incumbent_artifact / "skills/spreadsheet-coordination/SKILL.md"
+    formula_path = incumbent_artifact / "skills/spreadsheet-formula/SKILL.md"
+    coordination_content = coordination_path.read_text(encoding="utf-8") + "\n# joint\n"
+    formula_content = formula_path.read_text(encoding="utf-8") + "\n# joint\n"
+    digest_harness = "c" * 64
+    digest_domain = "d" * 64
+    route = EvolutionRoute(
+        "harness",
+        "synthesize",
+        "skill-spreadsheet-coordination",
+        "prompt",
+        (digest_harness,),
+        1,
+        ("interface",),
+        None,
+        "joint",
+        (
+            RouteMutation(
+                "harness",
+                "synthesize",
+                "skill-spreadsheet-coordination",
+                "prompt",
+                (digest_harness,),
+                1,
+                ("interface",),
+            ),
+            RouteMutation(
+                "domain",
+                "edit",
+                "skill-spreadsheet-formula",
+                "prompt",
+                (digest_domain,),
+                1,
+                ("active-provider-produced-failed-workbook",),
+            ),
+        ),
+    )
+    proposal_document = {
+        "candidate_id": "joint-materialization",
+        "base_revision_sha256": incumbent,
+        "scope": "joint",
+        "rationale": "joint route test",
+        "mutations": [
+            {
+                "operation": "synthesize",
+                "target_plugin": "skill-spreadsheet-coordination",
+                "surface": "prompt",
+                "operator": "replace-file",
+                "files": [
+                    {
+                        "path": "skills/spreadsheet-coordination/SKILL.md",
+                        "content": coordination_content,
+                    }
+                ],
+            },
+            {
+                "operation": "edit",
+                "target_plugin": "skill-spreadsheet-formula",
+                "surface": "prompt",
+                "operator": "replace-file",
+                "files": [
+                    {"path": "skills/spreadsheet-formula/SKILL.md", "content": formula_content}
+                ],
+            },
+        ],
+    }
+    proposal = CandidateProposal.from_document(proposal_document)
+
+    candidate_dir, revision = store.materialize_candidate(
+        proposal=proposal,
+        route=route,
+        incumbent_revision=incumbent,
+        registry=registry,
+        static_checks=(),
+        timeout=30,
+    )
+    assert candidate_dir.is_dir()
+    assert _kernel_manifest(candidate_dir / "artifact", registry) == kernel_before
+    assert (
+        _kernel_manifest_sha256(candidate_dir / "artifact", registry)
+        == state["kernel_manifest_sha256"]
+    )
+    assert revision["kernel_manifest_sha256"] == state["kernel_manifest_sha256"]
+    assert revision["mutation"]["schema_version"] == "plugevolve-joint-mutation-v1"
+    assert set(revision["mutation"]["changed_paths"]) == {
+        "skills/spreadsheet-coordination/SKILL.md",
+        "skills/spreadsheet-formula/SKILL.md",
+    }
+    composition = _composition_from_document(
+        json.loads((candidate_dir / "composition.json").read_text(encoding="utf-8"))
+    )
+    assert "skill-spreadsheet-coordination" in composition.plugins
+    assert registry.resolve(composition).to_dict()["kernel_capabilities"] == sorted(
+        KERNEL_CAPABILITIES
+    )
+
+    # A static check that tampers with an unowned source file must fail the
+    # immutable-kernel gate and leave no partially materialized candidate.
+    def tamper_kernel(artifact: Path, **_kwargs):
+        kernel = artifact / "src/spreadsheet_harness/kernel.py"
+        kernel.write_text(kernel.read_text(encoding="utf-8") + "\n# tampered\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "spreadsheet_harness.continuous_evolution._run_static_checks", tamper_kernel
+    )
+    tampered = dict(proposal_document)
+    tampered["candidate_id"] = "joint-kernel-tamper"
+    with pytest.raises(HarnessError, match="immutable kernel"):
+        store.materialize_candidate(
+            proposal=CandidateProposal.from_document(tampered),
+            route=route,
+            incumbent_revision=incumbent,
+            registry=registry,
+            static_checks=(),
+            timeout=30,
+        )
+    assert not (store.candidates / "r000001-joint-kernel-tamper").exists()
+    assert not any(
+        path.name.startswith(".joint-kernel-tamper-") for path in store.candidates.iterdir()
+    )
+    assert _kernel_manifest(incumbent_artifact, registry) == kernel_before
+
+
 def test_spreadsheetbench_adapter_accumulates_evidence_from_all_contexts(tmp_path, monkeypatch):
     from spreadsheet_harness import spreadsheetbench_v2
 
@@ -619,8 +874,10 @@ def test_spreadsheetbench_adapter_accumulates_evidence_from_all_contexts(tmp_pat
         (revision / "composition.json").write_text(json.dumps(composition), encoding="utf-8")
 
     executed_outputs = []
+    evaluator_timeouts = []
 
     def fake_run(argv, **_kwargs):
+        evaluator_timeouts.append(_kwargs.get("timeout"))
         payload = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
         output_dir = Path(payload["output_dir"])
         executed_outputs.append(output_dir)
@@ -656,6 +913,7 @@ def test_spreadsheetbench_adapter_accumulates_evidence_from_all_contexts(tmp_pat
         evaluator_path=tmp_path / "evaluator.py",
         output_root=tmp_path / "output",
         incumbent_cache_root=tmp_path / "incumbent-cache",
+        task_timeout_seconds=10,
     )
     request = {
         "incumbent_directory": str(incumbent),
@@ -707,3 +965,4 @@ def test_spreadsheetbench_adapter_accumulates_evidence_from_all_contexts(tmp_pat
     assert sum(path.name == "incumbent" for path in executed_outputs) == 0
     assert sum(path.name == "output" for path in executed_outputs) == 3
     assert sum(path.name == "candidate" for path in executed_outputs) == 6
+    assert evaluator_timeouts and all(value >= 40 for value in evaluator_timeouts)

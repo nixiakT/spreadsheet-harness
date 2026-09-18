@@ -693,6 +693,30 @@ def attribute_trajectory(
     evidence: list[str] = []
     activated: list[str] = []
     interface_evidence: list[Mapping[str, Any]] = []
+    # Do not infer capabilities from arbitrary model prompts/tool arguments.
+    # Those payloads contain the complete skill catalogue and workbook
+    # context, so the old recursive scan made nearly every failure look like
+    # a simultaneous structure+formula+visualization gap.  Attribution must
+    # be based on evaluator-labelled fields and bounded causal events only.
+    causal_events = {
+        "tool.failed",
+        "workbook.mutation.started",
+        "workbook.mutation.committed",
+        "agent.formula_runtime_validation_failed",
+        "agent.formula_runtime_validation_passed",
+        "agent.pending_formula_validation_requested",
+        "agent.read_only_code_deadline_rejected",
+        "agent.execution_failed",
+        "harness.skills.routed",
+        "preprocess.profile",
+    }
+    evaluator_events = {
+        "benchmark.evaluated",
+        "evaluation.completed",
+        "evaluation.failed",
+        "spreadsheetbench_v2.evaluated",
+        "spreadsheetbench_v1.evaluated",
+    }
     for row in rows:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         event = str(row.get("event", ""))
@@ -723,7 +747,47 @@ def attribute_trajectory(
         # emitters simple while preserving the richer evidence contract.
         if any(key in payload for key in ("required_capability", "missing_evidence")):
             interface_evidence.append(payload)
-        evidence.extend(_payload_strings(payload, limit=max(0, 256 - len(evidence))))
+        # Evaluator messages are the strongest semantic signal.  For causal
+        # events retain only enum-like fields and bounded error labels; never
+        # copy model request/response text, workbook values, or tool args into
+        # the attribution evidence.
+        if event in evaluator_events:
+            selected_payload = {
+                key: payload[key]
+                for key in (
+                    "error_category",
+                    "error_message",
+                    "model_failure_reason",
+                    "outcome_kind",
+                    "official_score",
+                    "passed",
+                )
+                if key in payload
+            }
+            evidence.extend(
+                _payload_strings(selected_payload, limit=max(0, 256 - len(evidence)))
+            )
+        elif event in causal_events:
+            selected_payload = {
+                key: payload[key]
+                for key in (
+                    "name",
+                    "operation",
+                    "error_category",
+                    "reason",
+                    "status",
+                    "calculation_valid",
+                    "truncation",
+                    "selected",
+                )
+                if key in payload
+            }
+            # The event name itself is a stable taxonomy marker (for example,
+            # formula validation failure) and is safe to expose.
+            evidence.append(event)
+            evidence.extend(
+                _payload_strings(selected_payload, limit=max(0, 256 - len(evidence)))
+            )
     if not outcomes:
         raise ValueError("Trajectory needs an explicit evaluator outcome for attribution")
     if len(set(outcomes)) != 1:

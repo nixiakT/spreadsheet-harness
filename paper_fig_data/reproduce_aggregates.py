@@ -10,6 +10,7 @@ from __future__ import annotations
 import glob
 import json
 import statistics
+from datetime import datetime
 from pathlib import Path
 
 
@@ -19,6 +20,89 @@ ROOT = Path(__file__).resolve().parents[1]
 def load(path: Path):
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def load_records(paths: list[Path]) -> list[dict]:
+    records: list[dict] = []
+    for path in paths:
+        value = load(path)
+        values = value if isinstance(value, list) else [value]
+        records.extend(item for item in values if isinstance(item, dict))
+    return records
+
+
+def current_basic_v1(run: str) -> None:
+    root = ROOT / "benchmarks/results" / run
+    records = load_records(
+        list(root.glob("workers/worker-*/results.json"))
+        + list(root.glob("continuation-4w/tasks/*/results.json"))
+    )
+    by_task = {
+        str(row["task_id"]): row
+        for row in records
+        if row.get("task_id") and row.get("arm") == "spreadsheet-harness-basic"
+    }
+    scored = [
+        row
+        for row in by_task.values()
+        if isinstance(row.get("soft"), int | float)
+        and isinstance(row.get("hard"), int | float)
+    ]
+    print(
+        run,
+        "Overall",
+        f"recorded={len(by_task)}",
+        f"scored={len(scored)}",
+        f"soft={statistics.fmean(row['soft'] for row in scored) * 100:.4f}",
+        f"hard={statistics.fmean(row['hard'] for row in scored) * 100:.4f}",
+    )
+
+
+def current_basic_v2(run: str, *, finished_at_cutoff: str | None = None) -> None:
+    root = ROOT / "benchmarks/results" / run
+    records = load_records(
+        list(root.glob("*/results.json"))
+        + list(root.glob("continuation-4w/tasks/*/results.json"))
+    )
+    by_task = {
+        str(row["task_id"]): row
+        for row in records
+        if row.get("task_id") and row.get("arm") == "spreadsheet-harness-basic"
+    }
+    if finished_at_cutoff is not None:
+        cutoff = datetime.fromisoformat(finished_at_cutoff)
+        by_task = {
+            task_id: row
+            for task_id, row in by_task.items()
+            if row.get("finished_at")
+            and datetime.fromisoformat(str(row["finished_at"])) <= cutoff
+        }
+    scored = [
+        row
+        for row in by_task.values()
+        if row.get("category") != "Visualization"
+        and isinstance(row.get("official_score"), dict)
+        and isinstance(row["official_score"].get("accuracy"), int | float)
+    ]
+    by_category: dict[str, list[dict]] = {}
+    for row in scored:
+        by_category.setdefault(str(row["category"]), []).append(row)
+    for category, group in sorted(by_category.items()):
+        print(
+            run,
+            category,
+            len(group),
+            f"exact={statistics.fmean(row['official_score']['accuracy'] for row in group) * 100:.4f}",
+            f"modification={statistics.fmean(row['official_score']['modification_accuracy'] for row in group) * 100:.4f}",
+        )
+    print(
+        run,
+        "Overall",
+        f"recorded={len(by_task)}",
+        f"nonvisual_scored={len(scored)}",
+        f"exact={statistics.fmean(row['official_score']['accuracy'] for row in scored) * 100:.4f}",
+        f"modification={statistics.fmean(row['official_score']['modification_accuracy'] for row in scored) * 100:.4f}",
+    )
 
 
 def harness_v2(run: str) -> None:
@@ -106,6 +190,15 @@ def evolution() -> None:
 
 
 if __name__ == "__main__":
+    current_basic_v1("ours-basic-deepseek-v1-20260917")
+    current_basic_v1("ours-basic-qwen-v1-20260917")
+    # Frozen partial snapshot used by the CSV rows.  The run was still active,
+    # so filtering by recorded finished_at keeps these numbers reproducible.
+    current_basic_v2(
+        "ours-basic-deepseek-v2-20260917",
+        finished_at_cutoff="2026-09-18T03:12:30+00:00",
+    )
+    current_basic_v2("ours-basic-qwen-v2-20260917")
     harness_v2("deepseek-v4-flash-harness-v26-basic-v2-p6-20260915")
     harness_v2("deepseek-v4-flash-harness-v26-all-v2-p6-20260915")
     for run_name in (

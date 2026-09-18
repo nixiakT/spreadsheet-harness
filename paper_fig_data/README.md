@@ -2,12 +2,23 @@
 
 审计日期：2026-09-17。这里只整理现有产物，没有重新运行实验，也没有修改任何已有结果或论文正文。所有 score/CI 均为百分数。空白不是 0，而是 **missing**。
 
+### 2026-09-18 BASIC 进度补充
+
+截至 **2026-09-18 11:12 CST**，已从原始 per-task `results.json`（包括 `continuation-4w`）补入最新 BASIC 结果；旧行保留，不用新 run 覆盖历史 run：
+
+- V1 DeepSeek：200/200 recorded，197 scored，Soft/Hard = **26.73/21.83**。
+- V1 Qwen：200/200 recorded，198 scored，Soft/Hard = **26.60/22.73**。
+- V2 Qwen：321/321 recorded，294/297 nonvisual scored，Exact/Modification = **4.42/33.81**；这是完成值。
+- V2 DeepSeek 仍在运行。cutoff 时 208/321 recorded、201 nonvisual scored；阶段性 Exact/Modification = **9.95/52.74**。CSV 中 method 明确写为 `SHEETHARNESS-BASIC-PARTIAL@2026-09-18T11:12+08:00`，不得当作 final 或与完整 run 直接排序。其 Template 当时只有 8 个 scored cases，尤其不稳定。
+
+旧 `aggregate_summary.json` 是 continuation 前快照，因此最新 V1 行的 `source_file` 指向原始 worker + continuation task records，而不是引用过期 aggregate。
+
 ## 文件与可用性
 
-- `static_plugin_gains.csv`：Bare → Basic → Financial 的绝对分数。V1 有可比的 DeepSeek 200-task 子集，但同一 Financial 配置存在两个冲突版本；Qwen Basic 未完成。V2 只有 DeepSeek Basic/Financial，Bare 未产出，因此**不能直接画完整三段增益图**。
+- `static_plugin_gains.csv`：Bare → Basic → Financial 的绝对分数。最新 Qwen/DeepSeek V1 Basic 已补齐 200 tasks，Qwen V2 Basic 已完成；DeepSeek V2 最新 run 仍以带 cutoff 的 partial 行保存。同一 DeepSeek V1 Financial 配置存在多个版本，且 Qwen V1 Bare 是 912-task full、Basic/Financial 是 200-task subset；因此仍需按 matched subset/run 过滤，**不能无条件把所有行连成三段增益图**。
 - `evolution_trajectory.csv`：从 formal paper36 search 的每个 candidate decision 恢复了 12 行逐候选轨迹。可画 General-only / Domain-only / Alternating 的 validation-gate 轨迹，但两个 suite 被同一 7-case gate 联合聚合，**不能画分 suite trajectory**。
 - `hd_interaction.csv`：8 个设计占位行（两 suite × 四格），所有观测字段为空。目标 frozen alternating run 的 held-out crossed compositions 尚未执行，故 Table 3/interaction **missing**。
-- `backbone_robustness.csv`：DeepSeek Basic/Financial 与 DeepSeek/Qwen fixed Codex+core 可画；Qwen Bare/Basic/Financial 的同配置三方法结果不全，故核心跨-backbone slope **不完整**。
+- `backbone_robustness.csv`：已加入完整 Qwen V2 Basic 和带 cutoff 的 DeepSeek V2 Basic partial；DeepSeek/Qwen fixed Codex+core 也可画。Qwen Bare/Financial 的同配置结果仍不全，DeepSeek 最新 Basic 尚未完成，故完整三方法跨-backbone slope **仍不完整**。
 - `accuracy_cost_tradeoff.csv`：8 个 V2 点。Harness 点有 score/calls/tokens；Codex/Claude/DSH 点有 wall-clock latency/calls，只有 Codex 有统一 proxy tokens。可以画带缺失编码的探索图，但不是严格 apples-to-apples latency Pareto。
 
 ## 字段
@@ -61,7 +72,7 @@ V2 Exact/Accuracy、Modification Accuracy、Regression Accuracy 由 pinned offic
 ## Missing 清单与额外检查 A–F
 
 - A：无法完整审计论文 Table 1，因为仓库无论文表原文/引用 manifest；CSV 内每个已采用数字均可追溯。Basic V2 的 11.86/54.53 等可追溯，但受已知路由缺陷影响。
-- B：Basic V1 DeepSeek 的早期 matched run 完成；最新 `ours-basic-deepseek-v1-20260917` 仅 92/200，Qwen 仅 189/200。Basic V2 的旧 full 目录完成 321 task records，但有 known flow defect；最新 flow-fixed full 尚未完成，仅部分 Financial cases。
+- B：最新 Basic V1 DeepSeek/Qwen 均已通过 continuation 补齐 200/200，分别有 197/198 个 scored cases。最新 Basic V2 Qwen 已完成 321/321；DeepSeek 在 2026-09-18 11:12 CST 的冻结快照为 208/321，仍在续跑。Basic V2 的旧 DeepSeek full 目录虽完成 321 task records，但有 known flow defect，故旧版与新 partial 都保留并清楚区分。
 - C：General-only / Domain-only / Alternating 都有真实 validation gate search，但 **没有真实 held-out evaluation**；`heldout_opened=false`。
 - D：目标 Table 3 四个 crossed compositions **没有跑全**；heldout pilot 没有结果文件。
 - E：有逐 candidate（含 reject/promote）的 evolution history，足够画联合 7-case validation trajectory；没有各 suite 独立逐 round score。
