@@ -16,11 +16,13 @@ import re
 import shutil
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import fmean
 from typing import Any
+
+import yaml
 
 from .trajectory import read_trajectory
 
@@ -33,7 +35,8 @@ _SECRET_VALUE = re.compile(
     r"(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}"
 )
 _SEVERE_WORD = re.compile(r"\b(?:severe|serious|critical|fatal|blocker)\b", re.I)
-_SKILL_FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
+_SKILL_FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---(?:\s*\n|$)", re.DOTALL)
+_SKILL_FRONTMATTER_ANYWHERE = re.compile(r"---[ \t]*\r?\n.*?\r?\n---(?:[ \t]*\r?\n|$)", re.DOTALL)
 
 _LESSON_INSTRUCTIONS = """You analyze one redacted spreadsheet-agent trajectory.
 Derive concise, reusable operating lessons grounded only in the supplied evidence.
@@ -41,6 +44,15 @@ Separate: what worked, what failed, tool errors and their likely prevention, and
 verification steps. The evaluator outcome, when present, is the authoritative task
 correctness signal; agent completion and committed file mutations are not proof of
 correctness. If no evaluator outcome is present, do not infer that the task passed.
+An optional attribution record may identify the plugin coordinate implicated by a
+paired-arm comparison. Treat it as evidence, not as fact: test it against the
+trajectory and explicitly say when the attribution is weak or contradicted.
+The full-trace diagnostics count planner writes as well as executor writes. A
+read-only tail does NOT mean nothing was edited earlier. Cite event_index for
+each factual claim. Planner actions marked verified prove persistence, not
+semantic correctness. Preserve the actual stderr exception; do not invent an
+API contract or replace a concrete exception with a conjecture about missing
+tools. Separate observed mistakes from plausible causes and unknowns.
 Do not invent events, credentials, benchmark results, or file contents. Return
 Markdown only; do not return a SKILL.md yet."""
 
@@ -49,6 +61,22 @@ candidate SKILL.md for a spreadsheet editing agent. The supplied base SKILL.md i
 the current plugin coordinate: preserve its useful rules and structure, and make
 only evidence-supported changes needed to address the observed failures. This is a
 one-coordinate mutation, not a rewrite of the harness or a new workflow.
+
+The input includes explicit attribution records from paired counterfactual arms.
+Change only the requested coordinate. Do not repair a structure-attributed failure
+by adding financial identities, and do not repair a financial-attributed failure by
+adding broad workbook discovery. Treat records marked as weak/ambiguous as negative
+evidence, and preserve behavior on controls that already pass. A candidate must
+reduce the named failure mode without widening the mutation scope.
+
+Evidence roles are directional. ``repair`` is a failure of the accepted incumbent
+and is the only role that defines a new repair target. ``no-regression-constraint``
+and ``current-incumbent-no-regression-anchor`` are passing controls to preserve.
+``rejected-candidate-regression`` and ``rejected-candidate-failure-example`` show
+what a rejected proposal made worse; do not turn those failures into desired
+behavior or broaden the requested coordinate to fix them. A
+``successful-rejected-candidate-example`` may show a useful mechanism, but it does
+not override the accepted incumbent or the no-regression controls.
 
 First consider several concrete remedies internally, then select the smallest one
 supported by repeated trajectory/evaluator evidence. Do not add tools, APIs,
@@ -77,6 +105,9 @@ class TrajectoryEvidence:
     failures: tuple[dict[str, Any], ...]
     tool_errors: tuple[dict[str, Any], ...]
     evaluator_outcome: dict[str, Any] | None
+    execution_context: tuple[dict[str, Any], ...] = ()
+    decision_events: tuple[dict[str, Any], ...] = ()
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def for_prompt(self) -> dict[str, Any]:
         """Return the evidence subset sent to the lesson-generation stage."""
@@ -90,6 +121,9 @@ class TrajectoryEvidence:
             "failure_evidence": list(self.failures),
             "tool_error_evidence": list(self.tool_errors),
             "evaluator_outcome": self.evaluator_outcome,
+            "execution_context": list(self.execution_context),
+            "decision_events": list(self.decision_events),
+            "diagnostics": self.diagnostics,
         }
 
 
@@ -129,6 +163,34 @@ def _redact(value: Any, key: str | None = None) -> Any:
     return repr(value)
 
 
+def proposer_visible(value: Any, *, _planner_action: bool = False) -> Any:
+    """Strip evaluator reference values/paths before ANY proposal model request.
+
+    Keep the original audit artifacts on disk; only this projection enters the
+    proposer. Evaluator error strings often embed the answer, not just a verdict.
+    """
+    if isinstance(value, Mapping):
+        planner = _planner_action or str(value.get("event", "")).startswith("harness.planner_actions.")
+        blocked = {"answer", "expected_value", "golden", "reference_value",
+                   "golden_path", "golden_response_path", "reference_artifact",
+                   "golden_sha256", "reference_path"}
+        # These expected_value fields are model-authored proposed formulas,
+        # not evaluator targets. Removing them would erase the causal action.
+        if planner:
+            blocked.remove("expected_value")
+        return {str(k): proposer_visible(v, _planner_action=planner) for k, v in value.items()
+                if str(k).lower() not in blocked}
+    if isinstance(value, (list, tuple)):
+        return [proposer_visible(v, _planner_action=_planner_action) for v in value]
+    if isinstance(value, str):
+        value = str(_redact(value))
+        value = re.sub(r"(?i)\b(?:answer|expected|reference)(?:_value)?\s*=.*?(?=,\s*output=|\n|$)",
+                       "reference=[WITHHELD]", value)
+        value = re.sub(r"\S*(?:_golden|golden_response)\S*", "[REFERENCE_PATH_WITHHELD]", value)
+        return value
+    return value
+
+
 def _bounded(value: Any, *, string_limit: int = 4_000, list_limit: int = 50) -> Any:
     """Bound evidence size without changing the original trajectory."""
 
@@ -153,6 +215,7 @@ def _bounded(value: Any, *, string_limit: int = 4_000, list_limit: int = 50) -> 
 
 def _event_item(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
+        "event_index": row.get("event_index"),
         "event": str(row.get("event", "")),
         "run_id": str(row.get("run_id", "")),
         "timestamp": str(row.get("timestamp", "")),
@@ -240,14 +303,23 @@ def _tool_error(
     if not has_error:
         return None
 
+    stderr = str(result.get("stderr") or "")
+    # Preserve the traceback tail: the exception is usually its last line.
+    stderr_tail = str(_redact(stderr[-4_000:]))
+    error = result.get("error") or stderr_tail or result.get("message") or "unknown tool error"
+    exception = re.search(r"(?:^|\n)([\w.]+(?:Error|Exception)):\s*([^\n]*)", stderr_tail)
+    error_type = result.get("type") or (exception.group(1) if exception else "")
     return {
+        "event_index": row.get("event_index"),
         "event": event,
         "run_id": run_id,
         "timestamp": str(row.get("timestamp", "")),
         "tool": name,
         "arguments": arguments,
-        "error": _bounded(result.get("error", "unknown tool error")),
-        "error_type": _bounded(result.get("type", "")),
+        "error": _bounded(error),
+        "error_type": _bounded(error_type),
+        "stderr_tail": stderr_tail,
+        "exit_code": result.get("exit_code"),
     }
 
 
@@ -275,19 +347,73 @@ def extract_trajectory_evidence(
     pending_calls: dict[tuple[str, str], list[dict[str, Any]]] = {}
     run_ids: set[str] = set()
     evaluator_outcome: dict[str, Any] | None = None
+    execution_context: list[dict[str, Any]] = []
+    task_context: list[dict[str, Any]] = []
+    decision_events: list[dict[str, Any]] = []
+    diagnostics: dict[str, Any] = {
+        "schema_version": "event-grounded-evidence-v2",
+        "planner_applied_batches": 0, "planner_applied_writes": 0,
+        "committed_mutations": 0, "code_calls": 0, "code_changes": 0,
+        "readonly_code_calls": 0, "max_readonly_code_streak": 0,
+        "provider_failures": 0, "tool_errors": 0, "first_tool_error_event": None,
+        "first_planner_write_event": None,
+    }
+    readonly_streak = 0
 
-    for row in rows:
+    for event_index, row in enumerate(rows, 1):
         if not isinstance(row, dict):
             continue
+        row = {**row, "event_index": event_index}
         run_id = row.get("run_id")
         if run_id is not None:
             run_ids.add(str(run_id))
         tool_error = _tool_error(row, pending_calls)
+        if tool_error is not None:
+            diagnostics["tool_errors"] += 1
+            if diagnostics["first_tool_error_event"] is None:
+                diagnostics["first_tool_error_event"] = event_index
         if tool_error is not None and len(tool_errors) < max_items_per_category:
             tool_errors.append(tool_error)
 
         event = str(row.get("event", ""))
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        planner_event = event.startswith("harness.planner_actions.") or event == "harness.planner.applied"
+        if planner_event or event in {
+            "workbook.mutation.committed", "workbook.mutation.rolled_back",
+            "agent.execution_failed", "agent.formula_runtime_validation_failed",
+            "agent.read_only_code_deadline_rejected", "model.failed",
+        }:
+            decision_events.append(_event_item(row))
+        if event in {"harness.planner_actions.applied", "harness.planner.applied"}:
+            diagnostics["planner_applied_batches"] += 1
+            diagnostics["planner_applied_writes"] += int(payload.get("count", 0))
+            if diagnostics["first_planner_write_event"] is None:
+                diagnostics["first_planner_write_event"] = event_index
+        if event == "workbook.mutation.committed":
+            diagnostics["committed_mutations"] += 1
+        if event == "model.failed":
+            diagnostics["provider_failures"] += 1
+        if event == "tool.returned" and payload.get("name") == "code_interpreter":
+            result = payload.get("result") or {}
+            diagnostics["code_calls"] += 1
+            if result.get("workbook_changed") is True:
+                diagnostics["code_changes"] += 1
+                readonly_streak = 0
+                decision_events.append(_event_item(row))
+            elif result.get("workbook_changed") is False:
+                diagnostics["readonly_code_calls"] += 1
+                readonly_streak += 1
+                diagnostics["max_readonly_code_streak"] = max(
+                    readonly_streak, diagnostics["max_readonly_code_streak"]
+                )
+        if event == "agent.started" and not task_context:
+            task_context.append(_event_item({**row, "payload": {
+                "instruction": payload.get("instruction", ""),
+                "skills": payload.get("skills", []),
+                "stage": payload.get("stage"),
+            }}))
+        if event in {"tool.called", "tool.returned"}:
+            execution_context.append(_event_item(row))
         outcome = _evaluator_outcome(event, payload)
         if outcome is not None:
             if (
@@ -302,6 +428,14 @@ def extract_trajectory_evidence(
         elif _is_success_event(event, payload) and len(successes) < max_items_per_category:
             successes.append(_event_item(row))
 
+    # Keep early decisions AND terminal evidence independently of recent reads.
+    limit = max_items_per_category
+    retained_decisions = decision_events if len(decision_events) <= 2 * limit else (
+        decision_events[:limit] + decision_events[-limit:]
+    )
+    diagnostics["decision_events_total"] = len(decision_events)
+    diagnostics["decision_events_omitted"] = len(decision_events) - len(retained_decisions)
+    diagnostics["recent_tool_events_omitted"] = max(0, len(execution_context) - 2 * limit)
     return TrajectoryEvidence(
         source=source,
         sha256=input_hash,
@@ -311,6 +445,9 @@ def extract_trajectory_evidence(
         failures=tuple(failures),
         tool_errors=tuple(tool_errors),
         evaluator_outcome=evaluator_outcome,
+        execution_context=tuple(task_context + execution_context[-2 * max_items_per_category:]),
+        decision_events=tuple(retained_decisions),
+        diagnostics=diagnostics,
     )
 
 
@@ -349,14 +486,54 @@ def _model_payload(
     return payload
 
 
-def _normalize_skill(text: str) -> str:
+def _normalize_skill(text: str, *, expected_name: str | None = None) -> str:
     stripped = text.strip()
     fence = re.fullmatch(r"```(?:markdown|md)?\s*\n(.*?)\n```", stripped, re.DOTALL | re.I)
     if fence:
         stripped = fence.group(1).strip()
     stripped = _SECRET_VALUE.sub("[REDACTED]", stripped)
-    if not _SKILL_FRONTMATTER.match(stripped):
+    frontmatter = _SKILL_FRONTMATTER.match(stripped)
+    if not frontmatter:
+        # Some thinking-enabled OpenAI-compatible providers leak a prose or
+        # ``<think>`` preamble even when instructed to return only SKILL.md.
+        # Recover only a frontmatter block whose parsed identity is the exact
+        # requested skill; this discards transport wrapping without relaxing
+        # the candidate-content contract.
+        for candidate in _SKILL_FRONTMATTER_ANYWHERE.finditer(stripped):
+            try:
+                candidate_metadata = yaml.safe_load(candidate.group().strip()[3:-3])
+            except yaml.YAMLError:
+                continue
+            if not isinstance(candidate_metadata, dict):
+                continue
+            if expected_name is not None and candidate_metadata.get("name") != expected_name:
+                continue
+            if all(
+                isinstance(candidate_metadata.get(key), str)
+                and candidate_metadata[key].strip()
+                for key in ("name", "description")
+            ):
+                stripped = stripped[candidate.start():].strip()
+                # Also tolerate a code fence that wrapped only the recovered
+                # document after a provider-generated preamble.
+                stripped = re.sub(r"\n```\s*$", "", stripped).strip()
+                frontmatter = _SKILL_FRONTMATTER.match(stripped)
+                break
+    if not frontmatter:
         raise ValueError("Candidate response must be a complete SKILL.md with YAML frontmatter")
+    try:
+        metadata = yaml.safe_load(frontmatter.group().strip()[3:-3])
+    except yaml.YAMLError as exc:
+        raise ValueError("Candidate YAML frontmatter is invalid") from exc
+    if not isinstance(metadata, dict) or any(
+        not isinstance(metadata.get(k), str) or not metadata[k].strip()
+        for k in ("name", "description")
+    ):
+        raise ValueError("Candidate requires nonempty name and description")
+    if expected_name is not None and metadata["name"] != expected_name:
+        raise ValueError(f"Candidate name must be {expected_name!r}")
+    if not stripped[frontmatter.end():].strip():
+        raise ValueError("Candidate requires a nonempty instruction body")
     return stripped + "\n"
 
 
@@ -390,6 +567,9 @@ def generate_candidate(
     base_skill: str | Path | None = None,
     lesson_max_output_tokens: int | None = 4_000,
     consolidation_max_output_tokens: int | None = 8_000,
+    attribution_context: str | Path | Mapping[str, Any] | None = None,
+    evidence_max_items_per_category: int = 12,
+    format_retries: int = 2,
 ) -> Candidate:
     """Generate per-trajectory lessons, then consolidate a candidate SKILL.md.
 
@@ -398,7 +578,10 @@ def generate_candidate(
     beneath ``candidates/<candidate-id>/``.
     """
 
-    evidences = extract_evidence(trajectories)
+    trajectory_list = [Path(item).expanduser().resolve() for item in trajectories]
+    evidences = extract_evidence(
+        trajectory_list, max_items_per_category=evidence_max_items_per_category
+    )
     if not evidences:
         raise ValueError("At least one trajectory is required")
     unevaluated = [item.source.name for item in evidences if item.evaluator_outcome is None]
@@ -424,6 +607,8 @@ def generate_candidate(
 
     if not skill_name.strip():
         raise ValueError("skill_name must not be empty")
+    if format_retries < 0 or format_retries > 3:
+        raise ValueError("format_retries must be between 0 and 3")
     if (
         lesson_max_output_tokens is not None
         and lesson_max_output_tokens < 1
@@ -437,9 +622,66 @@ def generate_candidate(
     if candidate_path.exists():
         raise FileExistsError(f"Candidate already exists: {candidate_path}")
 
-    lessons: list[dict[str, Any]] = []
-    for evidence in evidences:
-        prompt = json.dumps(evidence.for_prompt(), ensure_ascii=False, sort_keys=True)
+    attribution: dict[str, Any] = {}
+    if attribution_context is not None:
+        if isinstance(attribution_context, Mapping):
+            attribution = dict(attribution_context)
+        else:
+            context_path = Path(attribution_context).expanduser().resolve()
+            attribution = json.loads(context_path.read_text(encoding="utf-8"))
+        if not isinstance(attribution, dict):
+            raise ValueError("attribution_context must decode to an object")
+    attribution_records = attribution.get("records", {})
+    if not isinstance(attribution_records, dict):
+        attribution_records = {}
+
+    # Durable, fingerprinted checkpoints avoid repeating all lesson calls when
+    # consolidation returns malformed Markdown or a provider call fails.
+    base_skill_text = ""
+    base_skill_sha256 = None
+    if base_skill is not None:
+        base_path = Path(base_skill).expanduser().resolve(strict=True)
+        base_skill_text = base_path.read_text(encoding="utf-8")
+        if not base_skill_text.strip():
+            raise ValueError("base_skill must not be empty")
+        base_skill_sha256 = hashlib.sha256(base_skill_text.encode("utf-8")).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps({
+        "inputs": [e.sha256 for e in evidences], "model": resolved_model,
+        "generation": generation, "base": base_skill_sha256,
+        "attribution": attribution, "skill_name": skill_name,
+        "evidence_limit": evidence_max_items_per_category,
+        "lesson_limit": lesson_max_output_tokens,
+        "consolidation_limit": consolidation_max_output_tokens,
+        "instructions": [_LESSON_INSTRUCTIONS, _CONSOLIDATION_INSTRUCTIONS],
+        "evidence_sha256": hashlib.sha256(json.dumps(
+            [e.for_prompt() for e in evidences], sort_keys=True, ensure_ascii=False
+        ).encode()).hexdigest(),
+    }, sort_keys=True).encode()).hexdigest()
+    checkpoint = candidate_parent.parent / "generation-state" / f"{resolved_id}.json"
+    state: dict[str, Any] = {"fingerprint": fingerprint, "lessons": [], "format_attempts": []}
+    if checkpoint.is_file():
+        previous = json.loads(checkpoint.read_text(encoding="utf-8"))
+        if previous.get("fingerprint") != fingerprint:
+            raise ValueError("Generation checkpoint inputs changed; use a new candidate id")
+        state = previous
+
+    def save_state() -> None:
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        temporary = checkpoint.with_suffix(".tmp")
+        temporary.write_text(json.dumps(_redact(state), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, checkpoint)
+
+    lessons: list[dict[str, Any]] = state["lessons"]
+    for evidence in evidences[len(lessons):]:
+        context_record = attribution_records.get(str(evidence.source))
+        if context_record is None:
+            context_record = attribution_records.get(evidence.source.name)
+        evidence_prompt = evidence.for_prompt()
+        evidence_prompt["attribution"] = context_record or {
+            "status": "unavailable",
+            "instruction": "Do not infer plugin ownership from the absence of attribution.",
+        }
+        prompt = json.dumps(proposer_visible(evidence_prompt), ensure_ascii=False, sort_keys=True)
         response = client.create(
             model_payload(_LESSON_INSTRUCTIONS, prompt, lesson_max_output_tokens)
         )
@@ -452,40 +694,44 @@ def generate_candidate(
                 "lesson": lesson,
             }
         )
-
-    base_skill_text = ""
-    base_skill_sha256 = None
-    if base_skill is not None:
-        base_path = Path(base_skill).expanduser().resolve()
-        if not base_path.is_file():
-            raise FileNotFoundError(base_path)
-        base_skill_text = base_path.read_text(encoding="utf-8")
-        if not base_skill_text.strip():
-            raise ValueError("base_skill must not be empty")
-        base_skill_sha256 = hashlib.sha256(base_skill_text.encode("utf-8")).hexdigest()
+        save_state()
 
     consolidation_input = json.dumps(
         {
             "skill_name": skill_name.strip(),
-            "base_skill": base_skill_text or None,
+            "base_skill": proposer_visible(base_skill_text) or None,
+            "attribution_context": proposer_visible(attribution),
             "trajectory_lessons": [
-                {"input_sha256": item["input_sha256"], "lesson": item["lesson"]} for item in lessons
+                {"input_sha256": item["input_sha256"], "lesson": proposer_visible(item["lesson"])} for item in lessons
             ],
         },
         ensure_ascii=False,
         sort_keys=True,
     )
-    consolidation = client.create(
-        model_payload(
-            _CONSOLIDATION_INSTRUCTIONS,
-            consolidation_input,
-            consolidation_max_output_tokens,
-        )
-    )
-    skill_text_raw, consolidation_response_id = _response_text(
-        consolidation, "lesson consolidation"
-    )
-    skill_text = _normalize_skill(skill_text_raw)
+    repair = ""
+    for format_attempt in range(format_retries + 1):
+        consolidation = client.create(model_payload(
+            _CONSOLIDATION_INSTRUCTIONS + repair,
+            consolidation_input, consolidation_max_output_tokens,
+        ))
+        try:
+            skill_text_raw, consolidation_response_id = _response_text(consolidation, "lesson consolidation")
+            skill_text = _normalize_skill(skill_text_raw, expected_name=skill_name.strip())
+            break
+        except ValueError as exc:
+            state["format_attempts"].append({
+                "error": str(exc), "response_id": getattr(consolidation, "response_id", None),
+                "text": _redact(getattr(consolidation, "text", "")),
+            })
+            save_state()
+            if format_attempt == format_retries:
+                raise
+            repair = (
+                f"\nYour previous output failed validation: {exc}. "
+                f"Return a complete document beginning with --- then name: {skill_name}, "
+                "a description field, closing ---, and the instruction body. "
+                "Do not return an explanation instead of the document."
+            )
     skill_hash = hashlib.sha256(skill_text.encode("utf-8")).hexdigest()
     if candidate_path.exists():
         raise FileExistsError(f"Candidate already exists: {candidate_path}")
@@ -503,10 +749,12 @@ def generate_candidate(
         "skill_name": skill_name.strip(),
         "base_skill": str(base_skill) if base_skill is not None else None,
         "base_skill_sha256": base_skill_sha256,
+        "attribution_context": attribution,
         "inputs": [{"trajectory": item.source.name, "sha256": item.sha256} for item in evidences],
         "input_hashes": [item.sha256 for item in evidences],
         "lesson_response_ids": [item["response_id"] for item in lessons],
         "consolidation_response_id": consolidation_response_id,
+        "format_repair_count": len(state["format_attempts"]),
         "candidate_sha256": skill_hash,
     }
 

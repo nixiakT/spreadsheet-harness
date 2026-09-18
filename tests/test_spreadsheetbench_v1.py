@@ -154,8 +154,8 @@ def test_v1_replays_applied_planner_before_tool_calls(tmp_path: Path) -> None:
     trajectory.write_text(
         json.dumps(
             {
-                "event": "harness.planner_actions.applied",
-                "payload": {"count": 1},
+                "event": "harness.planner_actions.verified",
+                "payload": {"count": 1, "fast_path_eligible": True},
             }
         )
         + "\n",

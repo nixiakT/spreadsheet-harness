@@ -45,7 +45,17 @@ from .trajectory import read_trajectory
 
 ContextKind = Literal["replay", "transfer", "regression"]
 CoordinateGroup = Literal["harness", "domain"]
-ProposalOperation = Literal["edit", "enable", "disable", "replace"]
+UpdateScope = Literal["harness", "domain", "joint"]
+ProposalOperation = Literal["edit", "enable", "disable", "replace", "synthesize"]
+MethodOperator = Literal["revision", "recomposition", "synthesis"]
+
+_METHOD_OPERATOR_BY_OPERATION: Mapping[ProposalOperation, MethodOperator] = {
+    "edit": "revision",
+    "enable": "recomposition",
+    "disable": "recomposition",
+    "replace": "recomposition",
+    "synthesize": "synthesis",
+}
 
 _REQUIRED_CONTEXT_KINDS = frozenset({"replay", "transfer", "regression"})
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -225,6 +235,8 @@ class EvolutionContext:
 @dataclass(frozen=True)
 class PromotionPolicy:
     delta: float = 0.01
+    replay_delta: float | None = None
+    transfer_delta: float | None = None
     epsilon: float = 0.0
     confidence: float = 0.95
     bootstrap_samples: int = 4_000
@@ -234,6 +246,14 @@ class PromotionPolicy:
     def from_document(cls, raw: Mapping[str, Any]) -> PromotionPolicy:
         policy = cls(
             delta=float(raw.get("delta", 0.01)),
+            replay_delta=(
+                float(raw["replay_delta"]) if raw.get("replay_delta") is not None else None
+            ),
+            transfer_delta=(
+                float(raw["transfer_delta"])
+                if raw.get("transfer_delta") is not None
+                else None
+            ),
             epsilon=float(raw.get("epsilon", 0.0)),
             confidence=float(raw.get("confidence", 0.95)),
             bootstrap_samples=int(raw.get("bootstrap_samples", 4_000)),
@@ -242,6 +262,14 @@ class PromotionPolicy:
         if (
             not math.isfinite(policy.delta)
             or policy.delta <= 0
+            or (
+                policy.replay_delta is not None
+                and (not math.isfinite(policy.replay_delta) or policy.replay_delta < 0)
+            )
+            or (
+                policy.transfer_delta is not None
+                and (not math.isfinite(policy.transfer_delta) or policy.transfer_delta < 0)
+            )
             or not math.isfinite(policy.epsilon)
             or policy.epsilon < 0
             or not 0.5 < policy.confidence < 1
@@ -254,6 +282,10 @@ class PromotionPolicy:
     def to_dict(self) -> dict[str, Any]:
         return {
             "delta": self.delta,
+            "replay_delta": self.replay_delta if self.replay_delta is not None else self.delta,
+            "transfer_delta": (
+                self.transfer_delta if self.transfer_delta is not None else self.delta
+            ),
             "epsilon": self.epsilon,
             "confidence": self.confidence,
             "bootstrap_samples": self.bootstrap_samples,
@@ -278,6 +310,7 @@ class ContinuousEvolutionConfig:
     evaluator_command: tuple[str, ...]
     command_timeout_seconds: float
     static_checks: tuple[tuple[str, ...], ...]
+    allowed_operators: tuple[MethodOperator, ...]
 
     @classmethod
     def from_document(cls, raw: Mapping[str, Any]) -> ContinuousEvolutionConfig:
@@ -322,13 +355,15 @@ class ContinuousEvolutionConfig:
             raise HarnessError("Contexts must cover replay, transfer and regression")
         if len({context.name for context in contexts}) != len(contexts):
             raise HarnessError("Context names must be unique")
-        task_keys = [
-            (task_id, family)
-            for context in contexts
-            for task_id, family in zip(context.task_ids, context.workbook_families, strict=True)
-        ]
-        if len(task_keys) != len(set(task_keys)):
-            raise HarnessError("Evolution contexts must be disjoint by task and workbook family")
+        all_task_ids = [task_id for context in contexts for task_id in context.task_ids]
+        if len(all_task_ids) != len(set(all_task_ids)):
+            raise HarnessError("Evolution contexts must be disjoint by task")
+        family_contexts: dict[str, set[str]] = {}
+        for context in contexts:
+            for family in context.workbook_families:
+                family_contexts.setdefault(family, set()).add(context.name)
+        if any(len(names) > 1 for names in family_contexts.values()):
+            raise HarnessError("Evolution contexts must be disjoint by workbook family")
         raw_heldout = raw.get("heldout_task_ids") or ()
         if isinstance(raw_heldout, (str, bytes, bytearray)) or not isinstance(
             raw_heldout, Sequence
@@ -365,10 +400,24 @@ class ContinuousEvolutionConfig:
         evaluator = tuple(str(item) for item in raw.get("evaluator_command") or ())
         timeout = float(raw.get("command_timeout_seconds", 7200))
         checks = tuple(tuple(str(part) for part in command) for command in raw.get("static_checks") or ())
+        raw_operators = raw.get("allowed_operators", ("revision", "recomposition", "synthesis"))
+        if isinstance(raw_operators, (str, bytes, bytearray)) or not isinstance(
+            raw_operators, Sequence
+        ):
+            raise HarnessError("allowed_operators must be a list")
+        operators = tuple(str(value).strip() for value in raw_operators)
         if first_group not in {"harness", "domain"}:
             raise HarnessError("first_group must be harness or domain")
         if max_rounds < 1 or max_candidates < 1 or not math.isfinite(timeout) or timeout <= 0:
             raise HarnessError("Round, candidate and command timeout limits must be positive")
+        if (
+            not operators
+            or any(value not in {"revision", "recomposition", "synthesis"} for value in operators)
+            or len(operators) != len(set(operators))
+        ):
+            raise HarnessError(
+                "allowed_operators must contain unique revision/recomposition/synthesis values"
+            )
         if (
             not proposer
             or not evaluator
@@ -393,6 +442,7 @@ class ContinuousEvolutionConfig:
             evaluator,
             timeout,
             checks,
+            operators,  # type: ignore[arg-type]
         )
         result.validate(default_plugin_registry())
         return result
@@ -448,11 +498,45 @@ class ContinuousEvolutionConfig:
             "evaluator_command": list(self.evaluator_command),
             "command_timeout_seconds": self.command_timeout_seconds,
             "static_checks": [list(command) for command in self.static_checks],
+            "allowed_operators": list(self.allowed_operators),
         }
 
     @property
     def sha256(self) -> str:
         return _sha256_json(self.to_dict())
+
+
+@dataclass(frozen=True)
+class RouteMutation:
+    """One deterministic, contract-bound mutation target.
+
+    A route mutation is deliberately smaller than a proposal: it contains no
+    model-generated file content.  A joint route contains at most one such
+    target per coordinate and the proposer must return all mutations in one
+    atomic candidate.
+    """
+
+    group: CoordinateGroup
+    operation: ProposalOperation
+    target_plugin: str
+    surface: EvolutionSurface | None
+    evidence_sha256: tuple[str, ...]
+    support_count: int
+    reasons: tuple[str, ...]
+    replacement_plugin: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group": self.group,
+            "operation": self.operation,
+            "target_plugin": self.target_plugin,
+            "surface": self.surface,
+            "evidence_sha256": list(self.evidence_sha256),
+            "support_count": self.support_count,
+            "reasons": list(self.reasons),
+            "replacement_plugin": self.replacement_plugin,
+            "method_operator": _METHOD_OPERATOR_BY_OPERATION[self.operation],
+        }
 
 
 @dataclass(frozen=True)
@@ -464,9 +548,41 @@ class EvolutionRoute:
     evidence_sha256: tuple[str, ...]
     support_count: int
     reasons: tuple[str, ...]
+    replacement_plugin: str | None = None
+    scope: UpdateScope | None = None
+    mutations: tuple[RouteMutation, ...] = ()
+
+    def mutation_items(self) -> tuple[RouteMutation, ...]:
+        """Return all route targets, normalizing legacy single-target routes."""
+
+        if self.mutations:
+            return self.mutations
+        return (
+            RouteMutation(
+                self.group,
+                self.operation,
+                self.target_plugin,
+                self.surface,
+                self.evidence_sha256,
+                self.support_count,
+                self.reasons,
+                self.replacement_plugin,
+            ),
+        )
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> EvolutionRoute:
+        raw_mutations = raw.get("mutations")
+        mutations: tuple[RouteMutation, ...] = ()
+        if raw_mutations is not None:
+            if not isinstance(raw_mutations, list) or not raw_mutations:
+                raise HarnessError("Persisted route mutations must be a non-empty list")
+            parsed: list[RouteMutation] = []
+            for item in raw_mutations:
+                if not isinstance(item, Mapping):
+                    raise HarnessError("Persisted route mutation must be an object")
+                parsed.append(_route_mutation_from_dict(item))
+            mutations = tuple(parsed)
         group = str(raw.get("group", ""))
         operation = str(raw.get("operation", ""))
         target = str(raw.get("target_plugin", ""))
@@ -476,6 +592,7 @@ class EvolutionRoute:
             "enable",
             "disable",
             "replace",
+            "synthesize",
         }:
             raise HarnessError("Invalid persisted evolution route")
         if surface is not None and surface not in {
@@ -485,6 +602,11 @@ class EvolutionRoute:
             "description",
         }:
             raise HarnessError("Invalid persisted evolution route surface")
+        scope = raw.get("scope")
+        if scope is not None and str(scope) not in {"harness", "domain", "joint"}:
+            raise HarnessError("Invalid persisted evolution route scope")
+        if str(scope) == "joint" and len(mutations) < 2:
+            raise HarnessError("Joint persisted route needs at least two mutations")
         return cls(
             group,  # type: ignore[arg-type]
             operation,  # type: ignore[arg-type]
@@ -493,9 +615,15 @@ class EvolutionRoute:
             tuple(str(item) for item in raw.get("evidence_sha256") or ()),
             int(raw.get("support_count", 0)),
             tuple(str(item) for item in raw.get("reasons") or ()),
+            str(raw["replacement_plugin"])
+            if raw.get("replacement_plugin") is not None
+            else None,
+            str(scope) if scope is not None else None,  # type: ignore[arg-type]
+            mutations,
         )
 
     def to_dict(self) -> dict[str, Any]:
+        scope = self.scope or ("joint" if len(self.mutation_items()) > 1 else self.group)
         return {
             "group": self.group,
             "operation": self.operation,
@@ -504,7 +632,38 @@ class EvolutionRoute:
             "evidence_sha256": list(self.evidence_sha256),
             "support_count": self.support_count,
             "reasons": list(self.reasons),
+            "replacement_plugin": self.replacement_plugin,
+            "method_operator": _METHOD_OPERATOR_BY_OPERATION[self.operation],
+            "scope": scope,
+            "mutations": [item.to_dict() for item in self.mutation_items()],
         }
+
+
+def _route_mutation_from_dict(raw: Mapping[str, Any]) -> RouteMutation:
+    group = str(raw.get("group", ""))
+    operation = str(raw.get("operation", ""))
+    target = str(raw.get("target_plugin", ""))
+    surface = raw.get("surface")
+    if group not in {"harness", "domain"} or operation not in {
+        "edit", "enable", "disable", "replace", "synthesize"
+    }:
+        raise HarnessError("Invalid persisted route mutation")
+    if surface is not None and surface not in {
+        "config", "implementation", "prompt", "description"
+    }:
+        raise HarnessError("Invalid persisted route mutation surface")
+    return RouteMutation(
+        group,  # type: ignore[arg-type]
+        operation,  # type: ignore[arg-type]
+        target,
+        surface,  # type: ignore[arg-type]
+        tuple(str(item) for item in raw.get("evidence_sha256") or ()),
+        int(raw.get("support_count", 0)),
+        tuple(str(item) for item in raw.get("reasons") or ()),
+        str(raw["replacement_plugin"])
+        if raw.get("replacement_plugin") is not None
+        else None,
+    )
 
 
 def _trajectory_signal(path: Path) -> str:
@@ -540,7 +699,12 @@ def _choose_surface(contract: PluginContract, signal: str) -> EvolutionSurface |
 
 
 class DeterministicEvidenceRouter:
-    """Aggregate failed development trajectories into exactly one coordinate."""
+    """Aggregate replay failures into a sparse single- or joint-coordinate route.
+
+    ``preferred_group`` is only a tie-breaker for independent signals.  It is
+    not an alternating schedule: interface evidence can select both groups in
+    one atomic route.
+    """
 
     def route(
         self,
@@ -549,13 +713,24 @@ class DeterministicEvidenceRouter:
         registry: PluginRegistry,
         composition: CompositionSpec,
         groups: Mapping[CoordinateGroup, tuple[str, ...]],
-        preferred_group: CoordinateGroup,
+        preferred_group: CoordinateGroup | None = None,
+        allowed_operators: Sequence[MethodOperator] = (
+            "revision",
+            "recomposition",
+            "synthesis",
+        ),
     ) -> EvolutionRoute | None:
         resolved = registry.resolve(composition)
         candidates: Counter[tuple[ProposalOperation, str]] = Counter()
         hashes: dict[tuple[ProposalOperation, str], set[str]] = {}
         reasons: dict[tuple[ProposalOperation, str], set[str]] = {}
         signals: dict[tuple[ProposalOperation, str], list[str]] = {}
+        replacements: dict[tuple[ProposalOperation, str], str] = {}
+        joint_signal_count = 0
+        cross_group_evidence = 0
+        plugin_group = {
+            plugin: group for group, plugins in groups.items() for plugin in plugins
+        }
         for item in evidence:
             attribution: FailureAttribution
             try:
@@ -566,8 +741,82 @@ class DeterministicEvidenceRouter:
                 continue
             if attribution.source in {"none", "infrastructure", "unknown"}:
                 continue
+            attributed_plugins = tuple(
+                str(entry.get("plugin"))
+                for entry in (*attribution.target_plugins, *attribution.candidate_plugins)
+                if isinstance(entry, Mapping) and entry.get("plugin")
+            )
+            attributed_groups = {
+                plugin_group[name] for name in attributed_plugins if name in plugin_group
+            }
+            interface_signal = (
+                attribution.source == "composition-interface"
+                or bool(attribution.interface_evidence)
+                or any(
+                    marker in attribution.reasons
+                    for marker in {
+                        "verification-not-triggered",
+                        "missing-evidence",
+                        "context-insufficient",
+                        "interface",
+                    }
+                )
+            )
+            if len(attributed_groups) > 1:
+                cross_group_evidence += 1
+            if interface_signal and attributed_groups:
+                joint_signal_count += 1
+            rows = read_trajectory(item.path)
+            event_names = {str(row.get("event", "")) for row in rows}
+            profile_truncated = any(
+                str(row.get("event", "")) == "preprocess.profile"
+                and isinstance(row.get("payload"), Mapping)
+                and isinstance(row["payload"].get("truncation"), Mapping)
+                and any(value is True for value in row["payload"]["truncation"].values())
+                for row in rows
+            )
+            if profile_truncated and "profile-deterministic-compact" in composition.plugins:
+                key = ("replace", "profile-deterministic-compact")
+                candidates[key] += 1
+                hashes.setdefault(key, set()).update(attribution.evidence_sha256)
+                reasons.setdefault(key, set()).add("profile-truncated-before-failed-evaluation")
+                signals.setdefault(key, []).append("profile-truncation composition-interface")
+                replacements[key] = "profile-deterministic-full"
+
+            selected_skills = 0
+            for row in rows:
+                if str(row.get("event", "")) != "harness.skills.routed":
+                    continue
+                payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+                selected = payload.get("selected")
+                if isinstance(selected, Sequence) and not isinstance(selected, str | bytes | bytearray):
+                    selected_skills = max(selected_skills, len(selected))
+            # A local formula check succeeding does not prove semantic task
+            # correctness.  When several skills were routed, a mutation was
+            # locally validated, and the fixed evaluator still failed, the
+            # trace contains concrete cross-plugin hand-off evidence.  Offer
+            # the approved coordination template to harness-coordinate rounds.
+            if (
+                selected_skills >= 2
+                and "workbook.mutation.committed" in event_names
+                and "agent.formula_runtime_validation_passed" in event_names
+                and "skill-spreadsheet-coordination" not in composition.plugins
+            ):
+                key = ("synthesize", "skill-spreadsheet-coordination")
+                candidates[key] += 1
+                hashes.setdefault(key, set()).update(attribution.evidence_sha256)
+                reasons.setdefault(key, set()).add(
+                    "multi-plugin-handoff-locally-validated-but-evaluator-failed"
+                )
+                signals.setdefault(key, []).append("composition-interface verification-not-triggered")
             operation: ProposalOperation = (
-                "enable" if attribution.action == "enable-plugin" else "edit"
+                "enable"
+                if attribution.action == "enable-plugin"
+                or (
+                    attribution.source == "composition-interface"
+                    and attribution.candidate_plugins
+                )
+                else "edit"
             )
             routes = (
                 attribution.candidate_plugins
@@ -578,18 +827,27 @@ class DeterministicEvidenceRouter:
                 plugin = str(route.get("plugin", ""))
                 if not plugin:
                     continue
-                key = (operation, plugin)
+                routed_operation: ProposalOperation = operation
+                if operation == "enable" and registry.get(plugin).synthesis_template:
+                    routed_operation = "synthesize"
+                key = (routed_operation, plugin)
                 candidates[key] += 1
                 hashes.setdefault(key, set()).update(attribution.evidence_sha256)
                 reasons.setdefault(key, set()).update(attribution.reasons)
                 signals.setdefault(key, []).append(_trajectory_signal(item.path))
         if not candidates:
             return None
-        plugin_group = {
-            plugin: group for group, plugins in groups.items() for plugin in plugins
-        }
-        preferred = [key for key in candidates if plugin_group.get(key[1]) == preferred_group]
-        eligible = preferred or [key for key in candidates if key[1] in plugin_group]
+        allowed = set(allowed_operators)
+        candidates = Counter(
+            {
+                key: count
+                for key, count in candidates.items()
+                if _METHOD_OPERATOR_BY_OPERATION[key[0]] in allowed
+            }
+        )
+        if not candidates:
+            return None
+        eligible = [key for key in candidates if key[1] in plugin_group]
         if not eligible:
             return None
         active = set(composition.plugins)
@@ -604,21 +862,86 @@ class DeterministicEvidenceRouter:
                 name,
             )
 
-        operation, plugin_name = min(eligible, key=rank)
-        contract = registry.get(plugin_name)
-        surface = None if operation != "edit" else _choose_surface(
-            contract, " ".join(signals.get((operation, plugin_name), ()))
-        )
-        if operation == "edit" and surface is None:
+        def make_mutation(key: tuple[ProposalOperation, str]) -> RouteMutation | None:
+            operation, plugin_name = key
+            contract = registry.get(plugin_name)
+            surface = None if operation != "edit" else _choose_surface(
+                contract, " ".join(signals.get(key, ()))
+            )
+            if operation == "edit" and surface is None:
+                return None
+            if operation == "synthesize":
+                surface = "prompt"
+            return RouteMutation(
+                plugin_group[plugin_name],
+                operation,
+                plugin_name,
+                surface,
+                tuple(sorted(hashes.get(key, ()))),
+                candidates[key],
+                tuple(sorted(reasons.get(key, ()))),
+                replacements.get(key),
+            )
+
+        best_by_group: dict[CoordinateGroup, tuple[ProposalOperation, str]] = {}
+        for group in ("harness", "domain"):
+            group_keys = [key for key in eligible if plugin_group.get(key[1]) == group]
+            if group_keys:
+                best_by_group[group] = min(group_keys, key=rank)
+
+        # Joint updates are sparse: they require an explicit interface or
+        # cross-group attribution signal and one valid target per side.
+        if (
+            len(best_by_group) == 2
+            and (joint_signal_count > 0 or cross_group_evidence > 0)
+        ):
+            mutations = tuple(
+                mutation
+                for group in ("harness", "domain")
+                if (mutation := make_mutation(best_by_group[group])) is not None
+            )
+            if len(mutations) == 2:
+                primary = mutations[0]
+                return EvolutionRoute(
+                    primary.group,
+                    primary.operation,
+                    primary.target_plugin,
+                    primary.surface,
+                    primary.evidence_sha256,
+                    primary.support_count,
+                    primary.reasons,
+                    primary.replacement_plugin,
+                    "joint",
+                    mutations,
+                )
+
+        if not best_by_group:
+            return None
+        if len(best_by_group) == 1:
+            selected_group = next(iter(best_by_group))
+        else:
+            selected_group = min(
+                best_by_group,
+                key=lambda group: (
+                    -candidates[best_by_group[group]],
+                    0 if preferred_group == group else 1,
+                    group,
+                ),
+            )
+        mutation = make_mutation(best_by_group[selected_group])
+        if mutation is None:
             return None
         return EvolutionRoute(
-            plugin_group[plugin_name],
-            operation,
-            plugin_name,
-            surface,
-            tuple(sorted(hashes.get((operation, plugin_name), ()))),
-            candidates[(operation, plugin_name)],
-            tuple(sorted(reasons.get((operation, plugin_name), ()))),
+            mutation.group,
+            mutation.operation,
+            mutation.target_plugin,
+            mutation.surface,
+            mutation.evidence_sha256,
+            mutation.support_count,
+            mutation.reasons,
+            mutation.replacement_plugin,
+            mutation.group,
+            (mutation,),
         )
 
 
@@ -655,7 +978,351 @@ def _safe_evidence_summary(item: EvidenceRef) -> dict[str, Any]:
         "tool_events": dict(sorted(tools.items())),
         "error_categories": dict(sorted(failures.items())),
         "evaluator": evaluator,
+        "causal_sketch": _causal_sketch(rows),
     }
+
+
+def _editable_file_snapshots(
+    artifact: Path, contract: PluginContract, surface: EvolutionSurface | None
+) -> list[dict[str, Any]]:
+    """Return only contract-owned current content needed for one local proposal."""
+
+    if surface is None or surface == "config":
+        return []
+    policy = contract.edit_policy(surface)
+    snapshots: list[dict[str, Any]] = []
+    for pattern in policy.paths:
+        # Built-in contracts currently own concrete paths.  Refuse to expand a
+        # future glob here rather than accidentally exposing unrelated files.
+        if any(character in pattern for character in "*?["):
+            raise HarnessError("Proposal snapshots require concrete contract-owned paths")
+        path = _contained_path(artifact, pattern)
+        content = path.read_text(encoding="utf-8")
+        encoded = content.encode("utf-8")
+        if len(encoded) > policy.max_patch_bytes:
+            raise HarnessError("Contract-owned proposal source exceeds its patch budget")
+        snapshots.append(
+            {"path": pattern, "sha256": _sha256_bytes(encoded), "content": content}
+        )
+    return snapshots
+
+
+def _causal_sketch(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Extract a bounded, schema-only causal sketch from a trajectory.
+
+    The proposer needs ordering and hand-off evidence (for example, a write
+    followed by failed formula validation), but it must not receive arbitrary
+    tool arguments, workbook names, cell addresses, answer values, or model
+    prose.  This sketch therefore keeps only event taxonomy, bounded counters,
+    and a few enum-valued fields from the harness journal.
+    """
+
+    phase_events = {
+        "session.created": "session",
+        "harness.composition.resolved": "composition",
+        "harness.plugin.activated": "plugin_activation",
+        "harness.skills.routed": "routing",
+        "preprocess.profile": "observation",
+        "agent.started": "agent_start",
+        "model.requested": "model_request",
+        "model.responded": "model_response",
+        "tool.called": "tool_call",
+        "tool.returned": "tool_return",
+        "tool.failed": "tool_failure",
+        "workbook.mutation.started": "mutation_start",
+        "workbook.mutation.committed": "mutation_commit",
+        "agent.formula_runtime_validation_failed": "formula_validation_failure",
+        "agent.formula_runtime_validation_passed": "formula_validation_pass",
+        "agent.pending_formula_validation_requested": "formula_validation_requested",
+        "harness.planner_actions.proposed": "planner_proposed",
+        "harness.planner_actions.executed": "planner_executed",
+        "harness.planner_actions.verified": "planner_verified",
+        "harness.planner_actions.applied": "planner_applied",
+        "agent.read_only_code_deadline_rejected": "read_only_deadline",
+        "agent.terminal_submitted": "terminal_submit",
+        "agent.completed": "agent_complete",
+        "spreadsheetbench_v2.evaluated": "evaluation",
+        "spreadsheetbench_v1.evaluated": "evaluation",
+        "benchmark.evaluated": "evaluation",
+        "evaluation.completed": "evaluation",
+        "evaluation.failed": "evaluation",
+    }
+    event_counts: Counter[str] = Counter()
+    operation_counts: Counter[str] = Counter()
+    tool_counts: Counter[str] = Counter()
+    status_counts: Counter[str] = Counter()
+    failure_counts: Counter[str] = Counter()
+    active_plugins: set[str] = set()
+    causal_markers: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        event = str(row.get("event", ""))
+        kind = phase_events.get(event)
+        if kind is None:
+            # Unknown event names are intentionally counted but never copied.
+            kind = "other"
+        event_counts[kind] += 1
+        payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+        if event.startswith("tool."):
+            name = payload.get("name")
+            if isinstance(name, str) and name and len(name) <= 80:
+                tool_counts[name] += 1
+        operation = payload.get("operation")
+        if isinstance(operation, str) and operation in {
+            "recalculate", "write_formula", "write_value", "clear", "format",
+            "insert", "delete", "submit_result",
+        }:
+            operation_counts[operation] += 1
+        status = payload.get("status")
+        if isinstance(status, str) and status in {
+            "proposed", "executed", "verified", "applied", "accepted", "rejected",
+        }:
+            status_counts[status] += 1
+        category = payload.get("error_category")
+        if isinstance(category, str) and len(category) <= 80:
+            failure_counts[category] += 1
+        plugin = payload.get("plugin")
+        if event == "harness.plugin.activated" and isinstance(plugin, str) and len(plugin) <= 120:
+            active_plugins.add(plugin)
+        # Keep only structurally informative events, never their free-form
+        # arguments/results.  The cap keeps large traces cheap to transmit.
+        if kind in {
+            "tool_failure", "mutation_start", "mutation_commit",
+            "formula_validation_failure", "formula_validation_pass",
+            "planner_verified", "planner_applied", "read_only_deadline",
+            "evaluation", "terminal_submit",
+        } and len(causal_markers) < 16:
+            marker: dict[str, Any] = {"index": index, "kind": kind}
+            if event.startswith("tool.") and isinstance(payload.get("name"), str):
+                marker["tool"] = str(payload["name"])[:80]
+            if isinstance(operation, str) and operation in operation_counts:
+                marker["operation"] = operation
+            if isinstance(category, str) and len(category) <= 80:
+                marker["error_category"] = category
+            if isinstance(status, str) and status in status_counts:
+                marker["status"] = status
+            for key in ("calculation_valid", "passed", "workbook_changed"):
+                value = payload.get(key)
+                if isinstance(value, bool):
+                    marker[key] = value
+            causal_markers.append(marker)
+    phase_sequence = [phase_events.get(str(row.get("event", "")), "other") for row in rows]
+    # Preserve ordering while bounding both the number of entries and the
+    # amplification caused by repeated model/tool ping-pong.  ``phase_runs``
+    # is the compact representation used by downstream proposers.
+    phase_runs: list[dict[str, Any]] = []
+    for phase in phase_sequence:
+        if phase_runs and phase_runs[-1]["phase"] == phase:
+            phase_runs[-1]["count"] += 1
+        elif len(phase_runs) < 64:
+            phase_runs.append({"phase": phase, "count": 1})
+        else:
+            phase_runs[-1]["count"] += 1
+    return {
+        "phase_sequence": phase_sequence[:128],
+        "phase_sequence_truncated": len(phase_sequence) > 128,
+        "phase_runs": phase_runs,
+        "event_counts": dict(sorted(event_counts.items())),
+        "tool_counts": dict(sorted(tool_counts.items())),
+        "operation_counts": dict(sorted(operation_counts.items())),
+        "status_counts": dict(sorted(status_counts.items())),
+        "failure_counts": dict(sorted(failure_counts.items())),
+        "active_plugins": sorted(active_plugins),
+        "causal_markers": causal_markers,
+    }
+
+
+def distill_evidence(
+    evidence: Sequence[EvidenceRef],
+    *,
+    registry: PluginRegistry,
+    composition: CompositionSpec,
+    route: EvolutionRoute,
+    representatives_per_prototype: int = 2,
+    max_prototypes: int = 8,
+    max_anchors: int = 4,
+) -> dict[str, Any]:
+    """Build a bounded, attributed evidence packet for candidate generation.
+
+    Raw event payloads are never copied. Repeated traces increase support for
+    one failure prototype; the proposer receives only a few hash-addressed
+    structural representatives plus successful no-regression anchors.
+    """
+
+    if representatives_per_prototype < 1 or max_prototypes < 1 or max_anchors < 1:
+        raise ValueError("Evidence packet bounds must be positive")
+    resolved = registry.resolve(composition)
+    prototypes: dict[str, dict[str, Any]] = {}
+    anchors: list[dict[str, Any]] = []
+    excluded = Counter()
+    for item in evidence:
+        try:
+            attribution = attribute_trajectory(
+                item.path, registry, resolved, task_type=item.task_type
+            )
+        except (HarnessError, OSError, ValueError):
+            excluded["invalid"] += 1
+            continue
+        if attribution.source == "none":
+            if len(anchors) < max_anchors:
+                anchors.append(_safe_evidence_summary(item))
+            else:
+                excluded["extra-anchor"] += 1
+            continue
+        if attribution.source in {"infrastructure", "unknown"}:
+            excluded[attribution.source] += 1
+            continue
+        targets = tuple(
+            sorted(
+                str(entry.get("plugin"))
+                for entry in (*attribution.target_plugins, *attribution.candidate_plugins)
+                if entry.get("plugin")
+            )
+        )
+        mechanism_route = any(
+            reason in {
+                "profile-truncated-before-failed-evaluation",
+                "multi-plugin-handoff-locally-validated-but-evaluator-failed",
+            }
+            for reason in route.reasons
+        )
+        if route.target_plugin not in targets and not mechanism_route:
+            excluded["off-route"] += 1
+            continue
+        attributed = {
+            "source": attribution.source,
+            "action": attribution.action,
+            "capabilities": list(attribution.capabilities),
+            "plugins": list(targets),
+            "reasons": list(attribution.reasons),
+        }
+        signature = _sha256_json(attributed)
+        prototype = prototypes.setdefault(
+            signature,
+            {
+                "signature_sha256": signature,
+                "attribution": attributed,
+                "support_count": 0,
+                "workbook_families": set(),
+                "task_types": set(),
+                "evidence_sha256": set(),
+                "representatives": [],
+            },
+        )
+        prototype["support_count"] += 1
+        prototype["workbook_families"].add(item.workbook_family)
+        prototype["task_types"].add(item.task_type)
+        prototype["evidence_sha256"].update(attribution.evidence_sha256)
+        if len(prototype["representatives"]) < representatives_per_prototype:
+            prototype["representatives"].append(_safe_evidence_summary(item))
+    normalized = [
+        {
+            **item,
+            "workbook_families": sorted(item["workbook_families"]),
+            "task_types": sorted(item["task_types"]),
+            "evidence_sha256": sorted(item["evidence_sha256"]),
+        }
+        for item in prototypes.values()
+    ]
+    normalized.sort(key=lambda item: (-item["support_count"], item["signature_sha256"]))
+    discarded = normalized[max_prototypes:]
+    if discarded:
+        excluded["extra-prototype-support"] += sum(
+            int(item["support_count"]) for item in discarded
+        )
+    normalized = normalized[:max_prototypes]
+    packet = {
+        "schema_version": "continuous-plugin-evidence-packet-v1",
+        "input_trace_count": len(evidence),
+        "route": route.to_dict(),
+        "failure_prototypes": normalized,
+        "no_regression_anchors": anchors,
+        "excluded_trace_counts": dict(sorted(excluded.items())),
+        "redaction": (
+            "No raw event payloads or reference artifacts; bounded structural "
+            "summaries and SHA-256 evidence identities only."
+        ),
+    }
+    packet["packet_sha256"] = _sha256_json(packet)
+    return packet
+
+
+@dataclass(frozen=True)
+class ProposalMutation:
+    """One plugin mutation carried by a candidate proposal.
+
+    ``CandidateProposal`` predates joint general/domain evolution and stores a
+    single mutation in its top-level fields.  Keeping the mutation as a small
+    value object lets the wire format add ``mutations`` without weakening the
+    old one-coordinate contract.  A joint proposal is materialized only when
+    every mutation is validated against its corresponding route target and all
+    mutations can be applied to the same staging tree.
+    """
+
+    operation: ProposalOperation
+    target_plugin: str
+    surface: EvolutionSurface | None
+    operator: str | None
+    files: tuple[tuple[str, str], ...]
+    patch: str | None
+    config_patch: Mapping[str, Scalar]
+    replacement_plugin: str | None
+
+    @classmethod
+    def from_document(cls, raw: Mapping[str, Any]) -> ProposalMutation:
+        if not isinstance(raw, Mapping):
+            raise HarnessError("Candidate mutation must be an object")
+        operation = str(raw.get("operation", "edit"))
+        if operation not in {"edit", "enable", "disable", "replace", "synthesize"}:
+            raise HarnessError("Candidate mutation has an unknown operation")
+        surface = raw.get("surface")
+        if surface is not None and surface not in {
+            "config",
+            "implementation",
+            "prompt",
+            "description",
+        }:
+            raise HarnessError("Candidate mutation has an unknown surface")
+        raw_files = raw.get("files") or []
+        if not isinstance(raw_files, list) or not all(
+            isinstance(item, Mapping) for item in raw_files
+        ):
+            raise HarnessError("Candidate mutation files must be a list of objects")
+        files: list[tuple[str, str]] = []
+        for item in raw_files:
+            path, content = item.get("path"), item.get("content")
+            if not isinstance(path, str) or not isinstance(content, str):
+                raise HarnessError("Candidate mutation file needs string path and content")
+            files.append((path, content))
+        config_patch = raw.get("config_patch") or {}
+        if not isinstance(config_patch, Mapping):
+            raise HarnessError("Candidate mutation config_patch must be an object")
+        return cls(
+            operation,  # type: ignore[arg-type]
+            str(raw.get("target_plugin", "")),
+            surface,  # type: ignore[arg-type]
+            str(raw["operator"]) if raw.get("operator") is not None else None,
+            tuple(files),
+            str(raw["patch"]) if raw.get("patch") is not None else None,
+            dict(config_patch),
+            str(raw["replacement_plugin"])
+            if raw.get("replacement_plugin") is not None
+            else None,
+        )
+
+    def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
+        return {
+            "operation": self.operation,
+            "target_plugin": self.target_plugin,
+            "surface": self.surface,
+            "operator": self.operator,
+            "files": [
+                {"path": path, "content": content if include_content else "[OMITTED]"}
+                for path, content in self.files
+            ],
+            "patch": self.patch if include_content else ("[OMITTED]" if self.patch else None),
+            "config_patch": dict(self.config_patch),
+            "replacement_plugin": self.replacement_plugin,
+        }
 
 
 @dataclass(frozen=True)
@@ -671,49 +1338,70 @@ class CandidateProposal:
     config_patch: Mapping[str, Scalar]
     replacement_plugin: str | None
     rationale: str
+    # ``scope`` is optional for wire compatibility with v1 proposals.  When
+    # omitted, a proposal is interpreted as a one-coordinate mutation.
+    scope: str | None = None
+    # For a joint proposal this contains one mutation for each changed
+    # coordinate.  The first mutation is mirrored by the legacy top-level
+    # fields above so old adapters can still inspect it.
+    mutations: tuple[ProposalMutation, ...] = ()
 
     @classmethod
     def from_document(cls, raw: Mapping[str, Any]) -> CandidateProposal:
         candidate_id = str(raw.get("candidate_id", ""))
         if not _SAFE_ID.fullmatch(candidate_id) or candidate_id in {".", ".."}:
             raise HarnessError("Candidate proposal has an unsafe candidate_id")
-        operation = str(raw.get("operation", "edit"))
-        if operation not in {"edit", "enable", "disable", "replace"}:
-            raise HarnessError("Candidate proposal has an unknown operation")
-        surface = raw.get("surface")
-        if surface is not None and surface not in {
-            "config",
-            "implementation",
-            "prompt",
-            "description",
-        }:
-            raise HarnessError("Candidate proposal has an unknown surface")
-        raw_files = raw.get("files") or []
-        if not isinstance(raw_files, list) or not all(isinstance(item, Mapping) for item in raw_files):
-            raise HarnessError("Candidate files must be a list of objects")
-        files: list[tuple[str, str]] = []
-        for item in raw_files:
-            path, content = item.get("path"), item.get("content")
-            if not isinstance(path, str) or not isinstance(content, str):
-                raise HarnessError("Candidate file needs string path and content")
-            files.append((path, content))
-        config_patch = raw.get("config_patch") or {}
-        if not isinstance(config_patch, Mapping):
-            raise HarnessError("Candidate config_patch must be an object")
+        # The old shape stores one mutation at the top level.  The new shape
+        # allows an atomic list under ``mutations``; accepting a one-item list
+        # is useful for serializers that always emit the list.
+        raw_mutations = raw.get("mutations")
+        if raw_mutations is not None:
+            if not isinstance(raw_mutations, list) or not raw_mutations:
+                raise HarnessError("Candidate mutations must be a non-empty list")
+            mutations = tuple(ProposalMutation.from_document(item) for item in raw_mutations)
+            primary = mutations[0]
+        else:
+            primary = ProposalMutation.from_document(raw)
+            mutations = ()
+        scope = raw.get("scope")
+        if scope is not None:
+            scope = str(scope).strip()
+            if scope not in {"harness", "domain", "joint"}:
+                raise HarnessError("Candidate proposal scope must be harness, domain or joint")
+            if scope == "joint" and len(mutations or (primary,)) < 2:
+                raise HarnessError("Joint candidate proposals need at least two mutations")
         return cls(
             candidate_id,
             str(raw.get("base_revision_sha256", "")),
-            operation,  # type: ignore[arg-type]
-            str(raw.get("target_plugin", "")),
-            surface,  # type: ignore[arg-type]
-            str(raw["operator"]) if raw.get("operator") is not None else None,
-            tuple(files),
-            str(raw["patch"]) if raw.get("patch") is not None else None,
-            dict(config_patch),
-            str(raw["replacement_plugin"])
-            if raw.get("replacement_plugin") is not None
-            else None,
+            primary.operation,
+            primary.target_plugin,
+            primary.surface,
+            primary.operator,
+            primary.files,
+            primary.patch,
+            primary.config_patch,
+            primary.replacement_plugin,
             str(raw.get("rationale", ""))[:4_000],
+            scope,
+            mutations,
+        )
+
+    def mutation_items(self) -> tuple[ProposalMutation, ...]:
+        """Return all mutations, normalizing legacy proposals to one item."""
+
+        if self.mutations:
+            return self.mutations
+        return (
+            ProposalMutation(
+                self.operation,
+                self.target_plugin,
+                self.surface,
+                self.operator,
+                self.files,
+                self.patch,
+                self.config_patch,
+                self.replacement_plugin,
+            ),
         )
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
@@ -732,6 +1420,10 @@ class CandidateProposal:
             "config_patch": dict(self.config_patch),
             "replacement_plugin": self.replacement_plugin,
             "rationale": self.rationale,
+            "scope": self.scope,
+            "mutations": [
+                item.to_dict(include_content=include_content) for item in self.mutations
+            ],
         }
 
 
@@ -838,11 +1530,18 @@ class SpreadsheetBenchV2EvaluationAdapter:
     max_output_tokens: int | None = 4_096
     task_timeout_seconds: float = 1_800
     arm_order_seed: int = 20_260_820
+    incumbent_cache_root: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_root", Path(self.dataset_root).expanduser().resolve())
         object.__setattr__(self, "evaluator_path", Path(self.evaluator_path).expanduser().resolve())
         object.__setattr__(self, "output_root", Path(self.output_root).expanduser().resolve())
+        if self.incumbent_cache_root is not None:
+            object.__setattr__(
+                self,
+                "incumbent_cache_root",
+                Path(self.incumbent_cache_root).expanduser().resolve(),
+            )
 
     def evaluate(self, request: Mapping[str, Any], candidate_dir: Path) -> Mapping[str, Any]:
         # Imports are local to keep the continuous controller usable without
@@ -863,7 +1562,27 @@ class SpreadsheetBenchV2EvaluationAdapter:
         contexts = request.get("contexts")
         if not isinstance(contexts, list):
             raise HarnessError("Paired evaluator request has no contexts")
+        binding = request.get("evaluation_binding") or {}
+        if not isinstance(binding, Mapping):
+            raise HarnessError("Paired evaluator evaluation_binding must be an object")
+        raw_score_weights = binding.get("score_weights") or {"accuracy": 1.0}
+        if not isinstance(raw_score_weights, Mapping):
+            raise HarnessError("score_weights must be an object")
+        try:
+            score_weights = {
+                str(key): float(value) for key, value in raw_score_weights.items()
+            }
+        except (TypeError, ValueError) as exc:
+            raise HarnessError("score_weights must contain numeric values") from exc
+        if (
+            not score_weights
+            or any(key not in _SAFE_SCORE_KEYS for key in score_weights)
+            or any(not math.isfinite(value) or value < 0 for value in score_weights.values())
+            or sum(score_weights.values()) <= 0
+        ):
+            raise HarnessError("score_weights must be nonnegative supported metrics")
         context_reports: list[dict[str, Any]] = []
+        candidate_evidence: list[dict[str, Any]] = []
         output_root = self.output_root / str(request.get("candidate_revision_sha256", "candidate"))
         output_root.mkdir(parents=True, exist_ok=True)
 
@@ -978,49 +1697,128 @@ class SpreadsheetBenchV2EvaluationAdapter:
             runner = raw_context.get("runner") or {}
             if not isinstance(runner, Mapping):
                 raise HarnessError(f"Paired evaluator context {name!r} runner must be an object")
-            dataset_value = runner.get("dataset") or self.dataset_root
-            dataset_root = Path(str(dataset_value)).expanduser()
-            if not dataset_root.is_absolute():
-                # Adapter commands run from an isolated evaluation directory,
-                # not the repository root. Resolve relative runner paths
-                # against the installed harness root first.
-                repository_root = Path(__file__).resolve().parents[2]
-                dataset_root = (repository_root / dataset_root).resolve()
-            else:
-                dataset_root = dataset_root.resolve()
-            if not dataset_root.is_dir():
+            task_datasets = runner.get("task_datasets")
+            if task_datasets is not None and not isinstance(task_datasets, Mapping):
                 raise HarnessError(
-                    f"Paired evaluator context {name!r} dataset does not exist: {dataset_root}"
+                    f"Paired evaluator context {name!r} task_datasets must be an object"
                 )
-            all_tasks = load_spreadsheetbench_v2_tasks(dataset_root)
-            by_id = {task.task_id: task for task in all_tasks}
-            try:
-                tasks = select_spreadsheetbench_v2_tasks(
-                    all_tasks, task_ids
+            repository_root = Path(__file__).resolve().parents[2]
+
+            def resolve_dataset(
+                value: Any,
+                *,
+                repository_root: Path = repository_root,
+                context_name: str = name,
+            ) -> Path:
+                dataset = Path(str(value)).expanduser()
+                if not dataset.is_absolute():
+                    # Adapter commands run from an isolated evaluation directory,
+                    # not the repository root. Resolve relative runner paths
+                    # against the installed harness root first.
+                    dataset = repository_root / dataset
+                dataset = dataset.resolve()
+                if not dataset.is_dir():
+                    raise HarnessError(
+                        f"Paired evaluator context {context_name!r} dataset does not exist: {dataset}"
+                    )
+                return dataset
+
+            grouped_task_ids: dict[Path, list[str]] = {}
+            for task_id in task_ids:
+                if task_datasets is None:
+                    dataset_value = runner.get("dataset") or self.dataset_root
+                else:
+                    dataset_value = task_datasets.get(task_id)
+                    if dataset_value is None:
+                        raise HarnessError(
+                            f"Paired evaluator context {name!r} has no dataset for {task_id}"
+                        )
+                grouped_task_ids.setdefault(resolve_dataset(dataset_value), []).append(task_id)
+
+            tasks_by_id: dict[str, Any] = {}
+            baseline_rows: list[dict[str, Any]] = []
+            candidate_rows: list[dict[str, Any]] = []
+            multiple_datasets = len(grouped_task_ids) > 1
+            for dataset_index, (dataset_root, dataset_task_ids) in enumerate(
+                grouped_task_ids.items()
+            ):
+                all_tasks = load_spreadsheetbench_v2_tasks(dataset_root)
+                by_id = {task.task_id: task for task in all_tasks}
+                try:
+                    dataset_tasks = select_spreadsheetbench_v2_tasks(
+                        all_tasks, dataset_task_ids
+                    )
+                except HarnessError:
+                    # Preserve the controller's exact task order and produce a
+                    # useful error instead of silently evaluating a different set.
+                    missing = [task_id for task_id in dataset_task_ids if task_id not in by_id]
+                    raise HarnessError(
+                        f"Paired evaluator context {name!r} references unknown tasks: {missing}"
+                    ) from None
+                tasks_by_id.update({task.task_id: task for task in dataset_tasks})
+                dataset_output = (
+                    output_root / name / f"dataset-{dataset_index:02d}"
+                    if multiple_datasets
+                    else output_root / name
                 )
-            except HarnessError:
-                # Preserve the controller's exact task order and produce a
-                # useful error instead of silently evaluating a different set.
-                missing = [task_id for task_id in task_ids if task_id not in by_id]
-                raise HarnessError(
-                    f"Paired evaluator context {name!r} references unknown tasks: {missing}"
-                ) from None
-            incumbent_output = output_root / name / "incumbent"
-            candidate_output = output_root / name / "candidate"
-            run_revision(incumbent_dir, incumbent_output, tasks, composition(incumbent_dir))
-            run_revision(candidate_dir, candidate_output, tasks, composition(candidate_dir))
-            baseline_rows = json.loads((incumbent_output / "results.json").read_text())
-            candidate_rows = json.loads((candidate_output / "results.json").read_text())
+                incumbent_output = dataset_output / "incumbent"
+                candidate_output = dataset_output / "candidate"
+                if self.incumbent_cache_root is None:
+                    run_revision(
+                        incumbent_dir,
+                        incumbent_output,
+                        dataset_tasks,
+                        composition(incumbent_dir),
+                    )
+                else:
+                    cache_key = _sha256_json(
+                        {
+                            "incumbent_revision_sha256": request.get(
+                                "incumbent_revision_sha256"
+                            ),
+                            "evaluation_binding_sha256": request.get(
+                                "evaluation_binding_sha256"
+                            ),
+                            "dataset_root": str(dataset_root),
+                            "task_ids": list(dataset_task_ids),
+                        }
+                    )
+                    cache_entry = self.incumbent_cache_root / cache_key
+                    incumbent_output = cache_entry / "output"
+                    cache_entry.mkdir(parents=True, exist_ok=True)
+                    with (cache_entry / ".lock").open("a+") as cache_lock:
+                        fcntl.flock(cache_lock.fileno(), fcntl.LOCK_EX)
+                        if not (incumbent_output / "results.json").is_file():
+                            run_revision(
+                                incumbent_dir,
+                                incumbent_output,
+                                dataset_tasks,
+                                composition(incumbent_dir),
+                            )
+                run_revision(
+                    candidate_dir,
+                    candidate_output,
+                    dataset_tasks,
+                    composition(candidate_dir),
+                )
+                baseline_rows.extend(
+                    json.loads((incumbent_output / "results.json").read_text())
+                )
+                candidate_rows.extend(
+                    json.loads((candidate_output / "results.json").read_text())
+                )
+            tasks = [tasks_by_id[task_id] for task_id in task_ids]
             baseline_by_task = {str(row.get("task_id")): row for row in baseline_rows}
             candidate_by_task = {str(row.get("task_id")): row for row in candidate_rows}
             pairs: list[dict[str, Any]] = []
-            candidate_evidence: list[dict[str, Any]] = []
             hard_failures: list[str] = []
             for task in tasks:
                 baseline = baseline_by_task.get(task.task_id, {})
                 candidate = candidate_by_task.get(task.task_id, {})
-                baseline_score = (baseline.get("official_score") or {}).get("accuracy")
-                candidate_score = (candidate.get("official_score") or {}).get("accuracy")
+                baseline_metrics = baseline.get("official_score") or {}
+                candidate_metrics = candidate.get("official_score") or {}
+                baseline_score = _artifact_score(baseline_metrics, score_weights)
+                candidate_score = _artifact_score(candidate_metrics, score_weights)
                 baseline_status = "scored" if isinstance(baseline_score, (int, float)) else "unscored"
                 candidate_status = "scored" if isinstance(candidate_score, (int, float)) else "unscored"
                 if baseline_status != "scored" or candidate_status != "scored":
@@ -1032,6 +1830,8 @@ class SpreadsheetBenchV2EvaluationAdapter:
                         "candidate": candidate_score,
                         "baseline_status": baseline_status,
                         "candidate_status": candidate_status,
+                        "baseline_metrics": baseline_metrics,
+                        "candidate_metrics": candidate_metrics,
                         "candidate_cost": ((candidate.get("budget") or {}).get("used") or {}).get(
                             "total_tokens", 0
                         ),
@@ -1066,6 +1866,7 @@ class SpreadsheetBenchV2EvaluationAdapter:
             "heldout_task_ids_sha256": request.get("heldout_task_ids_sha256"),
             "contexts": context_reports,
             "candidate_evidence": candidate_evidence,
+            "score_weights": score_weights,
             "hard_failures": any(bool(item["hard_failures"]) for item in context_reports),
         }
 
@@ -1140,6 +1941,27 @@ def _bootstrap_mean_lcb(
     return _quantile(means, 1 - confidence)
 
 
+def _artifact_score(
+    official_score: Any, score_weights: Mapping[str, float]
+) -> float | None:
+    """Return the frozen, normalized artifact utility in ``[0, 1]``."""
+
+    if not isinstance(official_score, Mapping):
+        return None
+    weighted = 0.0
+    total_weight = 0.0
+    for key, weight in score_weights.items():
+        value = official_score.get(key)
+        if not isinstance(value, (int, float)):
+            return None
+        numeric = float(value)
+        if not math.isfinite(numeric) or not 0 <= numeric <= 1:
+            return None
+        weighted += weight * numeric
+        total_weight += weight
+    return weighted / total_weight
+
+
 def evaluate_validation_report(
     report: Mapping[str, Any],
     *,
@@ -1160,6 +1982,13 @@ def evaluate_validation_report(
         blockers.append("contexts-binding-mismatch")
     if report.get("heldout_task_ids_sha256") != _sha256_json(list(config.heldout_task_ids)):
         blockers.append("heldout-binding-mismatch")
+    if "score_weights" in config.evaluation_binding:
+        expected_weights = {
+            str(key): float(value)
+            for key, value in config.evaluation_binding["score_weights"].items()
+        }
+        if report.get("score_weights") != expected_weights:
+            blockers.append("score-definition-mismatch")
     raw_contexts = report.get("contexts")
     if not isinstance(raw_contexts, list):
         raw_contexts = []
@@ -1190,7 +2019,10 @@ def evaluate_validation_report(
             blockers.append(f"missing-pairs:{context.name}")
             continue
         seen: set[str] = set()
-        deltas: list[float] = []
+        family_deltas: dict[str, list[float]] = {}
+        family_by_task = dict(
+            zip(context.task_ids, context.workbook_families, strict=True)
+        )
         for pair in pairs:
             if not isinstance(pair, Mapping):
                 blockers.append(f"invalid-pair:{context.name}")
@@ -1215,7 +2047,10 @@ def evaluate_validation_report(
             if not math.isfinite(baseline) or not math.isfinite(candidate):
                 blockers.append(f"invalid-score:{context.name}:{pair_id}")
                 continue
-            deltas.append(candidate - baseline)
+            if pair_id not in family_by_task:
+                blockers.append(f"unexpected-pair:{context.name}:{pair_id}")
+                continue
+            family_deltas.setdefault(family_by_task[pair_id], []).append(candidate - baseline)
             raw_cost = pair.get("candidate_cost", 0)
             try:
                 cost = float(raw_cost)
@@ -1225,6 +2060,12 @@ def evaluate_validation_report(
                 blockers.append(f"invalid-cost:{context.name}:{pair_id}")
             else:
                 total_cost += cost
+        if len(seen) != len(context.task_ids):
+            missing = set(context.task_ids) - seen
+            blockers.extend(
+                f"missing-pair:{context.name}:{pair_id}" for pair_id in sorted(missing)
+            )
+        deltas = [fmean(values) for _family, values in sorted(family_deltas.items())]
         if len(deltas) < config.policy.min_pairs_per_context:
             blockers.append(f"insufficient-pairs:{context.name}")
             continue
@@ -1235,8 +2076,24 @@ def evaluate_validation_report(
             samples=config.policy.bootstrap_samples,
             seed=f"{candidate_revision}:{context.name}",
         )
-        if lcb < -config.policy.epsilon:
-            blockers.append(f"context-regression:{context.name}")
+        if context.kind == "replay":
+            threshold = (
+                config.policy.replay_delta
+                if config.policy.replay_delta is not None
+                else config.policy.delta
+            )
+            if lcb <= threshold:
+                blockers.append(f"replay-lcb-below-delta:{context.name}")
+        elif context.kind == "transfer":
+            threshold = (
+                config.policy.transfer_delta
+                if config.policy.transfer_delta is not None
+                else config.policy.delta
+            )
+            if lcb <= threshold:
+                blockers.append(f"transfer-lcb-below-delta:{context.name}")
+        elif lcb < -config.policy.epsilon:
+            blockers.append(f"regression-lcb-below-tolerance:{context.name}")
         context_deltas[context.name] = deltas
         context_results.append(
             {
@@ -1275,8 +2132,8 @@ def evaluate_validation_report(
         aggregate_lcb = _quantile(bootstrapped, 1 - config.policy.confidence)
         all_deltas = [value for values in context_deltas.values() for value in values]
         variance = pvariance(all_deltas) if len(all_deltas) > 1 else 0.0
-        if aggregate_lcb <= config.policy.delta:
-            blockers.append("aggregate-lcb-below-delta")
+        # The Method gate is conjunctive by context.  Aggregate statistics are
+        # descriptive and must not rescue a replay/transfer/regression failure.
     if report.get("hard_failures"):
         blockers.append("hard-validation-failure")
     raw_evidence = report.get("candidate_evidence") or []
@@ -1325,6 +2182,115 @@ def evaluate_validation_report(
         total_cost,
         unique_blockers,
         tuple(candidate_evidence),
+    )
+
+
+def _apply_one_proposal_mutation(
+    *,
+    staging: Path,
+    composition: CompositionSpec,
+    mutation: ProposalMutation,
+    route: RouteMutation,
+    registry: PluginRegistry,
+) -> tuple[CompositionSpec, dict[str, Any], tuple[str, ...]]:
+    """Apply and validate one mutation on an already isolated artifact tree."""
+
+    if mutation.operation in {"edit", "synthesize"}:
+        synthesis = mutation.operation == "synthesize"
+        contract = registry.get(mutation.target_plugin)
+        if synthesis:
+            if mutation.target_plugin in composition.plugins:
+                raise HarnessError("Synthesis requires an inactive template slot")
+            if not contract.synthesis_template:
+                raise HarnessError("Synthesis target is not an approved template")
+            if mutation.surface != "prompt" or mutation.operator != "replace-file":
+                raise HarnessError("Synthesis requires prompt replace-file")
+        elif mutation.target_plugin not in composition.plugins:
+            raise HarnessError("An edit proposal must target an active plugin")
+        if mutation.surface is None:
+            raise HarnessError("File/config mutation requires a surface")
+        policy = contract.edit_policy(mutation.surface)
+        operator = mutation.operator or (
+            "bounded-config" if mutation.surface == "config" else "unified-diff"
+        )
+        payload_bytes = len((mutation.patch or "").encode("utf-8")) + sum(
+            len(content.encode("utf-8")) for _path, content in mutation.files
+        )
+        paths = tuple(path for path, _content in mutation.files)
+        if mutation.patch:
+            paths = _patch_paths(mutation.patch)
+        policy.validate_edit(operator=operator, changed_paths=paths, patch_bytes=payload_bytes)
+        before = _tree_manifest(staging / "artifact")
+        if mutation.surface == "config":
+            if mutation.files or mutation.patch:
+                raise HarnessError("Config proposal may not contain file content")
+            contract.configure(mutation.config_patch)
+            overrides = {name: dict(values) for name, values in composition.overrides.items()}
+            overrides[contract.name] = {
+                **overrides.get(contract.name, {}),
+                **dict(mutation.config_patch),
+            }
+            composition = CompositionSpec.create(composition.name, composition.plugins, overrides)
+        elif operator == "replace-file":
+            if mutation.patch or not mutation.files:
+                raise HarnessError("replace-file requires files and forbids patch")
+            for relative, content in mutation.files:
+                target = _contained_path(staging / "artifact", relative)
+                if not target.is_file():
+                    raise HarnessError(f"replace-file target does not exist: {relative}")
+                target.write_text(content, encoding="utf-8")
+        elif operator == "unified-diff":
+            if not mutation.patch or mutation.files:
+                raise HarnessError("unified-diff requires patch and forbids files")
+            _apply_patch(staging / "artifact", mutation.patch)
+        else:
+            raise HarnessError(f"Unsupported file operator: {operator}")
+        after = _tree_manifest(staging / "artifact")
+        changed = tuple(
+            sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+        )
+        if mutation.surface == "config" and changed:
+            raise HarnessError("Config proposal changed artifact files")
+        if mutation.surface != "config" and set(changed) != set(paths):
+            raise HarnessError("Materialized file changes differ from the proposal")
+        artifact_hash = _sha256_json(after)
+        plugin_mutation = PluginMutation.create(
+            target_plugin=contract.name,
+            base_version=contract.version,
+            base_manifest_sha256=contract.manifest_sha256,
+            surface=mutation.surface,
+            candidate_artifact_sha256=artifact_hash,
+            changed_paths=changed,
+            evidence_sha256=route.evidence_sha256,
+            config_patch=mutation.config_patch or None,
+            operator=operator,
+        )
+        plugin_mutation.validate(registry)
+        policy.validate_edit(operator=operator, changed_paths=changed, patch_bytes=payload_bytes)
+        mutation_document = plugin_mutation.to_dict()
+        if synthesis:
+            composition = _apply_composition_operation(mutation, composition, registry)
+            mutation_document = {
+                **mutation_document,
+                "schema_version": "plugevolve-synthesis-mutation-v1",
+                "operation": "synthesize",
+                "template": contract.synthesis_template,
+            }
+        return composition, mutation_document, changed
+
+    if mutation.files or mutation.patch or mutation.config_patch:
+        raise HarnessError("Composition proposal may not edit artifact files or config")
+    composition = _apply_composition_operation(mutation, composition, registry)
+    return (
+        composition,
+        {
+            "schema_version": "plugevolve-composition-mutation-v1",
+            "operation": mutation.operation,
+            "target_plugin": mutation.target_plugin,
+            "replacement_plugin": mutation.replacement_plugin,
+            "evidence_sha256": list(route.evidence_sha256),
+        },
+        (),
     )
 
 
@@ -1506,14 +2472,20 @@ class RevisionStore:
         static_checks: Sequence[Sequence[str]],
         timeout: float,
     ) -> tuple[Path, dict[str, Any]]:
+        """Materialize one single- or joint-scope candidate atomically."""
+
         if proposal.base_revision_sha256 != incumbent_revision:
             raise HarnessError("Proposal targets a stale incumbent revision")
-        if proposal.operation != route.operation or proposal.target_plugin != route.target_plugin:
-            raise HarnessError("Proposal changed the deterministic route coordinate")
-        if proposal.surface != route.surface:
-            raise HarnessError("Proposal changed the deterministic route surface")
+        route_items = route.mutation_items()
+        proposal_items = proposal.mutation_items()
+        if len(route_items) != len(proposal_items):
+            raise HarnessError("Proposal mutation count does not match deterministic route")
+        if len(route_items) > 1 and (proposal.scope not in {None, "joint"}):
+            raise HarnessError("Joint route requires a joint candidate scope")
         incumbent_dir = self.revision_dir(incumbent_revision)
-        destination = self.candidates / f"r{self.load_state()['attempted_rounds'] + 1:06d}-{proposal.candidate_id}"
+        destination = self.candidates / (
+            f"r{self.load_state()['attempted_rounds'] + 1:06d}-{proposal.candidate_id}"
+        )
         if destination.exists():
             raise HarnessError(f"Candidate already exists: {destination.name}")
         staging = Path(tempfile.mkdtemp(prefix=f".{proposal.candidate_id}-", dir=self.candidates))
@@ -1521,106 +2493,51 @@ class RevisionStore:
             shutil.copytree(incumbent_dir / "artifact", staging / "artifact")
             composition = self.load_composition(incumbent_revision)
             before = _tree_manifest(staging / "artifact")
-            contract = registry.get(proposal.target_plugin)
-            mutation_document: dict[str, Any]
-            if proposal.operation == "edit":
-                if proposal.target_plugin not in composition.plugins:
-                    raise HarnessError("An edit proposal must target an active plugin")
-                assert proposal.surface is not None
-                policy = contract.edit_policy(proposal.surface)
-                operator = proposal.operator or (
-                    "bounded-config" if proposal.surface == "config" else "unified-diff"
+            changed_paths: set[str] = set()
+            mutation_documents: list[dict[str, Any]] = []
+            seen_targets: set[str] = set()
+            for mutation, target in zip(proposal_items, route_items, strict=True):
+                if target.target_plugin in seen_targets:
+                    raise HarnessError("Joint proposal repeats a plugin target")
+                seen_targets.add(target.target_plugin)
+                if (
+                    mutation.operation != target.operation
+                    or mutation.target_plugin != target.target_plugin
+                    or mutation.surface != target.surface
+                    or mutation.replacement_plugin != target.replacement_plugin
+                ):
+                    raise HarnessError("Proposal changed the deterministic route coordinate")
+                composition, mutation_document, local_changed = _apply_one_proposal_mutation(
+                    staging=staging,
+                    composition=composition,
+                    mutation=mutation,
+                    route=target,
+                    registry=registry,
                 )
-                payload_bytes = len((proposal.patch or "").encode("utf-8")) + sum(
-                    len(content.encode("utf-8")) for _path, content in proposal.files
-                )
-                paths = tuple(path for path, _content in proposal.files)
-                if proposal.patch:
-                    paths = _patch_paths(proposal.patch)
-                policy.validate_edit(
-                    operator=operator, changed_paths=paths, patch_bytes=payload_bytes
-                )
-                if proposal.surface == "config":
-                    if proposal.files or proposal.patch:
-                        raise HarnessError("Config proposal may not contain file content")
-                    contract.configure(proposal.config_patch)
-                    overrides = {
-                        name: dict(values) for name, values in composition.overrides.items()
-                    }
-                    overrides[contract.name] = {
-                        **overrides.get(contract.name, {}),
-                        **dict(proposal.config_patch),
-                    }
-                    composition = CompositionSpec.create(
-                        composition.name, composition.plugins, overrides
+                overlap = changed_paths & set(local_changed)
+                if overlap:
+                    raise HarnessError(
+                        "Joint proposal mutations overlap paths: " + ", ".join(sorted(overlap))
                     )
-                elif operator == "replace-file":
-                    if proposal.patch or not proposal.files:
-                        raise HarnessError("replace-file requires files and forbids patch")
-                    for relative, content in proposal.files:
-                        target = _contained_path(staging / "artifact", relative)
-                        if not target.is_file():
-                            raise HarnessError(f"replace-file target does not exist: {relative}")
-                        target.write_text(content, encoding="utf-8")
-                elif operator == "unified-diff":
-                    if not proposal.patch or proposal.files:
-                        raise HarnessError("unified-diff requires patch and forbids files")
-                    _apply_patch(staging / "artifact", proposal.patch)
-                else:
-                    raise HarnessError(f"Unsupported file operator: {operator}")
-                after = _tree_manifest(staging / "artifact")
-                changed = tuple(
-                    sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
-                )
-                if proposal.surface == "config" and changed:
-                    raise HarnessError("Config proposal changed artifact files")
-                if proposal.surface != "config" and set(changed) != set(paths):
-                    raise HarnessError("Materialized file changes differ from the proposal")
-                artifact_hash = _sha256_json(after)
-                mutation = PluginMutation.create(
-                    target_plugin=contract.name,
-                    base_version=contract.version,
-                    base_manifest_sha256=contract.manifest_sha256,
-                    surface=proposal.surface,
-                    candidate_artifact_sha256=artifact_hash,
-                    changed_paths=changed,
-                    evidence_sha256=route.evidence_sha256,
-                    config_patch=proposal.config_patch or None,
-                    operator=operator,
-                )
-                mutation.validate(registry)
-                contract.edit_policy(proposal.surface).validate_edit(
-                    operator=operator,
-                    changed_paths=changed,
-                    patch_bytes=payload_bytes,
-                )
-                mutation_document = mutation.to_dict()
-            else:
-                composition = _apply_composition_operation(proposal, composition, registry)
-                if proposal.files or proposal.patch or proposal.config_patch:
-                    raise HarnessError("Composition proposal may not edit artifact files or config")
-                mutation_document = {
-                    "schema_version": "plugevolve-composition-mutation-v1",
-                    "operation": proposal.operation,
-                    "target_plugin": proposal.target_plugin,
-                    "replacement_plugin": proposal.replacement_plugin,
-                    "evidence_sha256": list(route.evidence_sha256),
-                }
-            _run_static_checks(
-                staging / "artifact", static_checks=static_checks, timeout=timeout
-            )
+                changed_paths.update(local_changed)
+                mutation_documents.append(mutation_document)
+            _run_static_checks(staging / "artifact", static_checks=static_checks, timeout=timeout)
             post_check = _tree_manifest(staging / "artifact")
-            post_check_changed = tuple(
-                sorted(
-                    path
-                    for path in set(before) | set(post_check)
-                    if before.get(path) != post_check.get(path)
-                )
-            )
-            if set(post_check_changed) != set(
-                changed if proposal.operation == "edit" else ()
-            ):
+            post_check_changed = {
+                path for path in set(before) | set(post_check) if before.get(path) != post_check.get(path)
+            }
+            if post_check_changed != changed_paths:
                 raise HarnessError("Static checks changed files outside the candidate mutation")
+            mutation_document: dict[str, Any] = (
+                mutation_documents[0]
+                if len(mutation_documents) == 1
+                else {
+                    "schema_version": "plugevolve-joint-mutation-v1",
+                    "scope": "joint",
+                    "mutations": mutation_documents,
+                    "changed_paths": sorted(changed_paths),
+                }
+            )
             revision = self._finalize_revision(
                 staging,
                 parent_revision=incumbent_revision,
@@ -1662,8 +2579,20 @@ class RevisionStore:
         state["current_revision_sha256"] = revision_sha256
         state["accepted_rounds"] = int(state["accepted_rounds"]) + 1
         state["history"] = [*state.get("history", []), revision_sha256]
-        state["next_group"] = "domain" if route.group == "harness" else "harness"
-        state["evidence"] = [item.to_dict() for item in decision.candidate_evidence]
+        # Coordinate selection is evidence-driven.  Keep the field only as a
+        # backwards-compatible tie-break hint; never force an alternating turn.
+        state["next_group"] = route.group
+        replay_task_ids = {
+            task_id
+            for context in config.contexts
+            if context.kind == "replay"
+            for task_id in context.task_ids
+        }
+        state["evidence"] = [
+            item.to_dict()
+            for item in decision.candidate_evidence
+            if item.task_id in replay_task_ids
+        ]
         if int(state["attempted_rounds"]) >= config.max_rounds:
             state["status"] = "complete"
         _atomic_json(self.state_path, state)
@@ -1790,6 +2719,13 @@ def _apply_composition_operation(
         if proposal.target_plugin in plugins:
             raise HarnessError("Enable proposal targets an active plugin")
         registry.get(proposal.target_plugin)
+        plugins.append(proposal.target_plugin)
+    elif proposal.operation == "synthesize":
+        if proposal.target_plugin in plugins:
+            raise HarnessError("Synthesis proposal targets an active plugin")
+        contract = registry.get(proposal.target_plugin)
+        if not contract.synthesis_template:
+            raise HarnessError("Synthesis proposal lacks an approved template")
         plugins.append(proposal.target_plugin)
     elif proposal.operation == "disable":
         if proposal.target_plugin not in plugins:
@@ -1964,6 +2900,7 @@ class ContinuousEvolutionEngine:
                 composition=composition,
                 groups=self.config.groups,
                 preferred_group=state["next_group"],
+                allowed_operators=self.config.allowed_operators,
             )
             round_dir = self.store.rounds / f"{round_number:06d}"
             if route is None:
@@ -1981,7 +2918,20 @@ class ContinuousEvolutionEngine:
                     max_rounds=self.config.max_rounds,
                     status="stalled",
                 )
-            contract = self.registry.get(route.target_plugin)
+            incumbent_artifact = self.store.revision_dir(incumbent) / "artifact"
+            route_items = route.mutation_items()
+            contracts = {
+                item.target_plugin: self.registry.get(item.target_plugin)
+                for item in route_items
+            }
+            editable_files = {
+                item.target_plugin: _editable_file_snapshots(
+                    incumbent_artifact,
+                    contracts[item.target_plugin],
+                    item.surface,
+                )
+                for item in route_items
+            }
             request = {
                 "schema_version": "continuous-plugin-proposal-request-v1",
                 "round": round_number,
@@ -1990,14 +2940,50 @@ class ContinuousEvolutionEngine:
                     self.store.revision_dir(incumbent) / "revision.json", label="base revision"
                 ),
                 "route": route.to_dict(),
+                # Singular fields remain for old proposal adapters; joint
+                # adapters consume the plural maps below.
                 "plugin_contract": {
-                    **contract.to_dict(),
-                    "manifest_sha256": contract.manifest_sha256,
+                    **contracts[route_items[0].target_plugin].to_dict(),
+                    "manifest_sha256": contracts[route_items[0].target_plugin].manifest_sha256,
                 },
-                "evidence": [_safe_evidence_summary(item) for item in evidence],
+                "editable_files": editable_files[route_items[0].target_plugin],
+                "plugin_contracts": {
+                    name: {
+                        **contract.to_dict(),
+                        "manifest_sha256": contract.manifest_sha256,
+                    }
+                    for name, contract in contracts.items()
+                },
+                "editable_files_by_plugin": editable_files,
+                "evidence_packet": distill_evidence(
+                    evidence,
+                    registry=self.registry,
+                    composition=composition,
+                    route=route,
+                ),
+                "operator_policy": {
+                    "allowed": list(self.config.allowed_operators),
+                    "selected": (
+                        "joint"
+                        if len(route_items) > 1
+                        else route.to_dict()["method_operator"]
+                    ),
+                    "scope": route.scope or route.group,
+                    "replacement_plugin": route.replacement_plugin,
+                    "routes": [item.to_dict() for item in route_items],
+                    "instruction": (
+                        "Return exactly one candidate for the selected scope. "
+                        "For a joint scope return one mutation per route target; all "
+                        "mutations are applied atomically. "
+                        "For revision edit only the active target surface. For recomposition "
+                        "use the deterministic replacement_plugin and no file patch. For "
+                        "synthesis replace only the approved inactive template file."
+                    ),
+                },
                 "rejected_candidate_sha256": state.get("rejected_candidates", []),
                 "candidate_limit": self.config.max_candidates_per_round,
             }
+            _atomic_json(round_dir / "evidence-packet.json", request["evidence_packet"])
             proposals = list(self.proposer.propose(request, round_dir))[
                 : self.config.max_candidates_per_round
             ]
@@ -2117,4 +3103,5 @@ __all__ = [
     "SpreadsheetBenchV2EvaluationAdapter",
     "ValidationDecision",
     "evaluate_validation_report",
+    "distill_evidence",
 ]

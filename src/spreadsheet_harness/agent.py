@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
-from openpyxl import load_workbook
 
 from .budget import RunBudget
 from .config import ProviderConfig
@@ -111,6 +111,7 @@ _DIRECT_WORKBOOK_MUTATION_TOOLS = frozenset(
     }
 )
 _FORMULA_STATE_MUTATION_TOOLS = (_DIRECT_WORKBOOK_MUTATION_TOOLS - {"recalculate_and_read"}) | {
+    "bash",
     "code_interpreter"
 }
 _CALCULATION_EVIDENCE_COORDINATE_SAMPLE_LIMIT = 32
@@ -511,6 +512,21 @@ def _responses_input_to_chat_messages(
             role = "user"
         content = item.get("content", "")
         chat_message = {"role": role, "content": _responses_content_to_chat(content)}
+        # These deployed text-only routes either reject images (public relay)
+        # or silently drop them (campus relay). Keep the text and explicitly
+        # report the omitted visual input instead of claiming it was observed.
+        text_only_model = model.casefold().removeprefix("dashscope/") in {
+            "deepseek-v4-flash", "qwen3-coder-480b-a35b-instruct",
+        }
+        if text_only_model and isinstance(chat_message["content"], list):
+            parts = chat_message["content"]
+            if any(part.get("type") == "image_url" for part in parts):
+                chat_message["content"] = "\n".join(
+                    [str(part.get("text", "")) for part in parts if part.get("type") == "text"]
+                    + ["[Image not delivered: this model route is text-only. Use list_sheets, "
+                       "inspect_range, view_xlsx or code_interpreter to inspect workbook data; "
+                       "do not infer visual contents from this message.]"]
+                )
         reasoning_content = item.get("provider_reasoning_content")
         if role == "assistant" and isinstance(reasoning_content, str):
             chat_message["reasoning_content"] = reasoning_content
@@ -3060,7 +3076,7 @@ def _failed_tool_requires_edit_recovery(
     if outcome_data.get("workbook_rolled_back") is True:
         return True
     if (
-        name == "code_interpreter"
+        name in {"bash", "code_interpreter"}
         and outcome_data.get("ok") is False
         and outcome_data.get("managed_mutation_attempted") is True
     ):
@@ -3127,6 +3143,8 @@ class SpreadsheetAgent:
         max_read_only_code_calls_before_edit: int | None = None,
         recover_output_limit: bool = False,
         capture_tool_evidence: bool = False,
+        text_only_after_forced_prefix: bool = False,
+        reserve_final_text_turn: bool = False,
         pacer: RelayPacer | None = None,
     ) -> None:
         self.config = config
@@ -3162,6 +3180,8 @@ class SpreadsheetAgent:
         self.max_read_only_code_calls_before_edit = max_read_only_code_calls_before_edit
         self.recover_output_limit = recover_output_limit
         self.capture_tool_evidence = capture_tool_evidence
+        self.text_only_after_forced_prefix = text_only_after_forced_prefix
+        self.reserve_final_text_turn = reserve_final_text_turn
         self.pacer = pacer
         if (
             max_read_only_code_calls_before_edit is not None
@@ -3174,6 +3194,14 @@ class SpreadsheetAgent:
             )
         if self.terminal_result_required and not self.required_tool_termination:
             raise ValueError("terminal_result_required needs required_tool_termination")
+        if self.text_only_after_forced_prefix and not self.forced_tool_prefix:
+            raise ValueError("text_only_after_forced_prefix needs a forced_tool_prefix")
+        if self.text_only_after_forced_prefix and self.required_tool_termination:
+            raise ValueError(
+                "text_only_after_forced_prefix is incompatible with required_tool_termination"
+            )
+        if self.reserve_final_text_turn and self.required_tool_termination:
+            raise ValueError("reserve_final_text_turn is incompatible with required_tool_termination")
 
     def _instructions(self) -> tuple[str, list[dict[str, str]]]:
         instructions = self.base_instructions
@@ -3279,6 +3307,11 @@ class SpreadsheetAgent:
         )
         workbook_changed = False
         read_only_code_calls_before_edit = 0
+        # Native view_xlsx is intentionally cheaper than code_interpreter, but
+        # it must obey the same pre-edit inspection budget. Otherwise adding the
+        # official viewer can create an unbounded read-only loop that crowds out
+        # the actual workbook mutation.
+        read_only_view_calls_before_edit = 0
         # A preflight rejection is a one-shot nudge.  Repeating the same
         # synthetic rejection on every subsequent model turn can consume the
         # entire executor budget while producing no new workbook evidence.
@@ -3439,7 +3472,9 @@ class SpreadsheetAgent:
                 observed_first_tool=observed_first_tool,
                 forced_tool_prefix=list(self.forced_tool_prefix),
                 observed_forced_tool_prefix=list(observed_forced_tool_prefix),
-                post_prefix_tool_choice="auto",
+                post_prefix_tool_choice=(
+                    "none" if self.text_only_after_forced_prefix else "auto"
+                ),
                 terminal_tool=(TERMINAL_TOOL_NAME if self.required_tool_termination else None),
                 observed_terminal_tool=observed_terminal_tool,
                 terminal_submissions=terminal_submissions,
@@ -3507,7 +3542,9 @@ class SpreadsheetAgent:
                 "tool_names": [tool["name"] for tool in tool_schemas],
                 "first_tool_choice": self.first_tool_choice,
                 "forced_tool_prefix": list(self.forced_tool_prefix),
-                "post_prefix_tool_choice": "auto",
+                "post_prefix_tool_choice": (
+                    "none" if self.text_only_after_forced_prefix else "auto"
+                ),
                 "terminal_tool": (TERMINAL_TOOL_NAME if self.required_tool_termination else None),
                 "stage": self.stage,
                 "max_turns": self.max_turns,
@@ -3562,6 +3599,62 @@ class SpreadsheetAgent:
                         }
                     )
                 input_items.extend(recent_items)
+                text_only_turn = bool(
+                    (
+                        self.text_only_after_forced_prefix
+                        and forced_prefix_index >= len(self.forced_tool_prefix)
+                    )
+                    or (self.reserve_final_text_turn and turn_number == self.max_turns)
+                )
+                if text_only_turn:
+                    # Start a clean text-only verifier request instead of
+                    # replaying the assistant tool call.  Several reasoning
+                    # routes continue that call even under tool_choice=none.
+                    # The bounded tool result remains available as explicitly
+                    # untrusted evidence in a user message.
+                    tool_evidence = [
+                        str(item.get("output", ""))
+                        for item in recent_items
+                        if item.get("type") == "function_call_output"
+                    ]
+                    image_evidence = [
+                        item
+                        for item in recent_items
+                        if item.get("role") == "user"
+                        and isinstance(item.get("content"), list)
+                        and any(
+                            isinstance(content, dict)
+                            and content.get("type") == "input_image"
+                            for content in item["content"]
+                        )
+                    ]
+                    input_items = [initial_input]
+                    if history_text:
+                        input_items.append(
+                            {
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": history_text}],
+                            }
+                        )
+                    if tool_evidence:
+                        input_items.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": (
+                                            "<untrusted_forced_tool_result>\n"
+                                            + "\n".join(tool_evidence)
+                                            + "\n</untrusted_forced_tool_result>\n"
+                                            "Return the requested strict text/YAML now. Do not "
+                                            "call any function."
+                                        ),
+                                    }
+                                ],
+                            }
+                        )
+                    input_items.extend(image_evidence)
                 remaining_total_tokens = (
                     self.budget.remaining_total_tokens() if self.budget is not None else None
                 )
@@ -3636,7 +3729,7 @@ class SpreadsheetAgent:
                         or (not self.require_formula_runtime_validation and recovery_slot_turn)
                     )
                 )
-                if tool_schemas:
+                if tool_schemas and not text_only_turn:
                     tool_choice: str | dict[str, str] = "auto"
                     # Some DashScope adapters reject OpenAI's explicit `tool_choice`
                     # form.  Restricting the advertised tool set to the required
@@ -3662,13 +3755,13 @@ class SpreadsheetAgent:
                         recovery_turn_code_forced = True
                     # Once the one-shot read-only deadline nudge has been
                     # delivered, do not leave the model in an unconstrained
-                    # inspection loop.  Route the next turn directly to the
-                    # editor and add an explicit save requirement; the tool
-                    # result itself remains the source of truth for whether a
-                    # mutation actually happened.
+                    # inspection loop. Route the next turn directly to the
+                    # editor even when deterministic warm-start edits mean the
+                    # stage does not strictly require another mutation: the
+                    # executor still needs to finish any uncovered clauses or
+                    # submit. The tool result remains the source of truth.
                     if (
                         forced_tool is None
-                        and self.require_workbook_change
                         and self.max_read_only_code_calls_before_edit is not None
                         and read_only_deadline_rejected
                         and not agent_code_edit_made
@@ -3704,12 +3797,33 @@ class SpreadsheetAgent:
                         final_agent_turn or budget_terminal_turn
                     ):
                         if forced_tool is not None:
+                            # Recovery nudges (for example, forcing one more
+                            # ``code_interpreter`` call after an unchanged edit)
+                            # are best-effort.  When the final model-call slot is
+                            # reserved for the terminal acknowledgement, do not
+                            # treat such a recovery nudge as an incomplete
+                            # *prefix*: there is no user-declared prefix left to
+                            # satisfy.  The terminal route below can then record
+                            # the artifact (and its normal edit postcondition can
+                            # still reject an actually unchanged workbook).
+                            recovery_only_forced_tool = (
+                                forced_prefix_index >= len(self.forced_tool_prefix)
+                                and (
+                                    recovery_turn_code_forced
+                                    or deadline_recovery_code_forced
+                                )
+                            )
+                            if recovery_only_forced_tool:
+                                forced_tool = None
+
                             # A formula edit discovered on the penultimate turn still
                             # needs one runtime validation call. On the final reserved
                             # turn, perform that validation and accept it as the terminal
                             # route when it clears the pending scope; there is no model
                             # response slot left for a second acknowledgement call.
-                            if (
+                            if forced_tool is None:
+                                pass
+                            elif (
                                 forced_tool == "recalculate_and_read"
                                 and recovery_turn_formula_validation_forced
                                 and pending_formula_validation
@@ -5123,7 +5237,13 @@ class SpreadsheetAgent:
                         observed_first_tool=observed_first_tool,
                         forced_tool_prefix=list(self.forced_tool_prefix),
                         observed_forced_tool_prefix=observed_forced_tool_prefix,
-                        post_prefix_tool_choice=("auto" if tool_schemas else None),
+                        post_prefix_tool_choice=(
+                            "none"
+                            if self.text_only_after_forced_prefix
+                            else "auto"
+                            if tool_schemas
+                            else None
+                        ),
                         terminal_tool=ASSISTANT_TEXT_TERMINAL,
                         observed_terminal_tool=ASSISTANT_TEXT_TERMINAL,
                         tool_errors=tool_errors,
@@ -5187,14 +5307,22 @@ class SpreadsheetAgent:
                     else:
                         parsed_arguments = arguments
                         edit_deadline_rejected = bool(
-                            name == "code_interpreter"
+                            name in {"code_interpreter", "view_xlsx"}
                             and self.max_read_only_code_calls_before_edit is not None
                             and not agent_code_edit_made
                             and not recovery_turn_code_forced
-                            and not read_only_deadline_rejected
-                            and read_only_code_calls_before_edit
-                            >= self.max_read_only_code_calls_before_edit
-                            and not _code_interpreter_intends_workbook_edit(arguments)
+                            and (
+                                read_only_deadline_rejected
+                                or (
+                                    read_only_code_calls_before_edit
+                                    + read_only_view_calls_before_edit
+                                )
+                                >= self.max_read_only_code_calls_before_edit
+                            )
+                            and (
+                                name == "view_xlsx"
+                                or not _code_interpreter_intends_workbook_edit(arguments)
+                            )
                         )
                         try:
                             outcome = (
@@ -5256,6 +5384,9 @@ class SpreadsheetAgent:
                                     "prior_read_only_code_calls": (
                                         read_only_code_calls_before_edit
                                     ),
+                                    "prior_read_only_view_calls": (
+                                        read_only_view_calls_before_edit
+                                    ),
                                 },
                             )
                         else:
@@ -5266,6 +5397,10 @@ class SpreadsheetAgent:
                                     agent_code_edit_made = True
                                 elif not agent_code_edit_made:
                                     read_only_code_calls_before_edit += 1
+                            elif name == "bash" and outcome_data.get("workbook_changed") is True:
+                                agent_code_edit_made = True
+                            elif name == "view_xlsx" and not agent_code_edit_made:
+                                read_only_view_calls_before_edit += 1
                         summary_arguments = arguments
                     if _failed_tool_requires_edit_recovery(
                         name,

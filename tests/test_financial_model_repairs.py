@@ -314,6 +314,78 @@ def test_complete_financial_model_runtime_actions_applies_constants_and_freeze_p
     repaired.close()
 
 
+def test_financial_runtime_respects_short_year_periods_and_refines_explicit_rows(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "short-year-period-input.xlsx"
+    workbook = Workbook()
+    pnl = workbook.active
+    pnl.title = "P&L"
+    bs = workbook.create_sheet("BS")
+    assumptions = workbook.create_sheet("Assumption")
+    for worksheet in (pnl, bs):
+        for offset, year in enumerate(range(2020, 2031), start=3):
+            worksheet.cell(5, offset).value = f"FY{year % 100:02d}E"
+    for offset in range(3, 14):
+        assumptions.cell(5, offset).value = f"='P&L'!{get_column_letter(offset)}5"
+
+    pnl["B9"] = "Total Revenue"
+    pnl["B15"] = "Gross Profit"
+    pnl["B16"] = "Gross Profit Margin"
+    for column in range(3, 14):
+        pnl.cell(9, column).value = 100
+        pnl.cell(15, column).value = 40
+    pnl["E16"] = "=E15/E9"
+
+    bs["B21"] = "Total Assets"
+    bs["B40"] = "Total Equity & Liabilities"
+    bs["B42"] = "Check"
+    for column in range(3, 14):
+        bs.cell(21, column).value = 100
+        bs.cell(40, column).value = 100
+
+    assumptions["B21"] = "Employee Benefit Expense"
+    assumptions["B22"] = "Y-o-Y Growth (%)"
+    assumptions["H21"] = 10
+    for column in range(9, 14):
+        assumptions.cell(22, column).value = 0.1
+    workbook.save(source)
+    workbook.close()
+    output = tmp_path / "short-year-period-output.xlsx"
+    shutil.copy2(source, output)
+
+    changes = complete_financial_model_runtime_actions(
+        output,
+        source_path=source,
+        instruction=(
+            'In the P&L sheet, calculate Gross Profit Margin for FY23–FY30E returning "NA" '
+            "where revenue is unavailable. In the BS sheet, calculate the Check line for "
+            "Mar-20 to Mar-30. In the Assumption sheet, calculate Employee Benefit Expense "
+            "for FY26E–FY30E using Y-o-Y growth."
+        ),
+    )
+
+    repaired = load_workbook(output, data_only=False)
+    assert [repaired["P&L"].cell(16, column).value for column in range(6, 14)] == [
+        f'=IFERROR({get_column_letter(column)}15/{get_column_letter(column)}9,"NA")'
+        for column in range(6, 14)
+    ]
+    assert all(repaired["P&L"].cell(16, column).value is None for column in range(14, 18))
+    assert [repaired["BS"].cell(42, column).value for column in range(3, 14)] == [
+        f"={get_column_letter(column)}21-{get_column_letter(column)}40"
+        for column in range(3, 14)
+    ]
+    assert [repaired["Assumption"].cell(21, column).value for column in range(9, 14)] == [
+        f"={get_column_letter(column - 1)}21*(1+{get_column_letter(column)}22)"
+        for column in range(9, 14)
+    ]
+    repaired.close()
+    assert not any(
+        action["sheet"] == "P&L" and action["target"] in {"N16", "O16", "P16", "Q16"}
+        for action in changes
+    )
+
+
 def test_common_financial_ratio_repairs_use_local_anchors(tmp_path: Path) -> None:
     """Common ratio clauses are filled without task-specific coordinates."""
     source = tmp_path / "source.xlsx"

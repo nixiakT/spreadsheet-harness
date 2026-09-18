@@ -207,6 +207,88 @@ def test_v2_runner_does_not_restore_formula_caches_after_calculate_all(
     }
 
 
+def test_v2_spreadsheet_agent_requires_vision_provider(tmp_path: Path) -> None:
+    root = _dataset(tmp_path)
+    task = load_spreadsheetbench_v2_tasks(root, categories=("Template",))[0]
+
+    with pytest.raises(HarnessError, match="requires a vision provider"):
+        run_spreadsheetbench_v2_comparison(
+            config=ProviderConfig("https://example.test/v1", "main-secret", "solver"),
+            dataset_root=root,
+            evaluator_path=DEFAULT_V2_EVALUATOR,
+            output_dir=tmp_path / "missing-vision",
+            skill_registry=SkillRegistry([]),
+            tasks=(task,),
+            arms=("spreadsheet-agent",),
+            max_model_calls=1,
+            max_turns_per_arm=1,
+        )
+
+
+def test_v2_spreadsheet_agent_records_and_redacts_vision_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _dataset(tmp_path)
+    task = load_spreadsheetbench_v2_tasks(root, categories=("Template",))[0]
+    solver = ProviderConfig("https://solver.test/v1", "main-secret", "solver")
+    vision = ProviderConfig("https://vision.test/v1", "vision-secret", "vision")
+    captured: dict[str, object] = {}
+
+    class Evidence:
+        def to_dict(self) -> dict[str, object]:
+            return {"observed_terminal_tool": "completed"}
+
+    def fake_run_arm(**kwargs: object) -> Evidence:
+        captured.update(kwargs)
+        session = kwargs["session"]
+        session.recorder.record(
+            "test.secrets",
+            {"value": f"{solver.api_key}|{vision.api_key}"},
+        )
+        return Evidence()
+
+    monkeypatch.setattr("spreadsheet_harness.spreadsheetbench_v2.run_arm", fake_run_arm)
+    monkeypatch.setattr(
+        "spreadsheet_harness.spreadsheetbench_v2.recalculate_workbook",
+        lambda *_args, **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.spreadsheetbench_v2._official_score",
+        lambda *_args, **_kwargs: {
+            "accuracy": 1.0,
+            "modification_accuracy": 1.0,
+            "regression_accuracy": 1.0,
+        },
+    )
+    output = tmp_path / "spreadsheet-agent-results"
+
+    run_spreadsheetbench_v2_comparison(
+        config=solver,
+        vision_config=vision,
+        dataset_root=root,
+        evaluator_path=DEFAULT_V2_EVALUATOR,
+        output_dir=output,
+        skill_registry=SkillRegistry([]),
+        tasks=(task,),
+        arms=("spreadsheet-agent",),
+        max_model_calls=1,
+        max_turns_per_arm=1,
+    )
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    rows = json.loads((output / "results.json").read_text(encoding="utf-8"))
+    trajectory = next((output / "runs").rglob("trajectory.jsonl")).read_text(encoding="utf-8")
+    assert captured["vision_config"] is vision
+    assert manifest["provider"]["model"] == "solver"
+    assert manifest["vision_provider"]["model"] == "vision"
+    assert rows[0]["vision_model"] == "vision"
+    assert solver.api_key not in json.dumps(manifest)
+    assert vision.api_key not in json.dumps(manifest)
+    assert solver.api_key not in trajectory
+    assert vision.api_key not in trajectory
+    assert trajectory.count("[REDACTED]") >= 2
+
+
 def test_spreadsheetbench_v2_short_id_must_be_unambiguous(tmp_path: Path) -> None:
     template = load_spreadsheetbench_v2_tasks(
         _dataset(tmp_path / "template", "Template"), categories=("Template",)
@@ -525,6 +607,12 @@ def test_v2_color_only_task_skips_libreoffice_recalculation(
     monkeypatch.setattr(
         "spreadsheet_harness.spreadsheetbench_v2.recalculate_workbook",
         lambda *_args, **_kwargs: pytest.fail("color-only task must not be recalculated"),
+    )
+    monkeypatch.setattr(
+        "spreadsheet_harness.spreadsheetbench_v2._debugging_detector_hint",
+        lambda *_args, **_kwargs: pytest.fail(
+            "bare runner must not invoke SheetHarness repair-family detection"
+        ),
     )
     monkeypatch.setattr(
         "spreadsheet_harness.spreadsheetbench_v2._official_score",

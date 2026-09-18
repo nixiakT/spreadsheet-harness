@@ -541,12 +541,30 @@ def attribute_failure(
     )
 
     if categories & _INTERFACE_CATEGORIES:
+        # Interface failures are the one case where a deliberately broader
+        # coordination provider is relevant. The normal narrowest-capability
+        # filter correctly suppresses it for local formula/structure errors,
+        # but would otherwise make approved synthesis templates unreachable.
+        synthesis_matches = sorted(
+            (
+                contract
+                for contract in raw_matching
+                if contract.name not in selected
+                and contract.synthesis_template is not None
+                and contract.spreadsheet_capabilities.intersection(capabilities)
+            ),
+            key=_contract_rank,
+        )
+        interface_candidates = tuple(
+            _contract_route(contract)
+            for contract in dict.fromkeys([*synthesis_matches, *inactive_matches])
+        )
         return FailureAttribution(
             "composition-interface",
             "repair-composition",
             capabilities,
             tuple(_contract_route(contract) for contract in selected_not_activated),
-            tuple(_contract_route(contract) for contract in inactive_matches),
+            interface_candidates,
             digests,
             tuple(sorted(categories & _INTERFACE_CATEGORIES)),
             normalized_interface,

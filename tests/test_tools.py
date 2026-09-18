@@ -27,6 +27,33 @@ def test_tool_registry_dispatch_and_errors(sample_workbook: Path, tmp_path: Path
     assert result.data["type"] == "ToolInputError"
 
 
+def test_official_compatibility_tools_dispatch(sample_workbook: Path, tmp_path: Path) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "official-tools")
+    tools = SpreadsheetToolRegistry(
+        session,
+        enable_code=True,
+        allowed_tools={"bash", "view_xlsx"},
+    )
+    assert {item["name"] for item in tools.schemas} == {"bash", "view_xlsx"}
+
+    listed = tools.invoke("view_xlsx", {"mode": "list"}).data
+    assert listed["ok"] is True
+    assert "Sheets:" in listed["view"]
+
+    viewed = tools.invoke(
+        "view_xlsx",
+        {"mode": "content", "sheet": "Sales", "start_row": 1, "end_row": 2, "cols": "A:B"},
+    ).data
+    assert viewed["ok"] is True
+    assert "Sheet: Sales" in viewed["view"]
+    assert "Row 2:" in viewed["view"]
+
+    shell = tools.invoke("bash", {"command": "printf '%s' \"$SHEET_WORKBOOK\""}).data
+    assert shell["ok"] is True
+    assert shell["workbook_changed"] is False
+    assert shell["stdout"].endswith("output.xlsx")
+
+
 def test_inspect_range_schema_discloses_limit_and_returns_bounded_evidence(
     sample_workbook: Path, tmp_path: Path
 ) -> None:
@@ -480,7 +507,9 @@ def test_view_image_only_accepts_page_from_most_recent_render(
     assert before_render["ok"] is False
     assert "render_workbook before" in before_render["error"]
 
-    tools._last_render = {"pages": [{"image_path": str(latest.resolve())}]}
+    tools._last_render = {
+        "pages": [{"path": latest.name, "image_path": str(latest.resolve())}]
+    }
     stale_result = tools.invoke("view_image", {"image_path": str(stale)}).data
     assert stale_result["ok"] is False
     assert "most recent render_workbook" in stale_result["error"]
@@ -488,6 +517,10 @@ def test_view_image_only_accepts_page_from_most_recent_render(
     latest_result = tools.invoke("view_image", {"image_path": str(latest)})
     assert latest_result.data["ok"] is True
     assert latest_result.image_path == latest.resolve()
+
+    concise_result = tools.invoke("view_image", {"image_path": latest.name})
+    assert concise_result.data["ok"] is True
+    assert concise_result.image_path == latest.resolve()
 
 
 def test_range_to_latex_escapes_values_and_reports_structure(

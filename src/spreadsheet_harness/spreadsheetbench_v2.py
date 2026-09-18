@@ -17,11 +17,16 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from .arms import _debugging_detector_hint, postprocess_debugging_artifact, run_arm
+from .arms import (
+    _bare_color_only_debugging_hint,
+    _debugging_detector_hint,
+    postprocess_debugging_artifact,
+    run_arm,
+)
 from .benchmark import _atomic_write_json, _sha256
 from .budget import RunBudget
 from .config import ProviderConfig
-from .errors import AgentExecutionFailure, HarnessError
+from .errors import AgentExecutionFailure, HarnessError, ProviderError
 from .openpyxl_compat import load_workbook as compat_load_workbook
 from .pacing import RelayPacer
 from .plugins import (
@@ -29,6 +34,7 @@ from .plugins import (
     PLUGEOLVE_SEED_COMPOSITION,
     CompositionSpec,
     default_plugin_registry,
+    execution_plan,
 )
 from .render import (
     recalculate_workbook,
@@ -271,6 +277,90 @@ def _official_score(
     if not isinstance(result, dict):
         raise HarnessError("Official evaluator returned a non-object score")
     return dict(result)
+
+
+def _try_salvage_provider_failure(
+    *,
+    exc: Exception,
+    task: SpreadsheetBenchV2Task,
+    arm: str,
+    session: WorkbookSession | None,
+    evaluator: ModuleType | None,
+    output: Path,
+    config: ProviderConfig,
+    vision_config: ProviderConfig | None,
+    budget: RunBudget,
+    row: dict[str, Any],
+    task_timeout_seconds: float,
+    evaluator_sha256: str,
+) -> bool:
+    """Score a valid artifact left behind by a terminal provider failure.
+
+    A provider can fail after the agent has already saved a complete workbook
+    (for example, a quota response on the next turn).  The old runner marked
+    such runs ``not_scored`` even though the official evaluator could score
+    the artifact.  Salvage is deliberately narrow: only ProviderError is
+    eligible, the workbook must differ from the session input, be loadable,
+    recalculate successfully, and pass through the pinned evaluator.  This
+    never converts an unchanged or malformed partial artifact into a score.
+    """
+
+    if not isinstance(exc, ProviderError) or evaluator is None or session is None:
+        return False
+    workbook = session.workbook_path
+    if task.category == "Visualization" or not workbook.is_file():
+        return False
+    try:
+        if _sha256(workbook) == _sha256(session.paths.input):
+            return False
+        check = compat_load_workbook(workbook, data_only=False)
+        check.close()
+        recalculation = recalculate_workbook(
+            workbook,
+            workbook,
+            cache_seed=session.paths.input,
+            timeout_seconds=min(120.0, task_timeout_seconds),
+        )
+        used = budget.to_dict()["used"]
+        score = _official_score(
+            evaluator,
+            task,
+            workbook,
+            output / "official_outputs" / arm / task.category,
+            model_calls=int(used["model_calls"]),
+        )
+    except Exception:
+        return False
+    row.update(
+        {
+            "status": "completed",
+            "passed": score.get("accuracy") == 1.0,
+            "outcome_kind": "scored_after_provider_failure",
+            "official_score": score,
+            "official_evaluator_sha256": evaluator_sha256,
+            "recalculation": recalculation,
+            "output_workbook": str(workbook),
+            "output_sha256": _sha256(workbook),
+            "error_type": type(exc).__name__,
+            "error": _redact_provider_secrets(exc, config, vision_config),
+            "provider_failure_salvaged": True,
+        }
+    )
+    return True
+
+
+def _redact_provider_secrets(
+    value: object,
+    config: ProviderConfig,
+    vision_config: ProviderConfig | None,
+) -> str:
+    redacted = str(value)
+    secrets = (
+        (config.api_key,) if vision_config is None else (config.api_key, vision_config.api_key)
+    )
+    for secret in dict.fromkeys(secret for secret in secrets if secret):
+        redacted = redacted.replace(secret, "[REDACTED]")
+    return redacted
 
 
 def _parse_answer_position_segment(
@@ -627,6 +717,7 @@ def _seal_interrupted_v2_row(
 def run_spreadsheetbench_v2_comparison(
     *,
     config: ProviderConfig,
+    vision_config: ProviderConfig | None = None,
     dataset_root: str | Path,
     evaluator_path: str | Path,
     output_dir: str | Path,
@@ -656,6 +747,7 @@ def run_spreadsheetbench_v2_comparison(
         "spreadsheet-rl-minimal",
         "spreadsheet-rl-native",
         "paper-vision",
+        "spreadsheet-agent",
         "spreadsheet-harness-basic",
         "spreadsheet-harness-financial",
     }
@@ -666,6 +758,8 @@ def run_spreadsheetbench_v2_comparison(
         raise HarnessError("Unknown SpreadsheetBench 2 arms: " + ", ".join(unknown_arms))
     if max_model_calls < max_turns_per_arm:
         raise HarnessError("max_model_calls must be at least max_turns_per_arm")
+    if "spreadsheet-agent" in selected_arms and vision_config is None:
+        raise HarnessError("The spreadsheet-agent arm requires a vision provider")
     has_visualization = any(task.category == "Visualization" for task in tasks)
     if has_visualization and not visual_generation_only:
         raise HarnessError(
@@ -699,6 +793,10 @@ def run_spreadsheetbench_v2_comparison(
             PLUGEOLVE_SEED_COMPOSITION if arm == "ours" else ARM_COMPOSITIONS[arm],
         )
         for arm in selected_arms
+    }
+    resolved_plans = {
+        arm: execution_plan(default_plugin_registry().resolve(spec))
+        for arm, spec in specs.items()
     }
     compositions = {arm: _composition_record(arm, specs[arm]) for arm in selected_arms}
     arm_orders = _balanced_arm_orders(tasks, arm_order_seed, selected_arms)
@@ -745,6 +843,7 @@ def run_spreadsheetbench_v2_comparison(
             else "evaluated_inline"
         ),
         "provider": config.public_dict(),
+        "vision_provider": vision_config.public_dict() if vision_config is not None else None,
         "implementation": _implementation_record(frozen_skills),
         "arms": list(selected_arms),
         "compositions": compositions,
@@ -840,6 +939,7 @@ def run_spreadsheetbench_v2_comparison(
             "protocol": SPREADSHEETBENCH_V2_PROTOCOL,
             "manifest_sha256": manifest_sha256,
             "model": config.model,
+            "vision_model": vision_config.model if vision_config is not None else None,
             "run_dir": str(run_dir),
             "started_at": started_at.isoformat(),
         }
@@ -849,7 +949,14 @@ def run_spreadsheetbench_v2_comparison(
                 task.input_path,
                 run_dir,
                 run_id=f"v2-{task.category}-{task.item_id}-{arm}",
-                recorder_secrets=(config.api_key,),
+                recorder_secrets=tuple(
+                    dict.fromkeys(
+                        (
+                            config.api_key,
+                            *(() if vision_config is None else (vision_config.api_key,)),
+                        )
+                    )
+                ),
             )
             session.recorder.record(
                 "spreadsheetbench_v2.configured",
@@ -876,6 +983,7 @@ def run_spreadsheetbench_v2_comparison(
                     max_turns_per_arm=max_turns_per_arm,
                     composition=specs[arm],
                     task_category=task.category,
+                    vision_config=vision_config,
                 )
             except AgentExecutionFailure as exc:
                 agent_result = exc.agent_result
@@ -884,15 +992,23 @@ def run_spreadsheetbench_v2_comparison(
                         "Agent execution failure omitted auditable agent evidence"
                     ) from exc
                 execution_failure = exc
-            # Detection is workbook-local and safe to share with every arm for
-            # runner-level policies such as skipping LibreOffice on color-only
-            # repairs.  Only the harness arms apply the corresponding mutation
-            # postprocessor; ablation arms retain their own agent behavior.
-            debugging_hint = _debugging_detector_hint(
-                session.paths.input,
-                task.instruction,
-                task_category=task.category,
-            ) if task.category == "Debugging" else task.instruction
+            # Ours/basic use the SheetHarness detector for their documented
+            # deterministic debugging post-processing.  Bare gets only the
+            # narrow color-cache signal below and never runs repair routing.
+            if task.category == "Debugging" and not resolved_plans[arm].debugging_detector:
+                debugging_hint = _bare_color_only_debugging_hint(
+                    session.paths.input,
+                    task.instruction,
+                    task_category=task.category,
+                )
+            elif task.category == "Debugging":
+                debugging_hint = _debugging_detector_hint(
+                    session.paths.input,
+                    task.instruction,
+                    task_category=task.category,
+                )
+            else:
+                debugging_hint = task.instruction
             if arm in {"ours", "spreadsheet-harness-basic"}:
                 postprocess_debugging_artifact(session, source_name=debugging_hint)
             color_only_debugging = "inconsistent color" in debugging_hint.casefold()
@@ -983,7 +1099,7 @@ def run_spreadsheetbench_v2_comparison(
                 row.update(
                     {
                         "error_type": type(execution_failure).__name__,
-                        "error": str(execution_failure).replace(config.api_key, "[REDACTED]"),
+                        "error": _redact_provider_secrets(execution_failure, config, vision_config),
                         "model_failure_reason": execution_failure.reason,
                     }
                 )
@@ -1004,18 +1120,33 @@ def run_spreadsheetbench_v2_comparison(
                 },
             )
         except Exception as exc:
-            row.update(
-                {
-                    "status": "error",
-                    "passed": False,
-                    "outcome_kind": "not_scored",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc).replace(config.api_key, "[REDACTED]"),
-                }
+            salvaged = _try_salvage_provider_failure(
+                exc=exc,
+                task=task,
+                arm=arm,
+                session=session,
+                evaluator=evaluator,
+                output=output,
+                config=config,
+                vision_config=vision_config,
+                budget=budget,
+                row=row,
+                task_timeout_seconds=task_timeout_seconds,
+                evaluator_sha256=evaluator_sha256,
             )
-            if session is not None and session.workbook_path.is_file():
-                row["output_workbook"] = str(session.workbook_path)
-                row["output_sha256"] = _sha256(session.workbook_path)
+            if not salvaged:
+                row.update(
+                    {
+                        "status": "error",
+                        "passed": False,
+                        "outcome_kind": "not_scored",
+                        "error_type": type(exc).__name__,
+                        "error": _redact_provider_secrets(exc, config, vision_config),
+                    }
+                )
+                if session is not None and session.workbook_path.is_file():
+                    row["output_workbook"] = str(session.workbook_path)
+                    row["output_sha256"] = _sha256(session.workbook_path)
         finally:
             row["budget"] = budget.to_dict()
             row["elapsed_seconds"] = round(time.monotonic() - started_clock, 3)

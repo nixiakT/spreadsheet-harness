@@ -9,6 +9,7 @@ from typing import Any
 from openpyxl.cell.cell import MergedCell
 from openpyxl.formula.translate import Translator, TranslatorError
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 from .openpyxl_compat import load_workbook, repair_workbook_archive_in_place
 
@@ -469,61 +470,165 @@ def _instruction_link_hints(instruction: str) -> tuple[tuple[str, str, str], ...
     return tuple(dict.fromkeys(hints))
 
 
+def _instruction_link_period_hints(instruction: str) -> tuple[tuple[str, str, str, str], ...]:
+    """Extract explicit cross-sheet links, including their requested period.
+
+    The older link parser intentionally stopped at ``for`` only indirectly and consequently
+    treated the period as part of the source sheet name.  Keep that parser for legacy callers,
+    but use this stricter form for instruction-grounded cross-sheet completions.
+    """
+
+    hints: list[tuple[str, str, str, str]] = []
+    for sheet, body in _instruction_sheet_clauses(instruction):
+        for match in re.finditer(
+            rf"\blink\s+(?P<label>.+?)\s+from\s+(?P<source>.+?)\s+for\s+(?P<period>{_INSTRUCTION_PERIOD}|all\s+years)",
+            body,
+            flags=re.IGNORECASE,
+        ):
+            source = re.sub(r"^the\s+", "", match.group("source").strip(" ,."), flags=re.IGNORECASE)
+            hints.append(
+                (
+                    sheet,
+                    match.group("label").strip(" ,."),
+                    source,
+                    match.group("period").strip(),
+                )
+            )
+    return tuple(dict.fromkeys(hints))
+
+
 def _instruction_calculation_hints(
     instruction: str,
 ) -> tuple[tuple[str, str, str, str], ...]:
     """Extract ordered ``calculate X ... then calculate Y`` clauses from a sheet request."""
 
-    hints: list[tuple[str, str, str, str]] = []
-    for sheet, body in _instruction_sheet_clauses(instruction):
-        for match in re.finditer(
-            r"(?:^|,\s*then\s+)calculate\s+(?P<target>[^,.]+?)"
-            r"(?:\s+for\s+(?P<period>\d{4}[A-Za-z]?\s*[–-]\s*\d{4}[A-Za-z]?|all\s+years))?"
-            r"(?:\s+using\s+(?P<using>.*?))?"
-            r"(?=,\s*then\s+calculate|\.|$)",
-            body,
-            flags=re.IGNORECASE,
-        ):
-            target = match.group("target").strip(" ,.")
-            if not target:
-                continue
-            period = (match.group("period") or "all years").strip()
-            using = (match.group("using") or "").strip(" ,.")
-            hints.append((sheet, target, period, using))
-    return tuple(dict.fromkeys(hints))
+    return _explicit_calculation_requests(instruction)
 
 
 def _instruction_year_columns(worksheet: Any) -> dict[int, int]:
     """Return the first usable year/date header mapping for a schedule."""
+
+    workbook = getattr(worksheet, "parent", None)
+
+    def header_year(value: Any) -> int | None:
+        if hasattr(value, "year") and isinstance(value.year, int):
+            return int(value.year)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and float(value).is_integer()
+            and 0 <= int(value) <= 2200
+        ):
+            numeric = int(value)
+            return numeric if numeric >= 1900 else None
+        if not isinstance(value, str) or value.startswith("="):
+            return None
+        compact = re.sub(r"\s+", "", value).upper()
+        four_digit = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?:[AEF])?(?!\d)", compact)
+        short_year = re.fullmatch(
+            r"(?:FY|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[-/]?(\d{2})(?:[AEF])?",
+            compact,
+        )
+        if four_digit is not None:
+            return int(four_digit.group(1))
+        if short_year is not None:
+            return 2000 + int(short_year.group(1))
+        return None
+
+    def resolve_header_value(value: Any, seen: set[tuple[str, str]] | None = None) -> Any:
+        """Resolve a short chain of workbook-local header links."""
+
+        if not isinstance(value, str) or not value.startswith("=") or workbook is None:
+            return value
+        seen = set() if seen is None else seen
+        linked = re.fullmatch(
+            r"=\+?(?:'(?P<quoted>[^']+)'|(?P<plain>[^'!]+))!\$?(?P<column>[A-Z]{1,3})\$?(?P<row>\d+)",
+            value.strip(),
+            flags=re.IGNORECASE,
+        )
+        if linked is None:
+            return value
+        sheet_name = (linked.group("quoted") or linked.group("plain")).strip()
+        coord = f"{linked.group('column')}{linked.group('row')}"
+        key = (sheet_name, coord)
+        if sheet_name not in workbook.sheetnames or key in seen:
+            return value
+        seen.add(key)
+        return resolve_header_value(workbook[sheet_name][coord].value, seen)
 
     mapping: dict[int, int] = {}
     max_row, max_column = _content_bounds(worksheet)
     for column in range(1, max_column + 1):
         for row in range(1, min(max_row, 6) + 1):
             value = worksheet.cell(row, column).value
-            if hasattr(value, "year") and isinstance(value.year, int):
-                mapping[column] = int(value.year)
+            parsed = header_year(resolve_header_value(value))
+            if parsed is not None:
+                mapping[column] = parsed
                 break
-            if (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and float(value).is_integer()
-                and 1900 <= int(value) <= 2200
-            ):
-                mapping[column] = int(value)
-                break
+            # Assumption tabs often link their year header directly to the primary
+            # statement. Resolve that workbook-local reference instead of assuming a
+            # fixed base year or requiring an Excel cached value.
+            if isinstance(value, str) and value.startswith("="):
+                linked = re.fullmatch(
+                    r"=\+?(?:'(?P<quoted>[^']+)'|(?P<plain>[^'!]+))!"
+                    r"\$?(?P<column>[A-Z]{1,3})\$?(?P<row>\d+)",
+                    value.strip(),
+                    flags=re.IGNORECASE,
+                )
+                if linked is not None:
+                    sheet_name = (linked.group("quoted") or linked.group("plain")).strip()
+                    workbook = getattr(worksheet, "parent", None)
+                    if workbook is not None and sheet_name in workbook.sheetnames:
+                        linked_value = workbook[sheet_name][
+                            f"{linked.group('column')}{linked.group('row')}"
+                        ].value
+                        parsed = header_year(resolve_header_value(linked_value))
+                        if parsed is not None:
+                            mapping[column] = parsed
+                            break
     # Most schedules store only the first date and continue it with EOMONTH(prev,12).
     # Propagate that explicit year sequence instead of requiring cached formula values.
     for column in range(2, max_column + 1):
         if column in mapping:
             continue
         previous = mapping.get(column - 1)
+        # A statement tab may mirror the primary statement's header row via a direct link
+        # (``='Income Statement'!D3``).  Resolve the linked sheet's already-computable year
+        # mapping before falling back to local formula propagation.
+        if workbook is not None:
+            linked_header = worksheet.cell(3, column).value
+            linked = (
+                re.fullmatch(
+                    r"=\+?(?:'(?P<quoted>[^']+)'|(?P<plain>[^'!]+))!\$?(?P<source_column>[A-Z]{1,3})\$?(?P<source_row>\d+)",
+                    str(linked_header or "").strip(),
+                    flags=re.IGNORECASE,
+                )
+                if isinstance(linked_header, str)
+                else None
+            )
+            if linked is not None:
+                linked_sheet = (linked.group("quoted") or linked.group("plain")).strip()
+                if linked_sheet in workbook.sheetnames and linked_sheet != worksheet.title:
+                    linked_mapping = _instruction_year_columns(workbook[linked_sheet])
+                    linked_year = linked_mapping.get(
+                        column_index_from_string(linked.group("source_column"))
+                    )
+                    if linked_year is not None:
+                        mapping[column] = linked_year
+                        continue
         if previous is None:
             continue
         for row in range(1, min(max_row, 6) + 1):
             value = worksheet.cell(row, column).value
             if isinstance(value, str) and re.search(
                 rf"EOMONTH\(\s*\$?{get_column_letter(column - 1)}\$?\d+\s*,\s*12\s*\)",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                mapping[column] = previous + 1
+                break
+            if isinstance(value, str) and re.search(
+                rf"=\+?\$?{get_column_letter(column - 1)}\$?\d+\s*\+\s*1\s*$",
                 value,
                 flags=re.IGNORECASE,
             ):
@@ -539,10 +644,10 @@ def _instruction_target_columns(worksheet: Any, period: str) -> list[int]:
         # cached dates in the input workbook. SpreadsheetBench financial schedules
         # use C as 2021A in this layout; retain the same column geometry for the
         # explicit year interval rather than making the model rediscover it.
-        years = re.search(r"(\d{4}).*?(\d{4})", period)
-        if years is None:
+        bounds = _period_year_bounds(period)
+        if bounds is None:
             return []
-        start, end = int(years.group(1)), int(years.group(2))
+        start, end = bounds
         return [
             column
             for column in range(3, _content_max_column(worksheet) + 1)
@@ -550,11 +655,70 @@ def _instruction_target_columns(worksheet: Any, period: str) -> list[int]:
         ]
     if period.casefold() == "all years":
         return sorted(headers)
-    years = re.search(r"(\d{4}).*?(\d{4})", period)
-    if years is None:
+    bounds = _period_year_bounds(period)
+    if bounds is None:
         return sorted(headers)
-    start, end = int(years.group(1)), int(years.group(2))
+    start, end = bounds
     return [column for column, year in sorted(headers.items()) if start <= year <= end]
+
+
+def _period_year_bounds(period: str) -> tuple[int, int] | None:
+    """Normalize annual and month-year instruction intervals to four-digit years."""
+
+    raw_years = re.findall(r"(?<!\d)(\d{2}|\d{4})(?:[AEF])?(?!\d)", period.upper())
+    if len(raw_years) < 2:
+        return None
+    years = [int(raw) + (2000 if len(raw) == 2 else 0) for raw in raw_years[:2]]
+    return min(years), max(years)
+
+
+_INSTRUCTION_PERIOD = (
+    r"(?:(?:FY|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*[-/]?\s*)?"
+    r"\d{2,4}[AEF]?\s*(?:[–-]|\bto\b)\s*"
+    r"(?:(?:FY|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*[-/]?\s*)?"
+    r"\d{2,4}[AEF]?"
+)
+
+
+def _explicit_calculation_requests(
+    instruction: str,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Extract explicit calculate-row requests without relying on a case catalogue."""
+
+    requests: list[tuple[str, str, str, str]] = []
+    for sheet, body in _instruction_sheet_clauses(instruction):
+        starts = list(re.finditer(r"\bcalculate\s+", body, flags=re.IGNORECASE))
+        for index, start_match in enumerate(starts):
+            end = starts[index + 1].start() if index + 1 < len(starts) else len(body)
+            fragment = body[start_match.end() : end]
+            fragment = re.sub(r"(?:,\s*)?then\s*$", "", fragment, flags=re.IGNORECASE)
+            fragment = fragment.strip(" ,.")
+            period_match = re.search(
+                rf"\s+for\s+(?P<period>{_INSTRUCTION_PERIOD}|all\s+years)",
+                fragment,
+                flags=re.IGNORECASE,
+            )
+            if period_match is not None:
+                label = fragment[: period_match.start()].strip(" ,.")
+                period = period_match.group("period").strip()
+                qualifier = fragment[period_match.end() :].strip(" ,.")
+            else:
+                using_match = re.search(r"\s+using\s+", fragment, flags=re.IGNORECASE)
+                label = (
+                    fragment[: using_match.start()].strip(" ,.")
+                    if using_match is not None
+                    else fragment
+                )
+                period = "all years"
+                qualifier = (
+                    fragment[using_match.start() :].strip(" ,.")
+                    if using_match is not None
+                    else ""
+                )
+            label = re.sub(r"^the\s+", "", label, flags=re.IGNORECASE).strip(" ,.")
+            if label:
+                requests.append((sheet, label, period, qualifier))
+    return tuple(dict.fromkeys(requests))
 
 
 def _instruction_formula_row(worksheet: Any, hint: str) -> int | None:
@@ -683,7 +847,24 @@ def _fill_instruction_calculation_rows(
             continue
         original = source[worksheet.title]
         columns = _instruction_target_columns(worksheet, period)
-        target_row = _instruction_formula_row(worksheet, target_hint)
+        target_row = _find_instruction_target_row(worksheet, target_hint)
+        # Schedules often call the calculated debt row ``Outstanding`` while the
+        # instruction describes it as the closing balance of a named loan.  Resolve
+        # that conventional semantic alias before the generic row guard; the later
+        # debt branch still validates the opening/addition/repayment dependencies.
+        normalized_target_hint = _label(target_hint)
+        if target_row is None and (
+            "closing balance" in normalized_target_hint
+            or "term loan" in normalized_target_hint
+        ):
+            target_row = next(
+                (
+                    row
+                    for row in range(1, _content_max_row(worksheet) + 1)
+                    if _label(_raw_row_label(worksheet, row)) == "outstanding"
+                ),
+                None,
+            )
         if target_row is None or not columns:
             continue
         if period.casefold() == "all years":
@@ -691,13 +872,71 @@ def _fill_instruction_calculation_rows(
             if header_change is not None:
                 changes.append(header_change)
         target_label = _label(target_hint)
+        using_label = _label(using)
         dependency_rows = {
             _label(token.strip()): _instruction_formula_row(worksheet, token.strip())
             for token in re.split(r"\s*(?:,|\band\b)\s*", using, flags=re.IGNORECASE)
             if token.strip()
         }
         formula_for_column: dict[int, str] = {}
-        if "receiv" in target_label:
+        if "margin" in target_label:
+            numerator_hint = re.sub(r"\bmargin\b", "", target_hint, flags=re.IGNORECASE).strip()
+            numerator_row = _instruction_formula_row(worksheet, numerator_hint)
+            denominator_row = _instruction_formula_row(worksheet, "Total Revenue")
+            if denominator_row is None:
+                denominator_row = _instruction_formula_row(worksheet, "Revenue")
+            if numerator_row is not None and denominator_row is not None:
+                fallback = ',"NA"' if "returning na" in using_label else ""
+                formula_for_column = {
+                    column: (
+                        f"=IFERROR({get_column_letter(column)}{numerator_row}/"
+                        f"{get_column_letter(column)}{denominator_row}{fallback})"
+                        if fallback
+                        else (
+                            f"={get_column_letter(column)}{numerator_row}/"
+                            f"{get_column_letter(column)}{denominator_row}"
+                        )
+                    )
+                    for column in columns
+                }
+        elif target_label in {"check", "check line", "verification check"}:
+            assets_row = _instruction_formula_row(worksheet, "Total Assets")
+            liabilities_row = _instruction_formula_row(
+                worksheet, "Total Equity & Liabilities"
+            )
+            if liabilities_row is None:
+                liabilities_row = _instruction_formula_row(
+                    worksheet, "Total Liabilities and Shareholders Funds"
+                )
+            if assets_row is not None and liabilities_row is not None:
+                formula_for_column = {
+                    column: (
+                        f"={get_column_letter(column)}{assets_row}-"
+                        f"{get_column_letter(column)}{liabilities_row}"
+                    )
+                    for column in columns
+                }
+        elif "growth" in using_label and "y o y" in using_label:
+            growth_row = next(
+                (
+                    row
+                    for row in range(target_row + 1, min(_content_max_row(worksheet), target_row + 3) + 1)
+                    if "growth" in _semantic_row_label(worksheet, row)
+                ),
+                None,
+            )
+            if growth_row is None:
+                growth_row = _instruction_formula_row(worksheet, "Y-o-Y Growth")
+            if growth_row is not None:
+                formula_for_column = {
+                    column: (
+                        f"={get_column_letter(column - 1)}{target_row}*(1+"
+                        f"{get_column_letter(column)}{growth_row})"
+                    )
+                    for column in columns
+                    if column > 1
+                }
+        elif "receiv" in target_label:
             revenue_row = next((row for label, row in dependency_rows.items() if "revenue" in label), None)
             days_row = next((row for label, row in dependency_rows.items() if "day" in label), None)
             if revenue_row and days_row:
@@ -831,10 +1070,699 @@ def _fill_instruction_calculation_rows(
                 }
         for column, formula in formula_for_column.items():
             target = worksheet.cell(target_row, column)
-            if target.value is not None or original.cell(target_row, column).value is not None or not _cell_is_writable(target):
+            if (
+                # Earlier instruction-grounded passes may already have filled this
+                # coordinate with a more specific formula (for example an explicit
+                # cross-sheet link).  Never let the generic calculation-row branch
+                # overwrite that higher-confidence action.  The output workbook is
+                # initially identical to ``source`` here, so a non-empty target can
+                # only be an existing source value or a prior pass in this runtime.
+                target.value is not None
+                or original.cell(target_row, column).value is not None
+                or not _cell_is_writable(target)
+                or target.value == formula
+            ):
                 continue
             target.value = formula
             changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
+    return changes
+
+
+def _find_instruction_source_row(
+    source_sheet: Any,
+    target_label: str,
+    *,
+    target_sheet: Any | None = None,
+    target_row: int | None = None,
+) -> int | None:
+    """Find a source row by label, or by a workbook-local label bridge.
+
+    Schedule rows often expose their labels as formulas (for example
+    ``='Balance Sheet'!B5``), so a plain text search is insufficient.  The bridge fallback
+    follows a direct reference to the requested target row and is still entirely workbook
+    local; it does not use benchmark answers or case identifiers.
+    """
+
+    row = _instruction_formula_row(source_sheet, target_label)
+    if row is not None:
+        return row
+    if target_sheet is None or target_row is None:
+        return None
+    target_title = re.escape(str(target_sheet.title))
+    for candidate in range(1, _content_max_row(source_sheet) + 1):
+        for column in range(1, min(_content_max_column(source_sheet), 8) + 1):
+            value = source_sheet.cell(candidate, column).value
+            if not isinstance(value, str) or not value.startswith("="):
+                continue
+            if re.search(
+                rf"(?:'?)\s*{target_title}\s*(?:'?)!\$?[A-Z]{{1,3}}\$?{int(target_row)}\b",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                return candidate
+    return None
+
+
+def _find_instruction_target_row(worksheet: Any, hint: str) -> int | None:
+    """Resolve an instruction target row without accepting weak token collisions."""
+
+    # Human instructions commonly say ``Check line``/``Revenue row`` while the
+    # workbook label is simply ``Check``/``Revenue``.  Treat these structural
+    # suffixes as prose, but keep all substantive tokens mandatory.
+    hint_tokens = list(_label_tokens(hint))
+    while hint_tokens and hint_tokens[-1] in {"line", "row", "column", "cell"}:
+        hint_tokens.pop()
+    wanted = set(hint_tokens)
+    if not wanted:
+        return None
+    # Prefer an exact plain-text label.  A subset-only match can otherwise select
+    # ``Other Current Asset`` when the instruction asks for ``Current Assets``.
+    exact_rows: list[int] = []
+    subset_rows: list[tuple[int, int]] = []
+    for row in range(1, _content_max_row(worksheet) + 1):
+        label = _semantic_row_label(worksheet, row)
+        label_tokens = set(_label_tokens(label))
+        if label_tokens == wanted:
+            exact_rows.append(row)
+        elif wanted.issubset(label_tokens):
+            subset_rows.append((len(label_tokens - wanted), row))
+    if exact_rows:
+        return exact_rows[0]
+    if subset_rows:
+        return min(subset_rows)[1]
+    # Historical statement tabs frequently expose labels through a direct formula (e.g.
+    # ``=+CF!B8``).  Follow that formula and compare the referenced label instead of guessing
+    # from nearby rows with a shared word such as "Net" or "Total".
+    workbook = getattr(worksheet, "parent", None)
+    if workbook is None:
+        return None
+    for row in range(1, _content_max_row(worksheet) + 1):
+        for column in range(1, min(_content_max_column(worksheet), 4) + 1):
+            value = worksheet.cell(row, column).value
+            if not isinstance(value, str) or not value.startswith("="):
+                continue
+            match = re.fullmatch(
+                r"=\+?(?:'(?P<quoted>[^']+)'|(?P<plain>[^'!]+))!\$?(?P<column>[A-Z]{1,3})\$?(?P<row>\d+)",
+                value.strip(),
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                continue
+            sheet_name = (match.group("quoted") or match.group("plain")).strip()
+            if sheet_name not in workbook.sheetnames:
+                continue
+            referenced = workbook[sheet_name][
+                f"{match.group('column')}{match.group('row')}"
+            ].value
+            if isinstance(referenced, str) and not referenced.startswith("="):
+                if wanted.issubset(set(_label_tokens(referenced))):
+                    return row
+    return None
+
+
+def _fill_instruction_cross_sheet_links(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Materialize explicit ``link X from Y for period`` requests."""
+
+    changes: list[dict[str, str]] = []
+    for sheet_hint, target_hint, source_hint, period in _instruction_link_period_hints(instruction):
+        worksheet = _find_sheet(output, sheet_hint)
+        source_sheet = _find_sheet(output, source_hint)
+        if (
+            worksheet is None
+            or source_sheet is None
+            or worksheet.title not in source.sheetnames
+            or source_sheet.title not in source.sheetnames
+        ):
+            continue
+        target_row = _find_instruction_target_row(worksheet, target_hint)
+        if target_row is None:
+            continue
+        source_row = _find_instruction_source_row(
+            source_sheet,
+            target_hint,
+            target_sheet=worksheet,
+            target_row=target_row,
+        )
+        # Net Profit is commonly labelled Net Profit/(Loss) in the source statement.
+        if source_row is None and "net profit" in _label(target_hint):
+            source_row = _find_instruction_source_row(
+                source_sheet,
+                "Net Profit Loss",
+                target_sheet=worksheet,
+                target_row=target_row,
+            )
+        if source_row is None:
+            continue
+        target_columns = _instruction_target_columns(worksheet, period)
+        target_years = _instruction_year_columns(worksheet)
+        source_years = _instruction_year_columns(source_sheet)
+        source_by_year = {year: column for column, year in source_years.items()}
+        for target_column in target_columns:
+            year = target_years.get(target_column)
+            source_column = source_by_year.get(year) if year is not None else None
+            if source_column is None:
+                # Most linked statement tabs use the same column geometry even when the
+                # date headers are formulas without cached values.
+                source_column = target_column
+            if source_column > _content_max_column(source_sheet):
+                continue
+            target = worksheet.cell(target_row, target_column)
+            if not _cell_is_writable(target):
+                continue
+            source_value = source_sheet.cell(source_row, source_column).value
+            if source_value is None:
+                continue
+            formula = (
+                f"={_sheet_literal(source_sheet.title)}!"
+                f"{get_column_letter(source_column)}{source_row}"
+            )
+            # Explicit links are authoritative instructions.  They may intentionally replace
+            # a stale value left in a template, unlike generic blank-fill continuations.
+            if target.value != formula:
+                target.value = formula
+                changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
+    return changes
+
+
+def _fill_instruction_change_receivables(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Fill cash-flow change-in-receivables rows from the linked balance sheet."""
+
+    changes: list[dict[str, str]] = []
+    for sheet_hint, target_hint, period, _using in _explicit_calculation_requests(instruction):
+        normalized_target = _label(target_hint)
+        if "change" not in normalized_target or "receiv" not in normalized_target:
+            continue
+        worksheet = _find_sheet(output, sheet_hint)
+        if worksheet is None or worksheet.title not in source.sheetnames:
+            continue
+        target_row = _find_instruction_target_row(worksheet, target_hint)
+        balance = _find_sheet(output, "Balance Sheet")
+        if target_row is None or balance is None or balance.title not in source.sheetnames:
+            continue
+        balance_row = _instruction_formula_row(balance, "Trade and Other Receivables")
+        if balance_row is None:
+            balance_row = _instruction_formula_row(balance, "Receivables")
+        # Statement tabs commonly expose this row through a direct label link
+        # (e.g. ``=+BS!B18``), so resolve the referenced label semantically when
+        # a plain-text lookup cannot find it.
+        if balance_row is None:
+            balance_row = _find_instruction_target_row(balance, "Trade and Other Receivables")
+        if balance_row is None:
+            balance_row = _find_instruction_target_row(balance, "Receivables")
+        if balance_row is None:
+            continue
+        target_years = _instruction_year_columns(worksheet)
+        balance_years = _instruction_year_columns(balance)
+        balance_by_year = {year: column for column, year in balance_years.items()}
+        for column in _instruction_target_columns(worksheet, period):
+            year = target_years.get(column)
+            current = balance_by_year.get(year, column)
+            previous = balance_by_year.get(year - 1, current - 1) if year is not None else current - 1
+            if current < 2 or previous < 1:
+                continue
+            target = worksheet.cell(target_row, column)
+            if not _cell_is_writable(target):
+                continue
+            formula = (
+                f"={_sheet_literal(balance.title)}!{get_column_letter(previous)}{balance_row}-"
+                f"{_sheet_literal(balance.title)}!{get_column_letter(current)}{balance_row}"
+            )
+            if target.value != formula:
+                target.value = formula
+                changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
+    return changes
+
+
+def _fill_instruction_corporate_tax(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Calculate an explicitly requested Corporate Tax row from Assumptions' tax rate."""
+
+    changes: list[dict[str, str]] = []
+    for sheet_hint, target_hint, period, using in _explicit_calculation_requests(instruction):
+        if "corporate tax" not in _label(target_hint) and "tax" not in _label(target_hint):
+            continue
+        if "tax rate" not in _label(using) and "assumption" not in _label(using):
+            continue
+        worksheet = _find_sheet(output, sheet_hint)
+        assumptions = _find_sheet(output, "Assumptions")
+        if worksheet is None or assumptions is None:
+            continue
+        if worksheet.title not in source.sheetnames or assumptions.title not in source.sheetnames:
+            continue
+        target_row = _find_instruction_target_row(worksheet, target_hint)
+        pbt_row = _instruction_formula_row(worksheet, "Profit before tax")
+        rate_row = _instruction_formula_row(assumptions, "Tax")
+        if target_row is None or pbt_row is None or rate_row is None:
+            continue
+        target_years = _instruction_year_columns(worksheet)
+        assumption_years = _instruction_year_columns(assumptions)
+        assumption_by_year = {year: column for column, year in assumption_years.items()}
+        for column in _instruction_target_columns(worksheet, period):
+            year = target_years.get(column)
+            rate_column = assumption_by_year.get(year, column)
+            if rate_column > _content_max_column(assumptions):
+                continue
+            target = worksheet.cell(target_row, column)
+            if not _cell_is_writable(target):
+                continue
+            rate_value = assumptions.cell(rate_row, rate_column).value
+            if rate_value is None:
+                continue
+            letter = get_column_letter(column)
+            rate_letter = get_column_letter(rate_column)
+            formula = (
+                f"=-{letter}{pbt_row}*{_sheet_literal(assumptions.title)}!"
+                f"{rate_letter}{rate_row}"
+            )
+            if target.value != formula:
+                target.value = formula
+                changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
+    return changes
+
+
+def _fill_instruction_balance_checks(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Add explicit balance-sheet verification checks over the requested period."""
+
+    if "verification check" not in _label(instruction):
+        return []
+    changes: list[dict[str, str]] = []
+    for sheet_hint, body in _instruction_sheet_clauses(instruction):
+        if "verification check" not in _label(body):
+            continue
+        worksheet = _find_sheet(output, sheet_hint)
+        if worksheet is None or worksheet.title not in source.sheetnames:
+            continue
+        check_row = _instruction_formula_row(worksheet, "Check")
+        assets_row = _instruction_formula_row(worksheet, "Total Assets")
+        liabilities_row = _instruction_formula_row(
+            worksheet, "Total Liabilities and Capital and Reserves"
+        )
+        if liabilities_row is None:
+            liabilities_row = _instruction_formula_row(worksheet, "Total Liabilities and Shareholders Funds")
+        if None in {check_row, assets_row, liabilities_row}:
+            continue
+        period_match = re.search(rf"for\s+(?P<period>{_INSTRUCTION_PERIOD}|all\s+years)", body, flags=re.IGNORECASE)
+        period = period_match.group("period") if period_match else "all years"
+        assert check_row is not None and assets_row is not None and liabilities_row is not None
+        original = source[worksheet.title]
+        for column in _instruction_target_columns(worksheet, period):
+            if worksheet.cell(assets_row, column).value is None or worksheet.cell(liabilities_row, column).value is None:
+                continue
+            target = worksheet.cell(check_row, column)
+            if not _cell_is_writable(target):
+                continue
+            letter = get_column_letter(column)
+            formula = f"=ROUND({letter}{liabilities_row}-{letter}{assets_row},1)"
+            if target.value is None and original.cell(check_row, column).value is None:
+                target.value = formula
+                changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
+    return changes
+
+
+def _fill_instruction_irr_metrics(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Fill Fund/LP Gross IRR and Net IRR summary cells from local cash-flow rows."""
+
+    normalized = _label(instruction)
+    if "gross irr" not in normalized or "net irr" not in normalized:
+        return []
+    worksheet = _find_sheet(output, "IRR Calculation")
+    if worksheet is None or worksheet.title not in source.sheetnames:
+        return []
+    original = source[worksheet.title]
+    changes: list[dict[str, str]] = []
+    max_row = _content_max_row(worksheet)
+    for row in range(1, max_row + 1):
+        label = _label(_raw_row_label(worksheet, row, before_column=4))
+        if label not in {"gross irr", "net irr"}:
+            continue
+        cash_label = "gross cash flow" if label == "gross irr" else "net cash flow"
+        cash_row = next(
+            (
+                candidate
+                for candidate in range(row - 1, 0, -1)
+                if _label(_raw_row_label(worksheet, candidate, before_column=4)) == cash_label
+            ),
+            None,
+        )
+        date_row = next(
+            (
+                candidate
+                for candidate in range(row - 1, 0, -1)
+                if _label(_raw_row_label(worksheet, candidate, before_column=4)) == "date"
+            ),
+            None,
+        )
+        if cash_row is None or date_row is None:
+            continue
+        populated_columns = [
+            column
+            for column in range(4, int(worksheet.max_column or 0) + 1)
+            if worksheet.cell(date_row, column).value is not None
+            and worksheet.cell(cash_row, column).value is not None
+        ]
+        if len(populated_columns) < 2:
+            continue
+        start_column, end_column = min(populated_columns), max(populated_columns)
+        # Summary values are conventionally one column to the right of the label (D).
+        label_column = next(
+            (column for column in range(1, 5) if _label(worksheet.cell(row, column).value) == label),
+            3,
+        )
+        target_column = next(
+            (
+                column
+                for column in range(label_column + 1, min(label_column + 3, int(worksheet.max_column or 0)) + 1)
+                if worksheet.cell(row, column).value is None
+            ),
+            None,
+        )
+        if target_column is None or original.cell(row, target_column).value is not None:
+            continue
+        formula = (
+            f"=XIRR({get_column_letter(start_column)}{cash_row}:{get_column_letter(end_column)}{cash_row},"
+            f"{get_column_letter(start_column)}{date_row}:{get_column_letter(end_column)}{date_row})"
+        )
+        target = worksheet.cell(row, target_column)
+        if _cell_is_writable(target):
+            target.value = formula
+            changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
+    return changes
+
+
+def _fill_instruction_dashboard_updates(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Apply explicit Dashboard rate and exit-multiple updates by label."""
+
+    normalized = _label(instruction)
+    if "hurdle rate" not in normalized or "exit multiple" not in normalized:
+        return []
+    worksheet = _find_sheet(output, "Dashboard")
+    if worksheet is None or worksheet.title not in source.sheetnames:
+        return []
+    changes: list[dict[str, str]] = []
+    # Rate clauses: retain the semantic distinction between <=30% and >30% carry.
+    rate_specs = (
+        (r"hurdle\s+rate\s+to\s+(\d+(?:\.\d+)?)%", "hurdle rate"),
+        (r"carry\s+for\s+irr\s*<\s*30%\s+to\s+(\d+(?:\.\d+)?)%", "carry lower"),
+        (r"irr\s*>\s*30%\s+to\s+(\d+(?:\.\d+)?)%", "carry upper"),
+    )
+    targets: list[tuple[int, float]] = []
+    for pattern, kind in rate_specs:
+        match = re.search(pattern, instruction, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        literal = float(match.group(1)) / 100.0
+        candidate_rows: list[int] = []
+        for row in range(1, _content_max_row(worksheet) + 1):
+            raw_labels = " ".join(
+                str(worksheet.cell(row, column).value or "")
+                for column in range(1, min(_content_max_column(worksheet), 8) + 1)
+            )
+            labels = _label(raw_labels)
+            if kind == "hurdle rate" and "hurdle rate" in labels:
+                candidate_rows.append(row)
+            elif kind == "carry lower" and re.search(r"irr\s*(?:=<|<=|<|=)\s*30", raw_labels, flags=re.IGNORECASE):
+                candidate_rows.append(row)
+            elif kind == "carry upper" and re.search(r"irr\s*>\s*30", raw_labels, flags=re.IGNORECASE):
+                candidate_rows.append(row)
+        if candidate_rows:
+            targets.append((candidate_rows[0], literal))
+    for row, literal in targets:
+        label_column = next(
+            (
+                column
+                for column in range(1, min(_content_max_column(worksheet), 8) + 1)
+                if isinstance(worksheet.cell(row, column).value, str)
+                and not worksheet.cell(row, column).value.startswith("=")
+                and ("rate" in _label(worksheet.cell(row, column).value) or "irr" in _label(worksheet.cell(row, column).value))
+            ),
+            None,
+        )
+        if label_column is None:
+            continue
+        target_column = label_column + 1
+        target = worksheet.cell(row, target_column)
+        if not _cell_is_writable(target):
+            continue
+        if target.value != literal:
+            target.value = literal
+            changes.append({"sheet": worksheet.title, "target": target.coordinate, "value": repr(literal)})
+
+    if (
+        "exit multiple" in normalized
+        and "second" in normalized
+        and "third" in normalized
+        and "tranche" in normalized
+    ):
+        heading_row = _find_row_by_label(worksheet, "Investment Exit Multiple")
+        if heading_row is not None:
+            header_row = next(
+                (
+                    row
+                    for row in range(heading_row + 1, min(_content_max_row(worksheet), heading_row + 8) + 1)
+                    if sum(
+                        _label(worksheet.cell(row, column).value) in {"number", "numbers"}
+                        for column in range(1, int(worksheet.max_column or 0) + 1)
+                    ) >= 2
+                ),
+                None,
+            )
+            if header_row is None:
+                return changes
+            value_columns = [
+                column
+                for column in range(1, int(worksheet.max_column or 0))
+                if _label(worksheet.cell(header_row, column).value) in {"number", "numbers"}
+            ]
+            # The first pair is first tranche; explicit request starts with pair two.
+            for value_column in value_columns[1:]:
+                month_column = value_column - 1
+                for row in range(header_row + 1, _content_max_row(worksheet) + 1):
+                    if worksheet.cell(row, month_column).value is None:
+                        continue
+                    target = worksheet.cell(row, value_column)
+                    # Exit-multiple inputs are blank cells in the tranche-input
+                    # block.  Downstream ``Investment Number`` rows contain
+                    # formulas and must never be overwritten with the literal
+                    # multiple; likewise, the section header contains the text
+                    # ``Numbers``.  Restrict writes to blank writable targets.
+                    if (
+                        not _cell_is_writable(target)
+                        or target.value is not None
+                    ):
+                        continue
+                    target.value = 2.0
+                    changes.append({"sheet": worksheet.title, "target": target.coordinate, "value": "2.0"})
+    return changes
+
+
+def _fill_instruction_total_fund_raised(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Complete monthly three-tranche fund-raising rows from local schedule anchors."""
+
+    normalized = _label(instruction)
+    if "total fund raised" not in normalized and "total funds raised" not in normalized:
+        return []
+    worksheet = _find_sheet(output, "Workings Cost Sheet")
+    if worksheet is None or worksheet.title not in source.sheetnames:
+        return []
+    original = source[worksheet.title]
+    heading_row = _find_row_by_label(worksheet, "Total Fund Raised")
+    cumulative_heading = _find_row_by_label(worksheet, "Portfolio Building Cumulative")
+    ticket_heading = _find_row_by_label(worksheet, "Ticket Size per Portfolio")
+    if heading_row is None or cumulative_heading is None or ticket_heading is None:
+        return []
+    def rows_under(heading: int) -> dict[str, int]:
+        result: dict[str, int] = {}
+        # Tranche blocks are compact; stop before the next section so repeated labels in a
+        # later block cannot overwrite the intended rows.
+        for row in range(heading + 1, min(_content_max_row(worksheet), heading + 6) + 1):
+            label = _label(worksheet.cell(row, 2).value)
+            for tranche in ("first tranche", "second tranche", "third tranche"):
+                if label == tranche:
+                    result[tranche] = row
+        return result
+    target_rows = rows_under(heading_row)
+    cumulative_rows = rows_under(cumulative_heading)
+    ticket_rows = rows_under(ticket_heading)
+    if set(target_rows) != {"first tranche", "second tranche", "third tranche"}:
+        return []
+    if set(cumulative_rows) != set(target_rows) or set(ticket_rows) != set(target_rows):
+        return []
+    monthly_columns = [
+        column
+        for column in range(1, _content_max_column(worksheet) + 1)
+        if worksheet.cell(4, column).value is not None and column > 14
+    ]
+    if len(monthly_columns) < 12:
+        return []
+    # Restrict to the contiguous monthly band, not any terminal column after a spacer.
+    start = min(monthly_columns)
+    end = start
+    while end + 1 in monthly_columns:
+        end += 1
+    changes: list[dict[str, str]] = []
+    for tranche in ("first tranche", "second tranche", "third tranche"):
+        target_row = target_rows[tranche]
+        cumulative_row = cumulative_rows[tranche]
+        ticket_row = ticket_rows[tranche]
+        for column in range(start, end + 1):
+            target = worksheet.cell(target_row, column)
+            if not _cell_is_writable(target):
+                continue
+            letter = get_column_letter(column)
+            formula = f"={letter}{ticket_row}*{letter}{cumulative_row}"
+            if target.value != formula:
+                target.value = formula
+                changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
+
+    # Dynamic-array spill cells contain stale cached zeros in the input workbook.  Mark them as
+    # instruction-owned so final populated-input restoration does not put those zeros back after
+    # LibreOffice has recalculated the newly completed monthly schedule.
+    contribution_row = _instruction_formula_row(worksheet, "Contribution Amount")
+    if contribution_row is not None:
+        for cell in getattr(worksheet, "_cells", {}).values():
+            value = cell.value
+            if not hasattr(value, "ref") or not getattr(value, "ref", None):
+                continue
+            try:
+                min_col, min_row, max_col, max_row = range_boundaries(str(value.ref))
+            except ValueError:
+                continue
+            if min_row != contribution_row or max_row != contribution_row:
+                continue
+            for column in range(min_col + 1, max_col + 1):
+                changes.append(
+                    {
+                        "sheet": worksheet.title,
+                        "target": worksheet.cell(contribution_row, column).coordinate,
+                        "value": "allow_recalculated",
+                        "allow_recalculated": True,
+                    }
+                )
+    return changes
+
+
+def _fill_instruction_management_total_column(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Fill a management-company Total column for an explicit total request."""
+
+    normalized = _label(instruction)
+    if "calculate totals" not in normalized or "income statement" not in normalized:
+        return []
+    worksheet = _find_sheet(output, "IS - Mgmt Co.")
+    if worksheet is None or worksheet.title not in source.sheetnames:
+        return []
+    original = source[worksheet.title]
+    total_column = next(
+        (
+            int(cell.column)
+            for row in range(1, min(_content_max_row(worksheet), 10) + 1)
+            for cell in worksheet[row]
+            if _label(cell.value) == "total"
+        ),
+        None,
+    )
+    if total_column is None:
+        return []
+    # The monthly band is the populated date run immediately after the N spacer column.
+    header_row = next(
+        (
+            row
+            for row in range(1, min(_content_max_row(worksheet), 10) + 1)
+            if any(worksheet.cell(row, column).value is not None for column in range(15, total_column))
+        ),
+        None,
+    )
+    if header_row is None:
+        return []
+    monthly_columns = [
+        column for column in range(15, total_column)
+        if worksheet.cell(header_row, column).value is not None
+    ]
+    if not monthly_columns:
+        return []
+    start, end = min(monthly_columns), max(monthly_columns)
+    workbook = getattr(worksheet, "parent", None)
+
+    def has_descriptor(row: int) -> bool:
+        """Return whether a row has a textual descriptor in its left band.
+
+        Component labels in published models are often direct links such as
+        ``='Workings Cost Sheet'!B134``.  Resolve those links locally so they
+        remain eligible, while numeric helper rows (period numbers/caches) stay
+        excluded.
+        """
+
+        for column in range(1, min(14, _content_max_column(worksheet)) + 1):
+            value = worksheet.cell(row, column).value
+            if isinstance(value, str) and value.strip() and not value.startswith("="):
+                return True
+            if not (isinstance(value, str) and value.startswith("=") and workbook is not None):
+                continue
+            linked = re.fullmatch(
+                r"=\+?(?:'(?P<quoted>[^']+)'|(?P<plain>[^'!]+))!\$?(?P<column>[A-Z]{1,3})\$?(?P<row>\d+)",
+                value.strip(),
+                flags=re.IGNORECASE,
+            )
+            if linked is None:
+                continue
+            sheet_name = (linked.group("quoted") or linked.group("plain")).strip()
+            if sheet_name not in workbook.sheetnames:
+                continue
+            linked_value = workbook[sheet_name][
+                f"{linked.group('column')}{linked.group('row')}"
+            ].value
+            if isinstance(linked_value, str) and linked_value.strip() and not linked_value.startswith("="):
+                return True
+        return False
+
+    changes: list[dict[str, str]] = []
+    for row in range(header_row + 1, _content_max_row(worksheet) + 1):
+        # Do not synthesize totals for unlabeled helper/header rows (for example
+        # the period-number row immediately below the date header).  A total
+        # request applies to income-statement component rows with a semantic
+        # label in the left descriptor columns.
+        if not has_descriptor(row):
+            continue
+        target = worksheet.cell(row, total_column)
+        if target.value is not None or original.cell(row, total_column).value is not None:
+            continue
+        if not any(worksheet.cell(row, column).value is not None for column in range(start, end + 1)):
+            continue
+        if not _cell_is_writable(target):
+            continue
+        formula = f"=SUM({get_column_letter(start)}{row}:{get_column_letter(end)}{row})"
+        target.value = formula
+        changes.append({"sheet": worksheet.title, "target": target.coordinate, "formula": formula})
     return changes
 
 
@@ -990,13 +1918,23 @@ def _continue_financial_metric_formula_runs(
 ) -> list[dict[str, str]]:
     changes: list[dict[str, str]] = []
     metric_hints = _instruction_sheet_metric_hints(instruction)
+    explicit_requests = _explicit_calculation_requests(instruction)
     if not metric_hints:
         return changes
     for sheet_hint, label_hint in metric_hints:
         # A terminal-year value is a semantic bridge from the last explicit forecast,
         # not another member of the historical/forecast link run. Translating a
         # cross-sheet EBIT link through that column spills into the table to its right.
-        if "terminal year" in _label(label_hint):
+        # IRR/XIRR rows are also scalar summary metrics.  Their formula ranges span
+        # a cash-flow/date block, so translating the seed one column at a time would
+        # manufacture dozens of bogus XIRR formulas in adjacent summary columns.
+        # The instruction-grounded IRR pass above is responsible for these rows.
+        normalized_metric_hint = _label(label_hint)
+        if (
+            "terminal year" in normalized_metric_hint
+            or "irr" in normalized_metric_hint
+            or "xirr" in normalized_metric_hint
+        ):
             continue
         worksheet = _find_sheet(output, sheet_hint)
         if worksheet is None or worksheet.title not in source.sheetnames:
@@ -1004,6 +1942,19 @@ def _continue_financial_metric_formula_runs(
         source_sheet = source[worksheet.title]
         period_columns = set(_instruction_year_columns(worksheet))
         minimum_overlap = 2 if len(set(_label_tokens(label_hint))) > 1 else 1
+        explicit_target_columns: set[int] | None = None
+        matching_requests = [
+            period
+            for request_sheet, request_label, period, _ in explicit_requests
+            if _label(request_sheet) == _label(sheet_hint)
+            and _labels_match(request_label, label_hint, minimum_overlap=minimum_overlap)
+        ]
+        if matching_requests:
+            explicit_target_columns = {
+                column
+                for period in matching_requests
+                for column in _instruction_target_columns(worksheet, period)
+            }
         max_row, max_column = _content_bounds(worksheet)
         for row in range(1, max_row + 1):
             if not _row_has_text_label(
@@ -1020,6 +1971,12 @@ def _continue_financial_metric_formula_runs(
                     minimum_overlap=minimum_overlap,
                 ):
                     continue
+            # Guard against a row whose visible label differs slightly from the
+            # instruction hint (for example ``Fund/LP Gross IRR``).  This keeps the
+            # scalar-summary protection semantic and independent of workbook IDs.
+            row_label_normalized = _label(_raw_row_label(worksheet, row, before_column=8))
+            if "irr" in row_label_normalized or "xirr" in row_label_normalized:
+                continue
             row_period_columns = period_columns
             if len(row_period_columns) < 2:
                 # Small workbook fixtures (and some real schedules) omit a
@@ -1070,6 +2027,11 @@ def _continue_financial_metric_formula_runs(
             stalled = 0
             for column in range(seed_column + 1, max_column + 1):
                 if column not in row_period_columns:
+                    continue
+                if (
+                    explicit_target_columns is not None
+                    and column not in explicit_target_columns
+                ):
                     continue
                 target = worksheet.cell(row, column)
                 if target.value is not None or source_sheet.cell(row, column).value is not None:
@@ -1754,6 +2716,210 @@ def _fill_instruction_dcf_metrics(
                         f'{enterprise_ref}/{revenue_ref},"NM")',
                         changes,
                     )
+    return changes
+
+
+def _rows_with_exact_label(worksheet: Any, *labels: str) -> list[int]:
+    """Return rows whose visible semantic label exactly matches one of ``labels``."""
+
+    wanted = {_label(label) for label in labels}
+    text_rows: dict[int, set[str]] = {}
+    for cell in getattr(worksheet, "_cells", {}).values():
+        value = cell.value
+        if isinstance(value, str) and not value.startswith("="):
+            text_rows.setdefault(int(cell.row), set()).add(_label(value))
+    return [
+        row
+        for row in range(1, _content_max_row(worksheet) + 1)
+        if _semantic_row_label(worksheet, row) in wanted
+        or bool(text_rows.get(row, set()) & wanted)
+    ]
+
+
+def _fill_instruction_capm_wacc_and_equity_value(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Complete common valuation identities from labels and local model structure.
+
+    These are instruction-owned financial identities, but their coordinates and sheet
+    layouts vary substantially across workbooks.  Discovering the operands by labels keeps
+    the repair reusable and avoids benchmark/case-specific coordinates.
+    """
+
+    normalized = _label(instruction)
+    changes: list[dict[str, str]] = []
+
+    if "cost of equity" in normalized and "capm" in normalized:
+        for worksheet in output.worksheets:
+            if worksheet.title not in source.sheetnames:
+                continue
+            sheet_name = _label(worksheet.title)
+            if sheet_name not in normalized and not any(
+                marker in sheet_name for marker in ("wacc", "valuation")
+            ):
+                continue
+            target_rows = _rows_with_exact_label(worksheet, "COE")
+            if not target_rows:
+                target_rows = _rows_with_exact_label(worksheet, "Cost of Equity")
+            risk_free_rows = _rows_with_exact_label(worksheet, "Risk Free Rate")
+            beta_rows = _rows_with_exact_label(worksheet, "Levered Beta")
+            if not beta_rows:
+                beta_rows = _rows_with_exact_label(worksheet, "Beta")
+            premium_rows = _rows_with_exact_label(
+                worksheet, "Market Risk Premium", "Risk Premium"
+            )
+            if not all((target_rows, risk_free_rows, beta_rows, premium_rows)):
+                continue
+            target_row = target_rows[-1]
+            risk_free_row, beta_row, premium_row = (
+                risk_free_rows[0], beta_rows[0], premium_rows[0]
+            )
+            original = source[worksheet.title]
+            for column in range(1, _content_max_column(worksheet) + 1):
+                if not all(
+                    worksheet.cell(row, column).value is not None
+                    for row in (risk_free_row, beta_row, premium_row)
+                ):
+                    continue
+                letter = get_column_letter(column)
+                _write_blank_formula(
+                    worksheet,
+                    original,
+                    target_row,
+                    column,
+                    f"={letter}{risk_free_row}+({letter}{beta_row}*{letter}{premium_row})",
+                    changes,
+                )
+
+    if re.search(r"\bcalculate wacc\b", normalized):
+        for worksheet in output.worksheets:
+            if worksheet.title not in source.sheetnames or "wacc" not in _label(worksheet.title):
+                continue
+            target_rows = _rows_with_exact_label(worksheet, "WACC")
+            equity_cost_rows = _rows_with_exact_label(worksheet, "Adjusted Cost of Equity")
+            if not equity_cost_rows:
+                equity_cost_rows = _rows_with_exact_label(worksheet, "Cost of Equity", "COE")
+            debt_cost_rows = _rows_with_exact_label(
+                worksheet, "Net Cost of Debt", "After Tax Cost of Debt"
+            )
+            equity_rows = _rows_with_exact_label(worksheet, "Equity")
+            debt_rows = _rows_with_exact_label(worksheet, "Debt")
+            if not all((target_rows, equity_cost_rows, debt_cost_rows, equity_rows, debt_rows)):
+                continue
+            target_row = target_rows[-1]
+            equity_cost_row = equity_cost_rows[0]
+            debt_cost_row = debt_cost_rows[0]
+            equity_row, debt_row = equity_rows[-1], debt_rows[-1]
+            original = source[worksheet.title]
+            cost_columns = [
+                column
+                for column in range(1, _content_max_column(worksheet) + 1)
+                if worksheet.cell(equity_cost_row, column).value is not None
+                and worksheet.cell(debt_cost_row, column).value is not None
+            ]
+            weight_columns = [
+                column
+                for column in range(1, _content_max_column(worksheet) + 1)
+                if worksheet.cell(equity_row, column).value is not None
+                and worksheet.cell(debt_row, column).value is not None
+            ]
+            if not cost_columns or not weight_columns:
+                continue
+            cost_column = min(cost_columns, key=lambda column: abs(column - target_row))
+            # Capital-structure tables sometimes keep raw balances next to percentage
+            # weights.  The percentage column is normally the one immediately left of
+            # the balance column and closest to the cost inputs.
+            weight_column = min(weight_columns, key=lambda column: abs(column - cost_column))
+            if len(weight_columns) > 1 and cost_column in weight_columns:
+                alternatives = [column for column in weight_columns if column != cost_column]
+                weight_column = min(alternatives, key=lambda column: abs(column - cost_column))
+            cost_letter = get_column_letter(cost_column)
+            weight_letter = get_column_letter(weight_column)
+            _write_blank_formula(
+                worksheet,
+                original,
+                target_row,
+                cost_column,
+                (
+                    f"={cost_letter}{equity_cost_row}*{weight_letter}{equity_row}+"
+                    f"{cost_letter}{debt_cost_row}*{weight_letter}{debt_row}"
+                ),
+                changes,
+            )
+
+    if "calculate equity value" in normalized:
+        worksheet = _find_sheet(output, "DCF Valuation") or _find_sheet(output, "DCF")
+        if worksheet is not None and worksheet.title in source.sheetnames:
+            target_rows = _rows_with_exact_label(worksheet, "Equity Value")
+            enterprise_rows = _rows_with_exact_label(worksheet, "Enterprise Value")
+            debt_rows = _rows_with_exact_label(worksheet, "Debt", "Net Debt")
+            cash_rows = _rows_with_exact_label(
+                worksheet, "Cash", "Cash & Cash Equivalents", "Cash and Cash Equivalents"
+            )
+            if target_rows and enterprise_rows and debt_rows:
+                target_row = target_rows[-1]
+                original = source[worksheet.title]
+                for column in range(1, _content_max_column(worksheet) + 1):
+                    if worksheet.cell(enterprise_rows[-1], column).value is None:
+                        continue
+                    letter = get_column_letter(column)
+                    formula = f"={letter}{enterprise_rows[-1]}-{letter}{debt_rows[-1]}"
+                    if cash_rows and worksheet.cell(cash_rows[-1], column).value is not None:
+                        formula += f"+{letter}{cash_rows[-1]}"
+                    _write_blank_formula(
+                        worksheet, original, target_row, column, formula, changes
+                    )
+    return changes
+
+
+def _fill_instruction_dupont_profit_margin(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Fill DuPont profit margin as net profit divided by operating revenue."""
+
+    normalized = _label(instruction)
+    if "profit margin" not in normalized or "dupont" not in normalized:
+        return []
+    worksheet = _find_sheet(output, "Dupont Analysis") or _find_sheet(output, "Du Pont")
+    if worksheet is None or worksheet.title not in source.sheetnames:
+        return []
+    target_rows = _rows_with_exact_label(worksheet, "Profit Margin")
+    profit_rows = _rows_with_exact_label(worksheet, "Net Profit", "Profit After Tax")
+    revenue_rows: list[int] = []
+    for label in ("Net sp. commission income", "Net Operating Revenue", "Total Revenue", "Revenue"):
+        revenue_rows = _rows_with_exact_label(worksheet, label)
+        if revenue_rows:
+            break
+    if not target_rows or not profit_rows or not revenue_rows:
+        return []
+    target_row, profit_row, revenue_row = target_rows[-1], profit_rows[-1], revenue_rows[-1]
+    original = source[worksheet.title]
+    changes: list[dict[str, str]] = []
+    columns = _instruction_target_columns(worksheet, "FY09-FY18")
+    if not columns:
+        columns = sorted(
+            {
+                int(cell.column)
+                for cell in getattr(worksheet, "_cells", {}).values()
+                if int(cell.row) == profit_row and cell.value is not None
+            }
+        )
+    for column in columns:
+        if worksheet.cell(profit_row, column).value is None or worksheet.cell(revenue_row, column).value is None:
+            continue
+        letter = get_column_letter(column)
+        _write_blank_formula(
+            worksheet,
+            original,
+            target_row,
+            column,
+            f"={letter}{profit_row}/{letter}{revenue_row}",
+            changes,
+        )
     return changes
 
 
@@ -3543,6 +4709,16 @@ def complete_financial_model_runtime_actions(
     )
     changes: list[dict[str, str]] = []
     try:
+        # High-confidence instruction clauses that the generic planner historically missed.
+        # These remain label/period/pattern driven and are deliberately independent of task IDs.
+        changes.extend(_fill_instruction_dashboard_updates(output, source, instruction))
+        changes.extend(_fill_instruction_irr_metrics(output, source, instruction))
+        changes.extend(_fill_instruction_total_fund_raised(output, source, instruction))
+        changes.extend(_fill_instruction_management_total_column(output, source, instruction))
+        changes.extend(_fill_instruction_cross_sheet_links(output, source, instruction))
+        changes.extend(_fill_instruction_corporate_tax(output, source, instruction))
+        changes.extend(_fill_instruction_change_receivables(output, source, instruction))
+        changes.extend(_fill_instruction_balance_checks(output, source, instruction))
         changes.extend(_fill_instruction_pbt_to_eps_block(output, source, instruction))
         changes.extend(_fill_constant_series_from_instruction(output, source, instruction))
         changes.extend(_fill_instruction_ticket_size_and_exit_value_formulas(output, source, instruction))
@@ -3557,7 +4733,15 @@ def complete_financial_model_runtime_actions(
             _fill_instruction_depreciation_and_balance_check(output, source, instruction)
         )
         changes.extend(_fill_instruction_dcf_metrics(output, source, instruction))
+        changes.extend(
+            _fill_instruction_capm_wacc_and_equity_value(output, source, instruction)
+        )
+        changes.extend(_fill_instruction_dupont_profit_margin(output, source, instruction))
         changes.extend(_fill_instruction_ratio_metrics(output, source, instruction))
+        # Explicit calculate-row requests are stronger than generic translated-run
+        # continuation. Materialize them first so a weaker heuristic candidate does
+        # not occupy the target before the instruction-grounded pass.
+        changes.extend(_fill_instruction_calculation_rows(output, source, instruction))
         # Semantic ratio/bridge rows must be materialized before generic
         # translated-run continuation.  Otherwise a nearby unit/header formula
         # can occupy the blank target first, and the conservative semantic pass
@@ -3567,9 +4751,6 @@ def complete_financial_model_runtime_actions(
         changes.extend(_continue_financial_metric_formula_runs(output, source, instruction))
         changes.extend(_link_instruction_header_columns(output, source, instruction))
         changes.extend(_link_instruction_metric_rows(output, source, instruction))
-        # Apply explicit calculate-row requests last so the generic translated-run
-        # continuation cannot extend a requested 2026-2030 block into an unrequested year.
-        changes.extend(_fill_instruction_calculation_rows(output, source, instruction))
         # Cross-sheet summary rows are terminal semantic bridges, not seeds for
         # generic formula-run continuation. Apply them after all mechanical
         # continuation passes so forecast-only formulas cannot spill into

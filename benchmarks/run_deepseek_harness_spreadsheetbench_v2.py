@@ -273,6 +273,7 @@ def run_one(
     max_turns: int,
     task_timeout: float,
     recalculate_before_evaluation: bool,
+    defer_evaluation: bool = False,
 ) -> dict[str, Any]:
     category = str(task["_category"])
     task_id = str(task["id"])
@@ -358,7 +359,7 @@ def run_one(
     ready = workbook_is_valid(output_path)
     recalculated = False
     recalculation_error: str | None = None
-    if ready and recalculate_before_evaluation and category != "Visualization":
+    if ready and recalculate_before_evaluation and not defer_evaluation and category != "Visualization":
         backup = task_root / "output.pre-recalc.xlsx"
         if not backup.exists():
             shutil.copy2(output_path, backup)
@@ -366,7 +367,9 @@ def run_one(
         ready = workbook_is_valid(output_path)
 
     model_requests, limit_exceeded = audit_state(audit_path, slug)
-    if ready:
+    if ready and defer_evaluation:
+        status = "generated"
+    elif ready:
         status = "completed"
     elif timed_out:
         status = "timeout"
@@ -412,11 +415,12 @@ def run_one(
         "stderr_log": str(stderr_path),
         "proxy_audit": str(audit_path),
         "recalculated_before_evaluation": recalculated,
+        "evaluation_deferred": bool(ready and defer_evaluation),
     }
     if recalculation_error and not recalculated:
         record["recalculation_error"] = recalculation_error
 
-    if ready and category != "Visualization":
+    if ready and category != "Visualization" and not defer_evaluation:
         try:
             evaluator_output = task_root / f"{task_id}_output.xlsx"
             shutil.copy2(output_path, evaluator_output)

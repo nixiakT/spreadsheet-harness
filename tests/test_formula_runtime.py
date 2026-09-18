@@ -204,6 +204,24 @@ def test_formula_inventory_ignores_literal_error_cells_rewritten_as_formulas(
             destination.writestr(member, payload)
     literal_error = formula_inventory(rewritten_path)
 
+    # Some LibreOffice/openpyxl combinations omit the error type attribute on
+    # the rewritten formula cell.  The literal expression is still a cached
+    # value representation, not a user-authored formula, and must be ignored
+    # identically.
+    no_type_path = tmp_path / "literal-error-rewritten-no-type.xlsx"
+    with zipfile.ZipFile(workbook_path) as source, zipfile.ZipFile(
+        no_type_path, "w"
+    ) as destination:
+        for member in source.infolist():
+            payload = source.read(member.filename)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                payload = payload.replace(
+                    b'<c r="A1"><f>#N/A</f><v /></c>',
+                    b'<c r="A1"><f>#N/A</f><v>#N/A</v></c>',
+                )
+            destination.writestr(member, payload)
+    assert formula_inventory(no_type_path).cells == {}
+
     # A genuine error-producing formula remains auditable; only a literal error
     # cell rewritten by a recalculation backend is excluded.
     _save_formula_workbook(workbook_path, "=NA()")

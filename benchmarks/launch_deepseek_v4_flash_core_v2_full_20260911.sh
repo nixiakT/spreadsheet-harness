@@ -11,6 +11,8 @@ base_url="${BASE_URL:-http://10.130.138.46:8010/v1}"
 api_key_file="${API_KEY_FILE:-/tmp/spreadsheet-harness-litellm.key}"
 model="${MODEL:-DeepSeek-V4-Flash}"
 composition="${COMPOSITION:-spreadsheet-harness-core}"
+composition_file="${COMPOSITION_FILE:-}"
+task_wall_timeout="${TASK_WALL_TIMEOUT:-}"
 parallelism="${PARALLELISM:-6}"
 task_ids="${TASK_IDS:-}"
 categories="${CATEGORIES:-}"
@@ -30,10 +32,17 @@ status_file="$run_root/status.tsv"
   echo "PARALLELISM must be a positive integer" >&2
   exit 2
 }
-[[ -n "$composition" ]] || {
-  echo "COMPOSITION must not be empty" >&2
+[[ -n "$composition" || -n "$composition_file" ]] || {
+  echo "COMPOSITION or COMPOSITION_FILE must not be empty" >&2
   exit 2
 }
+if [[ -n "$composition_file" ]]; then
+  composition_file="$(realpath "$composition_file")"
+  [[ -r "$composition_file" ]] || {
+    echo "Missing readable composition file: $composition_file" >&2
+    exit 2
+  }
+fi
 [[ -r "$api_key_file" ]] || {
   echo "Missing readable API key file: $api_key_file" >&2
   exit 2
@@ -154,7 +163,7 @@ if [[ ! -f "$status_file" ]]; then
   printf 'timestamp\ttask_id\tstatus\texit_code\toutput\n' > "$status_file"
 fi
 
-export repo_root dataset base_url api_key_file model composition visual_evaluator skill_root frozen_source_root task_root status_file
+export repo_root dataset base_url api_key_file model composition composition_file visual_evaluator skill_root frozen_source_root task_root status_file task_wall_timeout
 xargs -P "$parallelism" -d '\n' -I '{}' bash -c '
   set -uo pipefail
   line="$1"
@@ -179,11 +188,15 @@ PY
     exit 0
   fi
 
+  composition_args=(--composition "ours=$composition")
+  if [[ -n "$composition_file" ]]; then
+    composition_args=(--composition-file "ours=$composition_file")
+  fi
   common=(
     --dataset "$dataset"
     --task-id "$task_id"
     --arm ours
-    --composition "ours=$composition"
+    "${composition_args[@]}"
     --skill-root "$skill_root"
     --output "$output"
     --max-model-calls 50
@@ -213,7 +226,12 @@ PY
       --category "$category" "${common[@]}")
   fi
 
-  if (cd "$frozen_source_root" && "${command[@]}") > "$log" 2>&1; then
+  if [[ -n "$task_wall_timeout" ]]; then
+    execute=(timeout --signal=TERM --kill-after=60 "$task_wall_timeout" "${command[@]}")
+  else
+    execute=("${command[@]}")
+  fi
+  if (cd "$frozen_source_root" && "${execute[@]}") > "$log" 2>&1; then
     code=0
     status=complete
   else

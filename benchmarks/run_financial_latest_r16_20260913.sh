@@ -63,7 +63,7 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(1)
 valid = (
     len(rows) == 1
-    and rows[0].get("outcome_kind") == "scored"
+    and rows[0].get("outcome_kind") in {"scored", "scored_after_provider_failure"}
     and isinstance(rows[0].get("official_score"), dict)
 )
 raise SystemExit(0 if valid else 1)
@@ -99,7 +99,7 @@ for item in json.loads(Path("benchmarks/data/spreadsheetbench-v2/Financial_Model
         rows = []
     valid = (
         len(rows) == 1
-        and rows[0].get("outcome_kind") == "scored"
+        and rows[0].get("outcome_kind") in {"scored", "scored_after_provider_failure"}
         and isinstance(rows[0].get("official_score"), dict)
     )
     if not valid:

@@ -61,6 +61,7 @@ _REPLAYABLE_TOOLS = frozenset(
         "manage_sheet",
         "undo_last",
         "code_interpreter",
+        "bash",
     }
 )
 V1_RUN_SCHEMA = "spreadsheetbench-v1-sibling-replay-run-v1"
@@ -330,7 +331,7 @@ def successful_v1_replay_calls(trajectory_path: str | Path) -> list[dict[str, An
         result = payload.get("result")
         if not isinstance(result, dict) or result.get("ok") is not True:
             continue
-        if tool_name == "code_interpreter" and result.get("workbook_changed") is not True:
+        if tool_name in {"code_interpreter", "bash"} and result.get("workbook_changed") is not True:
             continue
         calls.append({"name": tool_name, "arguments": arguments})
     if pending is not None:
@@ -364,7 +365,7 @@ def replay_v1_calls(
         )
     registry = SpreadsheetToolRegistry(
         session,
-        enable_code=any(call.get("name") == "code_interpreter" for call in calls),
+        enable_code=any(call.get("name") in {"code_interpreter", "bash"} for call in calls),
         require_code_isolation=require_code_isolation,
     )
     replayed = 0
@@ -406,19 +407,23 @@ def v1_planner_replay_plan(
     agent_result: Mapping[str, Any],
     trajectory_path: str | Path,
 ) -> str | None:
-    """Return the case-1 planner text only when its safe actions were applied."""
+    """Return the case-1 planner text only when its safe actions were verified."""
 
-    applied = False
+    verified = False
     for raw_line in Path(trajectory_path).read_text(encoding="utf-8").splitlines():
         if not raw_line.strip():
             continue
         event = json.loads(raw_line)
-        if event.get("event") == "harness.planner_actions.applied":
+        if event.get("event") == "harness.planner_actions.verified":
             payload = event.get("payload")
-            if isinstance(payload, dict) and int(payload.get("count", 0) or 0) > 0:
-                applied = True
+            if (
+                isinstance(payload, dict)
+                and payload.get("fast_path_eligible") is True
+                and int(payload.get("count", 0) or 0) > 0
+            ):
+                verified = True
                 break
-    if not applied:
+    if not verified:
         return None
     stages = agent_result.get("stages")
     if not isinstance(stages, list):
@@ -490,6 +495,7 @@ def _v1_arm_orders(
 def run_spreadsheetbench_v1_comparison(
     *,
     config: ProviderConfig,
+    vision_config: ProviderConfig | None = None,
     dataset_root: str | Path,
     output_dir: str | Path,
     skill_registry: SkillRegistry,
@@ -511,7 +517,10 @@ def run_spreadsheetbench_v1_comparison(
     selected_arms = tuple(str(arm) for arm in arms)
     known_arms = {
         "bare",
+        "paper-vision",
+        "spreadsheet-agent",
         "ours",
+        "spreadsheet-rl-native",
         "spreadsheet-harness-basic",
         "spreadsheet-harness-financial",
     }
@@ -525,6 +534,8 @@ def run_spreadsheetbench_v1_comparison(
         raise HarnessError("Unsupported SpreadsheetBench v1 arm")
     if max_model_calls < max_turns_per_arm:
         raise HarnessError("max_model_calls must be at least max_turns_per_arm")
+    if "spreadsheet-agent" in selected_arms and vision_config is None:
+        raise HarnessError("The spreadsheet-agent arm requires a vision provider")
 
     root = Path(dataset_root).expanduser().resolve(strict=True)
     if _sha256(root / "dataset.json") != V1_DATASET_JSON_SHA256:
@@ -574,6 +585,7 @@ def run_spreadsheetbench_v1_comparison(
             "semantics": "clean-room exact value-only port",
         },
         "provider": config.public_dict(),
+        "vision_provider": vision_config.public_dict() if vision_config is not None else None,
         "arms": list(selected_arms),
         "compositions": compositions,
         "resources": {
@@ -664,6 +676,7 @@ def run_spreadsheetbench_v1_comparison(
             "task_id": task.task_id,
             "arm": arm,
             "model": config.model,
+            "vision_model": vision_config.model if vision_config is not None else None,
             "protocol": V1_RUN_PROTOCOL,
             "manifest_sha256": manifest["manifest_sha256"],
             "run_dir": str(run_root),
@@ -677,7 +690,14 @@ def run_spreadsheetbench_v1_comparison(
                 first_case.input_path,
                 run_root / "case-1",
                 run_id=f"v1-{task.task_id}-{arm}-case-1",
-                recorder_secrets=(config.api_key,),
+                recorder_secrets=tuple(
+                    dict.fromkeys(
+                        (
+                            config.api_key,
+                            *(() if vision_config is None else (vision_config.api_key,)),
+                        )
+                    )
+                ),
             )
             execution_failure: AgentExecutionFailure | None = None
             try:
@@ -694,6 +714,7 @@ def run_spreadsheetbench_v1_comparison(
                     max_turns_per_arm=max_turns_per_arm,
                     composition=specs[arm],
                     task_category=None,
+                    vision_config=vision_config,
                 )
             except AgentExecutionFailure as exc:
                 if exc.agent_result is None:

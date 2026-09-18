@@ -7,12 +7,12 @@ PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 DATASET="$REPO_ROOT/benchmarks/data/spreadsheetbench_912_v0.1"
 SUBSET_FILE="$REPO_ROOT/benchmarks/results/spreadsheetbench-v1-representative-200-seed42/task_ids.txt"
 OUTPUT="$REPO_ROOT/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42"
-API_BASE_URL="http://10.130.138.46:8010/v1"
+API_BASE_URL="http://47.96.153.159:8010/v1"
 API_KEY_FILE="/tmp/spreadsheet-harness-litellm.key"
-MODEL="DeepSeek-V4-Flash"
-ARM="spreadsheet-harness-financial"
-WORKERS=4
-MAX_TURNS=50
+MODEL="${MODEL:-dashscope/deepseek-v4-flash}"
+ARM="${ARM:-spreadsheet-harness-financial}"
+WORKERS="${WORKERS:-4}"
+MAX_TURNS="${MAX_TURNS:-50}"
 MAX_MODEL_CALLS=50
 MAX_TOTAL_TOKENS=10000000
 MAX_OUTPUT_TOKENS=8192
@@ -20,10 +20,10 @@ TASK_TIMEOUT=21600
 REQUEST_TIMEOUT=1800
 LITELLM_TIMEOUT=1800
 REQUEST_RETRIES=5
-SEED=41
-TEMPERATURE=0.0
-TOP_P=1.0
-RESUME=0
+SEED="${SEED:-41}"
+TEMPERATURE="${TEMPERATURE:-0.0}"
+TOP_P="${TOP_P:-1.0}"
+RESUME="${RESUME:-0}"
 
 usage() {
   cat <<'EOF'

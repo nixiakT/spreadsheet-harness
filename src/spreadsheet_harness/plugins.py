@@ -305,6 +305,7 @@ class PluginContract:
     spreadsheet_capabilities: frozenset[SpreadsheetCapability] = frozenset()
     evolution_strategy: EvolutionStrategy | None = None
     edit_policies: tuple[PluginEditPolicy, ...] = ()
+    synthesis_template: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _identifier(self.name, label="plugin name"))
@@ -369,6 +370,16 @@ class PluginContract:
         object.__setattr__(self, "edit_policies", policies)
         if self.evolution_strategy is not None and not self.evolvable_surfaces:
             raise ValueError("A frozen plugin cannot declare an evolution strategy")
+        if self.synthesis_template is not None:
+            object.__setattr__(
+                self,
+                "synthesis_template",
+                _identifier(self.synthesis_template, label="synthesis template"),
+            )
+            if self.kind != "knowledge" or "prompt" not in self.evolvable_surfaces:
+                raise ValueError(
+                    "Synthesis templates must be prompt-evolvable knowledge plugins"
+                )
 
     @property
     def manifest_sha256(self) -> str:
@@ -411,6 +422,7 @@ class PluginContract:
                 else None
             ),
             "edit_policies": [policy.to_dict() for policy in self.edit_policies],
+            "synthesis_template": self.synthesis_template,
         }
 
 
@@ -630,6 +642,7 @@ class PluginExecutionPlan:
     financial_model_runtime: bool
     require_formula_runtime_validation: bool
     repair_date_text: bool
+    debugging_detector: bool
 
     @property
     def load_skills(self) -> bool:
@@ -642,7 +655,7 @@ def execution_plan(composition: ResolvedComposition) -> PluginExecutionPlan:
         if len(composition.plugins) != 1:
             raise HarnessError("The paper workflow is an atomic legacy workflow in plugin v1")
         return PluginExecutionPlan(
-            "paper", None, "none", MappingProxyType({}), None, (), False, False, False
+            "paper", None, "none", MappingProxyType({}), None, (), False, False, False, False
         )
 
     action = composition.provider("action.spreadsheet")
@@ -733,6 +746,7 @@ def execution_plan(composition: ResolvedComposition) -> PluginExecutionPlan:
         composition.provider("knowledge.spreadsheet-financial-model") is not None,
         composition.provider("verification.formula-runtime") is not None,
         composition.provider("repair.date-text") is not None,
+        composition.provider("policy.debugging-detector") is not None,
     )
 
 
@@ -1439,7 +1453,7 @@ def default_plugin_registry() -> PluginRegistry:
                 "1.28.0",
                 "control",
                 "policy.ours",
-                frozenset({"policy.solve"}),
+                frozenset({"policy.solve", "policy.debugging-detector"}),
                 frozenset({"action.spreadsheet", "context.workbook-profile", "model.request"}),
                 frozenset({"before_model_request", "after_tool"}),
                 evolvable_surfaces=frozenset({"prompt", "implementation"}),
@@ -1631,6 +1645,7 @@ def default_plugin_registry() -> PluginRegistry:
                         "workbook-regression",
                     ),
                 ),
+                synthesis_template="knowledge-skill-v1",
             ),
             PluginContract(
                 "verifier-formula-runtime",
@@ -1751,6 +1766,9 @@ ARM_COMPOSITIONS: Mapping[str, CompositionSpec] = MappingProxyType(
             ("runtime-native-tools", "policy-native"),
         ),
         "paper-vision": CompositionSpec.create("paper-vision", ("workflow-paper",)),
+        "spreadsheet-agent": CompositionSpec.create(
+            "spreadsheet-agent", ("workflow-paper",)
+        ),
         "spreadsheet-harness-basic": SPREADSHEET_HARNESS_BASIC_COMPOSITION,
         "spreadsheet-harness-financial": SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION,
         "ours": CompositionSpec.create(

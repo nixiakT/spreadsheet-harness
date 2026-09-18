@@ -14,15 +14,15 @@ from openpyxl.cell.cell import MergedCell
 from PIL import Image
 
 from spreadsheet_harness import arms
-from spreadsheet_harness.financial_model_repairs import (
-    complete_consensus_formula_bands,
-    complete_financial_model_runtime_actions,
-)
 from spreadsheet_harness.agent import AgentResult, ResponseTurn
 from spreadsheet_harness.budget import RunBudget
 from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.debugging_repairs import DebuggingRepairCandidate
 from spreadsheet_harness.errors import AgentBudgetError, RecalculationIntegrityError
+from spreadsheet_harness.financial_model_repairs import (
+    complete_consensus_formula_bands,
+    complete_financial_model_runtime_actions,
+)
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import ToolOutcome
 from spreadsheet_harness.trajectory import read_trajectory
@@ -142,6 +142,41 @@ def _preview(prompt: str) -> str:
 
 def _run_paper(session: WorkbookSession) -> AgentResult:
     return arms.run_arm("paper", _config(), session, None, "test task", 4_000, 300, object())
+
+
+def _workflow_test_stage(kwargs: dict[str, Any], evidence: str | None) -> arms._CompletedStage:
+    result = AgentResult(
+        final_text=evidence or "done",
+        turns=int(kwargs["max_turns"]),
+        tool_calls=len(kwargs.get("forced_tool_prefix", ())),
+        usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        response_id=f"response-{kwargs['name']}",
+        stage=str(kwargs["name"]),
+        forced_tool_prefix=list(kwargs.get("forced_tool_prefix", ())),
+        observed_forced_tool_prefix=list(kwargs.get("forced_tool_prefix", ())),
+    )
+    return arms._CompletedStage(
+        name=str(kwargs["name"]),
+        result=result,
+        elapsed_seconds=0.01,
+        allowed_tools=kwargs["allowed_tools"],
+        max_turns=int(kwargs["max_turns"]),
+        task_included=bool(kwargs["task_included"]),
+        preview_included=bool(kwargs["preview_included"]),
+        prompt_sha256="a" * 64,
+        task_sha256="b" * 64,
+        preview_sha256="c" * 64,
+        tool_trace=(),
+        workbook_sha256_before="d" * 64 if kwargs.get("read_only") else None,
+        workbook_sha256_after="d" * 64 if kwargs.get("read_only") else None,
+        read_only_verified=bool(kwargs.get("read_only")),
+        normalized_evidence=evidence,
+        evidence_sha256="e" * 64 if evidence is not None else None,
+        first_tool_choice=None,
+        observed_first_tool=None,
+        forced_tool_prefix=tuple(kwargs.get("forced_tool_prefix", ())),
+        observed_forced_tool_prefix=tuple(kwargs.get("forced_tool_prefix", ())),
+    )
 
 
 def test_paper_vision_three_turn_required_route_attaches_image_and_submits_yaml(
@@ -530,6 +565,93 @@ def test_arm_tool_isolation_shared_preview_and_no_scoring_metadata_leakage(
     assert paper_result.stages[2]["tool_name_trace"] == ["range_to_latex"]
 
 
+def test_bare_composition_is_minimal_and_skips_repair_detector(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    resolved = arms.resolve_arm_composition("bare")
+    plan = arms.execution_plan(resolved)
+    assert tuple(plugin.contract.name for plugin in resolved.plugins) == (
+        "runtime-code-interpreter",
+        "policy-bare",
+    )
+    assert plan.tool_mode == "code-only"
+    assert plan.profile_mode == "none"
+    assert plan.policy == "bare"
+    assert plan.skill_names == ()
+    assert plan.financial_model_runtime is False
+    assert plan.require_formula_runtime_validation is False
+    assert plan.repair_date_text is False
+
+    _patch_agents(monkeypatch)
+    monkeypatch.setattr(
+        arms,
+        "_debugging_detector_hint",
+        lambda *_args, **_kwargs: pytest.fail("bare must not invoke repair-family detection"),
+    )
+    monkeypatch.setattr(
+        arms,
+        "_financial_repair_checkpoint_count",
+        lambda *_args, **_kwargs: pytest.fail("bare must not inspect financial repair checkpoints"),
+    )
+    session = WorkbookSession.create(sample_workbook, tmp_path / "bare-minimal-run")
+    result = arms.run_arm(
+        "bare",
+        _config(),
+        session,
+        object(),
+        "Please audit and fix this workbook.",
+        2_000,
+        300,
+        RunBudget(max_model_calls=1, max_total_tokens=100, max_elapsed_seconds=60),
+        task_category="Debugging",
+    )
+    assert result.arm == "bare"  # type: ignore[attr-defined]
+    assert FakeAgent.calls[-1]["skills"] is None
+    assert FakeAgent.calls[-1]["tools"].allowed_tools == {"code_interpreter"}
+    events = read_trajectory(session.paths.trajectory)
+    activated = [
+        event["payload"]["plugin"]
+        for event in events
+        if event["event"] == "harness.plugin.activated"
+    ]
+    assert activated == ["runtime-code-interpreter", "policy-bare"]
+    assert all(
+        not event["event"].startswith(("preprocess.", "harness.financial_", "harness.repair"))
+        for event in events
+    )
+
+
+def test_ours_policy_composition_keeps_debugging_detector_route(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    calls: list[tuple[Path, str, str | None]] = []
+
+    def detector(path: Path, instruction: str, *, task_category: str | None = None) -> str:
+        calls.append((Path(path), instruction, task_category))
+        return instruction
+
+    monkeypatch.setattr(arms, "_debugging_detector_hint", detector)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "ours-detector-route")
+    arms.run_arm(
+        "spreadsheet-harness-basic",
+        _config(),
+        session,
+        None,
+        "Please audit and fix this workbook.",
+        2_000,
+        300,
+        RunBudget(max_model_calls=1, max_total_tokens=100, max_elapsed_seconds=60),
+        max_turns_per_arm=3,
+        task_category="Debugging",
+    )
+    assert calls == [(session.paths.input, "Please audit and fix this workbook.", "Debugging")]
+
+
 def test_profile_is_bare_plus_deterministic_evidence_and_native_omits_skills(
     sample_workbook: Path,
     tmp_path: Path,
@@ -664,7 +786,12 @@ def test_plugevolve_seed_composition_explicitly_enables_skill_and_verifier(
         "spreadsheet-verification",
     ]
     assert executor_call["require_formula_runtime_validation"] is True
-    assert executor_call["tools"].allowed_tools == {"code_interpreter", "recalculate_and_read"}
+    assert executor_call["tools"].allowed_tools == {
+        "bash",
+        "code_interpreter",
+        "recalculate_and_read",
+        "view_xlsx",
+    }
     assert executor_call["tools"].enable_code is True
     assert result.context_policy["composition_name"] == "plugevolve-seed"
     assert len(result.context_policy["composition_sha256"]) == 64
@@ -845,6 +972,63 @@ provenance:
     workbook.close()
 
 
+def test_safe_planner_actions_accept_fenced_yaml(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "fenced-plan-actions")
+    plan = """```yaml
+- action: write_value
+  target: Sales!B2
+  value: 9
+```"""
+
+    changed = arms._apply_safe_planner_actions(
+        session,
+        instruction="Complete the financial model.",
+        normalized_plan=plan,
+        deterministic_evidence='{"source_workbook_name":"sample.xlsx","sheets":[]}',
+    )
+
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    assert changed == 1
+    assert workbook["Sales"]["B2"].value == 9
+    workbook.close()
+
+
+def test_safe_planner_actions_do_not_verify_a_noop_write(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "noop-plan-actions")
+
+    result = arms._apply_safe_planner_actions(
+        session,
+        instruction="Keep B2 at its current value.",
+        normalized_plan="""actions:
+- action: write_value
+  target: Sales!B2
+  value: 2
+""",
+        deterministic_evidence="{}",
+    )
+
+    assert result == 0
+    assert result.status == "executed"
+    assert result.fast_path_eligible is False
+    assert len(result.proposed) == 1
+    assert len(result.executed) == 1
+    assert result.verified == []
+    assert any("no mutation at Sales!B2" in reason for reason in result.failures)
+    events = read_trajectory(session.paths.trajectory)
+    assert any(event["event"] == "harness.planner_actions.proposed" for event in events)
+    assert any(event["event"] == "harness.planner_actions.executed" for event in events)
+    assert any(
+        event["event"] == "harness.planner_actions.verification_failed" for event in events
+    )
+    assert all(event["event"] != "harness.planner_actions.applied" for event in events)
+
+
 def test_safe_planner_actions_skip_non_anchor_merged_cells(
     sample_workbook: Path,
     tmp_path: Path,
@@ -986,18 +1170,21 @@ def test_template_bypasses_planner_and_gives_executor_full_budget(
     workbook.close()
 
 
+@pytest.mark.parametrize("use_composition_alias", [False, True])
 def test_basic_financial_bypasses_planner_and_gives_executor_full_budget(
     sample_workbook: Path,
     tmp_path: Path,
     monkeypatch: Any,
+    use_composition_alias: bool,
 ) -> None:
+    from spreadsheet_harness.plugins import SPREADSHEET_HARNESS_BASIC_COMPOSITION
     from spreadsheet_harness.skills import SkillRegistry
 
     _patch_agents(monkeypatch)
     session = WorkbookSession.create(sample_workbook, tmp_path / "basic-financial-executor")
 
     arms.run_arm(
-        "spreadsheet-harness-basic",
+        "ours" if use_composition_alias else "spreadsheet-harness-basic",
         _config(),
         session,
         SkillRegistry([Path(__file__).parents[1] / "skills"]),
@@ -1007,6 +1194,7 @@ def test_basic_financial_bypasses_planner_and_gives_executor_full_budget(
         object(),
         max_turns_per_arm=8,
         task_category="Financial_Model",
+        composition=SPREADSHEET_HARNESS_BASIC_COMPOSITION if use_composition_alias else None,
     )
 
     assert [call["stage"] for call in FakeAgent.calls] == ["execute"]
@@ -1175,7 +1363,7 @@ def test_financial_plugin_warm_starts_domain_runtime_before_evidence(
     ]
 
 
-def test_financial_complete_runtime_coverage_bypasses_executor(
+def test_financial_sheet_coverage_is_not_proof_of_task_completion(
     sample_workbook: Path,
     tmp_path: Path,
     monkeypatch: Any,
@@ -1223,13 +1411,39 @@ def test_financial_complete_runtime_coverage_bypasses_executor(
         task_category="Financial_Model",
     )
 
-    assert FakeAgent.calls == []
-    assert result.stages == []
+    # Touching both sheets does not prove all requested clauses or dependencies
+    # are correct. A warm start must still reach planning and execution.
+    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
+    assert [stage["name"] for stage in result.stages] == ["plan", "execute"]
     events = read_trajectory(session.paths.trajectory)
     bypassed = [
         event for event in events if event["event"] == "harness.financial_executor.bypassed"
     ]
-    assert bypassed[-1]["payload"]["policy"] == "instruction-sheet-runtime-coverage-v1"
+    assert not bypassed
+
+
+def test_financial_verified_planner_writes_still_require_executor(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "financial-partial-plan")
+    # A persisted write contract verifies storage, not financial correctness or
+    # coverage of the remaining instruction clauses.
+    action = {"sheet": "Sales", "target": "E2", "expected_value": "=B2*C2"}
+    verified = arms.PlannerActionResult(
+        3, proposed=[action] * 3, executed=[action] * 3, verified=[action] * 3,
+    )
+    monkeypatch.setattr(arms, "_apply_safe_planner_actions", lambda *a, **kw: verified)
+    arms.run_arm(
+        "ours", _config(), session, None,
+        "Complete the financial model and check its dependencies.",
+        2_000, 300, object(), max_turns_per_arm=8,
+        task_category="Financial_Model",
+    )
+    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
+    assert FakeAgent.calls[-1]["max_turns"] == 7
 
 
 def test_invalid_ours_plan_falls_back_to_executor(
@@ -1851,6 +2065,8 @@ def test_protected_financial_repairs_restore_cells_and_freeze_panes(
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Model"
+    worksheet["B2"] = "=B3+B4"
+    worksheet["C2"] = 0.1
     workbook.save(source)
     workbook.close()
     session = WorkbookSession.create(source, tmp_path / "protected-financial-run")
@@ -1888,7 +2104,51 @@ def test_protected_financial_repairs_restore_cells_and_freeze_panes(
         for event in events
         if event["event"] == "harness.deterministic_financial_repairs.restored"
     ]
-    assert restored[-1]["payload"]["policy"] == "instruction-grounded-repair-checkpoint-v1"
+    assert restored[-1]["payload"]["policy"] == "instruction-grounded-repair-checkpoint-v2"
+
+
+def test_protected_financial_repairs_preserve_executor_refinement_of_blank_target(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "Financial_completion_input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Model"
+    worksheet["B3"] = 2
+    worksheet["B4"] = 3
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "financial-refinement-run")
+
+    prepared = load_workbook(session.workbook_path, data_only=False)
+    prepared["Model"]["B2"] = "=SUM(B3:B4)"
+    prepared.save(session.workbook_path)
+    prepared.close()
+    assert arms._write_financial_repair_checkpoint(
+        session,
+        [{"sheet": "Model", "target": "B2", "formula": "=SUM(B3:B4)"}],
+    ) == 1
+
+    refined = load_workbook(session.workbook_path, data_only=False)
+    refined["Model"]["B2"] = "=B3+B4"
+    refined.save(session.workbook_path)
+    refined.close()
+
+    assert arms._restore_protected_financial_repairs(session) == 0
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["Model"]["B2"].value == "=B3+B4"
+    output.close()
+    events = read_trajectory(session.paths.trajectory)
+    preserved = [
+        event
+        for event in events
+        if event["event"]
+        == "harness.deterministic_financial_repairs.refinements_preserved"
+    ]
+    assert preserved[-1]["payload"]["count"] == 1
+    assert preserved[-1]["payload"]["policy"] == "source-blank-executor-refinement-v1"
 
 
 def test_financial_completion_restores_populated_input_drift(tmp_path: Path) -> None:
@@ -2830,6 +3090,49 @@ def test_high_risk_debugging_keeps_executor_after_planner_warm_start(
     assert FakeAgent.calls[-1]["require_workbook_change"] is False
 
 
+def test_failed_planner_postcondition_routes_original_plan_to_executor(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "failed-planner-contract")
+    plan = """actions:
+- action: write_value
+  target: Sales!B2
+  value: 2
+- action: write_value
+  target: Sales!B3
+  value: 3
+- action: write_value
+  target: Sales!B4
+  value: 4
+provenance:
+- sheet: Sales
+  range: B2:B4
+"""
+    FakeAgent.stage_outputs["plan"] = plan
+
+    arms.run_arm(
+        "ours",
+        _config(),
+        session,
+        None,
+        "Preserve these values.",
+        2_000,
+        300,
+        object(),
+        max_turns_per_arm=8,
+    )
+
+    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
+    executor_prompt = FakeAgent.calls[-1]["prompt"]
+    assert plan.strip() in executor_prompt
+    assert "Planner fast path verification failed" in executor_prompt
+    assert "no mutation at Sales!B2" in executor_prompt
+    assert FakeAgent.calls[-1]["require_workbook_change"] is True
+
+
 def test_embedded_hardcode_keeps_planner_after_ambiguous_warm_start(
     sample_workbook: Path,
     tmp_path: Path,
@@ -3241,14 +3544,23 @@ def test_financial_runtime_fills_pbt_to_eps_block_from_statement_links(tmp_path:
         50: "EPS", 51: "EPS Growth(%)", 96: "Fully Diluted No. of Shares",
     }.items():
         model.cell(row, 2).value = label
-    model["N6"] = "=IS_BS_CF!B4"; model["N25"] = "=IS_BS_CF!B28"; model["N28"] = "=IS_BS_CF!B32"; model["N96"] = "=IS_BS_CF!B55"
-    model["O6"] = "=IS_BS_CF!C4"; model["O25"] = "=IS_BS_CF!C28"; model["O28"] = "=IS_BS_CF!C32"; model["O96"] = "=IS_BS_CF!C55"
-    model["N2"] = 2013; model["O2"] = 2014
+    model["N6"] = "=IS_BS_CF!B4"
+    model["N25"] = "=IS_BS_CF!B28"
+    model["N28"] = "=IS_BS_CF!B32"
+    model["N96"] = "=IS_BS_CF!B55"
+    model["O6"] = "=IS_BS_CF!C4"
+    model["O25"] = "=IS_BS_CF!C28"
+    model["O28"] = "=IS_BS_CF!C32"
+    model["O96"] = "=IS_BS_CF!C55"
+    model["N2"] = 2013
+    model["O2"] = 2014
     statement = workbook.create_sheet("IS_BS_CF")
     for row, label in {4: "Total Revenues", 28: "EBIT", 32: "Total non operating (income) / expense", 40: "Tax", 47: "Minority Interest", 48: "Share of Associates", 51: "Exceptional item", 55: "Fully Diluted SOS", 56: "EPS after exceptional Items", 61: "Total dividend", 63: "Tax on dividend"}.items():
         statement.cell(row, 1).value = label
-    workbook.save(source); workbook.close()
-    out = tmp_path / "pbt-output.xlsx"; out.write_bytes(source.read_bytes())
+    workbook.save(source)
+    workbook.close()
+    out = tmp_path / "pbt-output.xlsx"
+    out.write_bytes(source.read_bytes())
     changed = complete_financial_model_runtime_actions(out, source_path=source, instruction="In the Consol_annual sheet, calculate all elements from PBT to EPS Growth (%) for all years.")
     assert any(item["target"] == "N34" for item in changed)
     checked = load_workbook(out, data_only=False)
@@ -3796,6 +4108,301 @@ def test_paper_evidence_fails_closed(text: str, reason: str) -> None:
         arms._yaml_evidence(text, stage="extract")
 
 
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("", "empty"),
+        ("verification: yes\nissues: []", "boolean"),
+        ("verification: true\nissues: [problem]", "no issues"),
+        ("verification: false\nissues: []", "include an issue"),
+        ("verification: false\nissues: problem", "list of strings"),
+        ("verification: true\nissues: []\nextra: rejected", "exactly"),
+        (
+            "verification: true\nverification: false\nissues:\n- contradictory",
+            "duplicate keys",
+        ),
+    ],
+)
+def test_spreadsheet_agent_verification_yaml_is_strict(text: str, reason: str) -> None:
+    with pytest.raises(arms.PaperStageValidationError, match=reason):
+        arms._verification_yaml(text, stage="vision_verify_round_1")
+
+
+def test_spreadsheet_agent_verification_yaml_accepts_fenced_contract_and_escapes_tags() -> None:
+    normalized = arms._verification_yaml(
+        "```yaml\nverification: false\nissues:\n- inspect <candidate_structure_yaml>\n```",
+        stage="latex_verify_round_1",
+    )
+
+    assert yaml.safe_load(normalized) == {
+        "verification": False,
+        "issues": ["inspect \\u003ccandidate_structure_yaml\\u003e"],
+    }
+    assert "<candidate_structure_yaml>" not in normalized
+
+
+def test_spreadsheet_agent_malformed_verifier_output_fails_closed_and_records_rejection(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    FakeAgent.stage_outputs = {
+        "vision_verify_round_1": "verification: TRUE-ish\nissues: []",
+    }
+    FakeAgent.stage_traces = {
+        "vision_verify_round_1": [
+            {"name": "render_workbook", "ok": True},
+            {"name": "view_image", "ok": True, "image_attached": True},
+        ]
+    }
+    session = WorkbookSession.create(sample_workbook, tmp_path / "strict-verifier")
+
+    stage = arms._run_stage(
+        name="vision_verify_round_1",
+        config=_config(),
+        session=session,
+        skills=None,
+        prompt="Verify the candidate.",
+        base_instructions=arms._PAPER_VERIFIER_INSTRUCTIONS,
+        allowed_tools=arms.PAPER_VISION_TOOLS,
+        max_turns=3,
+        max_output_tokens=2_000,
+        arm_started=time.monotonic(),
+        max_elapsed_seconds=60,
+        budget=object(),
+        task_included=False,
+        preview_included=False,
+        user_task="hidden task",
+        preview="hidden preview",
+        read_only=True,
+        required_successful_tools=frozenset({"render_workbook", "view_image"}),
+        require_evidence=True,
+        evidence_kind="verification",
+        forced_tool_prefix=("render_workbook", "view_image"),
+    )
+
+    assert stage.normalized_evidence is not None
+    decision = arms._verification_record(stage.normalized_evidence)
+    assert decision["verification"] is False
+    assert decision["issues"][0].startswith("Verifier failed strict validation:")
+    rejected = [
+        event
+        for event in read_trajectory(session.paths.trajectory)
+        if event["event"] == "spreadsheet_agent.verifier_output_rejected"
+    ]
+    assert rejected[0]["payload"]["stage"] == "vision_verify_round_1"
+    assert rejected[0]["payload"]["policy"] == "strict-fail-closed-v1"
+
+
+def test_spreadsheet_agent_missing_verifier_tool_evidence_fails_closed(
+    sample_workbook: Path,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _patch_agents(monkeypatch)
+    FakeAgent.stage_outputs = {
+        "vision_verify_round_1": "verification: true\nissues: []",
+    }
+    FakeAgent.stage_traces = {"vision_verify_round_1": []}
+    session = WorkbookSession.create(sample_workbook, tmp_path / "missing-verifier-tools")
+
+    stage = arms._run_stage(
+        name="vision_verify_round_1",
+        config=_config(),
+        session=session,
+        skills=None,
+        prompt="Verify the candidate.",
+        base_instructions=arms._PAPER_VERIFIER_INSTRUCTIONS,
+        allowed_tools=arms.PAPER_VISION_TOOLS,
+        max_turns=3,
+        max_output_tokens=2_000,
+        arm_started=time.monotonic(),
+        max_elapsed_seconds=60,
+        budget=object(),
+        task_included=False,
+        preview_included=False,
+        user_task="hidden task",
+        preview="hidden preview",
+        read_only=True,
+        required_successful_tools=frozenset({"render_workbook", "view_image"}),
+        require_evidence=True,
+        evidence_kind="verification",
+        forced_tool_prefix=("render_workbook", "view_image"),
+    )
+
+    assert stage.normalized_evidence is not None
+    decision = arms._verification_record(stage.normalized_evidence)
+    assert decision["verification"] is False
+    assert any("required successful tools" in issue for issue in decision["issues"])
+    assert any("did not attach an image" in issue for issue in decision["issues"])
+
+
+def test_spreadsheet_agent_three_round_feedback_route_uses_frozen_49_response_budget(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "spreadsheet-agent-three-rounds")
+    main_config = _config()
+    vision_config = ProviderConfig(
+        "https://vision.example.test/v1", "vision-key", "vision-model"
+    )
+    preview = "<workbook_first_rows_preview>preview</workbook_first_rows_preview>"
+    calls: list[dict[str, Any]] = []
+
+    def run_stage(**kwargs: Any) -> arms._CompletedStage:
+        calls.append(kwargs)
+        name = str(kwargs["name"])
+        if name.startswith("extract_round_"):
+            round_number = int(name.rsplit("_", 1)[-1])
+            evidence = (
+                f"round: {round_number}\n"
+                "sheets:\n- Sales\n"
+                "provenance:\n- sheet: Sales\n  range: A1:D5\n"
+            )
+        elif name.startswith("vision_verify_round_"):
+            round_number = int(name.rsplit("_", 1)[-1])
+            evidence = yaml.safe_dump(
+                {
+                    "verification": False,
+                    "issues": [f"vision issue round {round_number}"],
+                },
+                sort_keys=False,
+            )
+        elif name.startswith("latex_verify_round_"):
+            round_number = int(name.rsplit("_", 1)[-1])
+            evidence = yaml.safe_dump(
+                {
+                    "verification": False,
+                    "issues": [f"latex issue round {round_number}"],
+                },
+                sort_keys=False,
+            )
+        else:
+            evidence = None
+        stage = _workflow_test_stage(kwargs, evidence)
+        kwargs["stages"].append(stage) if "stages" in kwargs else None
+        return stage
+
+    stages: list[arms._CompletedStage] = []
+    returned = arms._run_spreadsheet_agent_workflow(
+        run_stage=run_stage,
+        stages=stages,
+        config=main_config,
+        vision_config=vision_config,
+        session=session,
+        instruction="fill the formulas",
+        preview=preview,
+        sheet_catalog=session.list_sheets()["sheets"],
+        max_turns_per_arm=50,
+        max_output_tokens=4_000,
+        arm_started=time.monotonic(),
+        max_elapsed_seconds=300,
+        budget=object(),
+        pacer=None,
+    )
+
+    assert returned is stages
+    assert [call["name"] for call in calls] == [
+        "extract_round_1",
+        "vision_verify_round_1",
+        "latex_verify_round_1",
+        "extract_round_2",
+        "vision_verify_round_2",
+        "latex_verify_round_2",
+        "extract_round_3",
+        "vision_verify_round_3",
+        "latex_verify_round_3",
+        "solve",
+    ]
+    assert [call["max_turns"] for call in calls] == [12, 3, 2, 8, 3, 2, 8, 3, 2, 6]
+    assert sum(call["max_turns"] for call in calls) == 49
+    assert arms._SPREADSHEET_AGENT_MAX_RESPONSES == 49
+    assert all(
+        call["config"] is vision_config
+        for call in calls
+        if str(call["name"]).startswith("vision_verify_round_")
+    )
+    assert all(
+        call["config"] is main_config
+        for call in calls
+        if not str(call["name"]).startswith("vision_verify_round_")
+    )
+    assert calls[0]["required_successful_tools"] == {"list_sheets", "inspect_range"}
+    assert calls[3]["required_successful_tools"] == {"inspect_range"}
+    assert all(
+        call["reserve_final_text_turn"] is True
+        for call in calls
+        if str(call["name"]).startswith("extract_round_")
+    )
+    assert all(
+        call["require_tool_termination"] is False
+        for call in calls
+        if str(call["name"]).startswith(("extract_round_", "vision_verify_", "latex_verify_"))
+    )
+    assert all(
+        call["text_only_after_forced_prefix"] is True
+        for call in calls
+        if str(call["name"]).startswith(("vision_verify_", "latex_verify_"))
+    )
+    round_two_prompt = str(calls[3]["prompt"])
+    assert "vision issue round 1" in round_two_prompt
+    assert "latex issue round 1" in round_two_prompt
+    assert "round: 1" in round_two_prompt
+    solve_prompt = str(calls[-1]["prompt"])
+    assert "verification_passed: false" in solve_prompt
+    assert "round: 3" in solve_prompt
+
+
+def test_spreadsheet_agent_dual_pass_stops_refinement_and_runs_solver(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "spreadsheet-agent-early-stop")
+    calls: list[dict[str, Any]] = []
+
+    def run_stage(**kwargs: Any) -> arms._CompletedStage:
+        calls.append(kwargs)
+        name = str(kwargs["name"])
+        evidence = (
+            "sheets:\n- Sales\nprovenance:\n- sheet: Sales\n  range: A1:D5\n"
+            if name == "extract_round_1"
+            else "verification: true\nissues: []\n"
+            if name in {"vision_verify_round_1", "latex_verify_round_1"}
+            else None
+        )
+        return _workflow_test_stage(kwargs, evidence)
+
+    stages: list[arms._CompletedStage] = []
+    arms._run_spreadsheet_agent_workflow(
+        run_stage=run_stage,
+        stages=stages,
+        config=_config(),
+        vision_config=ProviderConfig(
+            "https://vision.example.test/v1", "vision-key", "vision-model"
+        ),
+        session=session,
+        instruction="fill the formulas",
+        preview="<workbook_first_rows_preview>preview</workbook_first_rows_preview>",
+        sheet_catalog=session.list_sheets()["sheets"],
+        max_turns_per_arm=50,
+        max_output_tokens=4_000,
+        arm_started=time.monotonic(),
+        max_elapsed_seconds=300,
+        budget=object(),
+        pacer=None,
+    )
+
+    assert [call["name"] for call in calls] == [
+        "extract_round_1",
+        "vision_verify_round_1",
+        "latex_verify_round_1",
+        "solve",
+    ]
+    assert sum(call["max_turns"] for call in calls) == 23
+    assert "verification_passed: true" in str(calls[-1]["prompt"])
+
+
 def test_yaml_evidence_uses_last_complete_fenced_revision() -> None:
     text = """```yaml
 draft: true
@@ -3854,6 +4461,256 @@ def test_yaml_evidence_quotes_plain_mapping_text_with_embedded_colon() -> None:
     )
 
     assert "Evidence: use adjacent formula" in normalized
+
+
+def test_yaml_evidence_decodes_double_escaped_terminal_document() -> None:
+    normalized = arms._yaml_evidence(
+        "- sheet_name: Sheet1\\n"
+        "  purpose: Contains \\\"abcxyz\\\" placeholders\\n"
+        "  provenance:\\n"
+        "  - sheet: Sheet1\\n"
+        "    range: A1:A2\\n"
+        "    tool: inspect_range",
+        stage="extract_round_1",
+    )
+
+    assert yaml.safe_load(normalized) == [
+        {
+            "sheet_name": "Sheet1",
+            "purpose": 'Contains \\\"abcxyz\\\" placeholders',
+            "provenance": [
+                {"sheet": "Sheet1", "range": "A1:A2", "tool": "inspect_range"}
+            ],
+        }
+    ]
+
+
+def test_yaml_evidence_unwraps_broken_root_list_key_markers() -> None:
+    normalized = arms._yaml_evidence(
+        "- sheets:\n"
+        "    - name: RANGES\n"
+        "      regions:\n"
+        "        - table_range: A2:E13\n"
+        "  - provenance:\n"
+        "      - sheet: RANGES\n"
+        "        range: A1:F20\n"
+        "        tool: inspect_range",
+        stage="extract_round_2",
+    )
+
+    assert yaml.safe_load(normalized) == {
+        "sheets": [{"name": "RANGES", "regions": [{"table_range": "A2:E13"}]}],
+        "provenance": [
+            {"sheet": "RANGES", "range": "A1:F20", "tool": "inspect_range"}
+        ],
+    }
+
+
+def test_yaml_evidence_quotes_complete_excel_reference_list_scalars() -> None:
+    normalized = arms._yaml_evidence(
+        "- sheets:\n"
+        "    - name: Model\n"
+        "      dependencies:\n"
+        "        - 'Ex 5 - M&A'!C80\n"
+        "  - provenance:\n"
+        "      - sheet: Model\n"
+        "        range: A1:C80",
+        stage="extract_round_1",
+    )
+
+    parsed = yaml.safe_load(normalized)
+    assert parsed["sheets"][0]["dependencies"] == ["'Ex 5 - M&A'!C80"]
+
+
+def test_yaml_evidence_preserves_isolated_mapping_text_as_unparsed_note() -> None:
+    normalized = arms._yaml_evidence(
+        "sheets:\n"
+        "- name: Comps\n"
+        "  blocks:\n"
+        "  - description: EV/EBITDA section\n"
+        "    range: B20:J37\n"
+        "    similar structure\n"
+        "  formula_dependencies: [Model]\n"
+        "provenance:\n"
+        "- sheet: Comps\n"
+        "  range: B20:J37",
+        stage="extract_round_1",
+    )
+
+    parsed = yaml.safe_load(normalized)
+    block = parsed["sheets"][0]["blocks"][0]
+    assert block["range"] == "B20:J37"
+    assert [value for key, value in block.items() if key.startswith("_unparsed_note_")] == [
+        "similar structure"
+    ]
+
+
+def test_yaml_evidence_quotes_quoted_scalar_fragments_with_trailing_text() -> None:
+    normalized = arms._yaml_evidence(
+        "sheets:\n"
+        "- name: Model\n"
+        "  table_range: \"B7:G30\"  # from inspect_range: row 7\n"
+        "  column_header: \"C5:F5\" [\"2025 Avg.\",\"2024 Avg.\"]\n"
+        "  data_properties: {years: [2025, 2026], formulas: \"=C1+1\" etc.}\n"
+        "  rows:\n"
+        "  - \"Revenue\" (sub: organic, M&A)\n"
+        "provenance:\n"
+        "- sheet: Model\n"
+        "  range: B7:G30",
+        stage="extract_round_1",
+    )
+
+    parsed = yaml.safe_load(normalized)
+    assert parsed["sheets"][0]["table_range"] == "B7:G30"
+    assert parsed["sheets"][0]["column_header"] == (
+        '\"C5:F5\" [\"2025 Avg.\",\"2024 Avg.\"]'
+    )
+    assert parsed["sheets"][0]["data_properties"]["formulas"] == '\"=C1+1\" etc.'
+    assert parsed["sheets"][0]["rows"] == ['\"Revenue\" (sub: organic, M&A)']
+
+
+def test_yaml_evidence_preserves_malformed_flow_mapping_as_scalar() -> None:
+    normalized = arms._yaml_evidence(
+        "sheets:\n"
+        "- name: Model\n"
+        "  styles/layout: { title merged \"B7:C7\"?, section headers centered }\n"
+        "provenance:\n"
+        "- sheet: Model\n"
+        "  range: B7:G30",
+        stage="extract_round_1",
+    )
+
+    parsed = yaml.safe_load(normalized)
+    assert parsed["sheets"][0]["styles/layout"] == (
+        '{ title merged "B7:C7"?, section headers centered }'
+    )
+
+
+def test_yaml_evidence_preserves_malformed_document_with_explicit_provenance() -> None:
+    normalized = arms._yaml_evidence(
+        "sheets:\n"
+        "- name: Model\n"
+        "  data_properties: { years: [2025, 2026], formulas: \"=C1+1\" etc. }\n"
+        "provenance:\n"
+        "  source_workbook: model.xlsx\n"
+        "  inspect_range: A1:G30 (truncated)\n",
+        stage="extract_round_1",
+    )
+
+    parsed = yaml.safe_load(normalized)
+    assert parsed["raw_evidence"].startswith("sheets:")
+    assert parsed["provenance"] == [{"range": "A1:G30", "tool": "inspect_range"}]
+
+
+def test_yaml_evidence_rejects_malformed_document_without_provenance() -> None:
+    with pytest.raises(arms.PaperStageValidationError, match="lacks"):
+        arms._yaml_evidence(
+            "sheets:\n"
+            "- name: Model\n"
+            "  data_properties: { years: [2025, 2026], formulas: \"=C1+1\" etc. }",
+            stage="extract_round_1",
+        )
+
+
+def test_yaml_evidence_accepts_explicit_inspected_range_provenance() -> None:
+    normalized = arms._yaml_evidence(
+        "provenance:\n"
+        "  source_workbook: 1.xlsx\n"
+        "  inspected_range: Sheet1!A1:A2\n"
+        "sheets:\n"
+        "- sheet_name: Sheet1",
+        stage="extract_round_1",
+    )
+
+    assert yaml.safe_load(normalized)["provenance"]["inspected_range"] == "Sheet1!A1:A2"
+
+
+def test_yaml_evidence_accepts_explicit_range_inspections_provenance() -> None:
+    normalized = arms._yaml_evidence(
+        "provenance:\n"
+        "- source_workbook: 1.xlsx\n"
+        "- range_inspections:\n"
+        "  - A1:E26 via inspect_range\n"
+        "sheets:\n"
+        "- sheet_name: Sheet1",
+        stage="extract_round_1",
+    )
+
+    assert yaml.safe_load(normalized)["provenance"][1]["range_inspections"] == [
+        "A1:E26 via inspect_range"
+    ]
+
+
+def test_yaml_evidence_accepts_explicit_textual_tool_range_provenance() -> None:
+    normalized = arms._yaml_evidence(
+        "sheets:\n"
+        "- name: Model\n"
+        "  provenance:\n"
+        "  - sheet_inventory\n"
+        "  - inspect_range B1:AG40 returned B1:AG15\n"
+        "provenance:\n"
+        "- Workbook file: model.xlsx",
+        stage="extract_round_1",
+    )
+
+    assert yaml.safe_load(normalized)["sheets"][0]["provenance"][1] == (
+        "inspect_range B1:AG40 returned B1:AG15"
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "inspect_range completed",
+        "candidate E29 current=E18+E23-E26",
+        "B1:AG40",
+    ],
+)
+def test_yaml_evidence_rejects_weak_textual_provenance(reference: str) -> None:
+    with pytest.raises(arms.PaperStageValidationError, match="lacks"):
+        arms._yaml_evidence(
+            f"summary: inspected workbook\nprovenance:\n- {reference}",
+            stage="extract_round_1",
+        )
+
+
+def test_yaml_evidence_quotes_multiline_plain_scalar_with_embedded_colons() -> None:
+    normalized = arms._yaml_evidence(
+        "provenance:\n"
+        "- sheet: Sheet1\n"
+        "  range: A1:A2\n"
+        "reports:\n"
+        "- latex: structural correctness confirmed (verification: true, issues: [])\n"
+        "styles:\n"
+        "  description: Default style; metadata produced artifacts\n"
+        "    (color: Values must be of type str, fill: indexed)\n"
+        "    but carries no informational value.\n"
+        "  number_format: General",
+        stage="extract_round_3",
+    )
+
+    parsed = yaml.safe_load(normalized)
+    assert parsed["reports"][0]["latex"].endswith("issues: [])")
+    assert "color: Values" in parsed["styles"]["description"]
+    assert parsed["styles"]["number_format"] == "General"
+
+
+def test_yaml_evidence_joins_unmarked_list_scalar_continuation() -> None:
+    normalized = arms._yaml_evidence(
+        "provenance:\n"
+        "- sheet: Sheet1\n"
+        "  range: A1:A2\n"
+        "row_header:\n"
+        "- Total Revenue\n"
+        "- Gross Profit\n"
+        "(and more rows not fully inspected)\n"
+        "formulas: []",
+        stage="extract_round_2",
+    )
+
+    assert yaml.safe_load(normalized)["row_header"][-1] == (
+        "Gross Profit (and more rows not fully inspected)"
+    )
 
 
 @pytest.mark.parametrize(

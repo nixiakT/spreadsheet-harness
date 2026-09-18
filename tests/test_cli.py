@@ -68,6 +68,146 @@ def test_v2_visual_generate_accepts_core_only_configuration() -> None:
     assert args.max_total_tokens is None
 
 
+@pytest.mark.parametrize("command", ["v1-compare", "v2-compare", "v2-visual-generate"])
+def test_spreadsheetbench_commands_accept_spreadsheet_agent(command: str) -> None:
+    command_args = {
+        "v1-compare": ["--dataset", "dataset", "--output", "output"],
+        "v2-compare": ["--dataset", "dataset", "--category", "Template"],
+        "v2-visual-generate": [
+            "--dataset",
+            "dataset",
+            "--visual-evaluator",
+            "visual.py",
+            "--output",
+            "output",
+        ],
+    }[command]
+
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            command,
+            *command_args,
+            "--arm",
+            "spreadsheet-agent",
+            "--vision-model",
+            "vision-model",
+        ]
+    )
+
+    assert args.arm == ["spreadsheet-agent"]
+    assert args.vision_model == "vision-model"
+
+
+def test_vision_provider_inherits_connection_and_generation_defaults() -> None:
+    primary = ProviderConfig(
+        "https://relay.test/v1",
+        "main-secret",
+        "solver-model",
+        api_protocol="chat-completions",
+        reasoning_effort="medium",
+        timeout_seconds=321,
+        max_retries=4,
+        request_interval_seconds=2.5,
+        temperature=0,
+        top_p=1,
+        seed=7,
+        presence_penalty=0.25,
+        top_k=40,
+        min_p=0.1,
+        repetition_penalty=1.1,
+        enable_thinking=True,
+        litellm_timeout_seconds=300,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "v2-compare",
+            "--dataset",
+            "dataset",
+            "--category",
+            "Template",
+            "--vision-model",
+            "vision-model",
+        ]
+    )
+
+    vision = cli._vision_provider(args, primary)
+
+    assert vision is not None
+    assert vision.model == "vision-model"
+    assert vision.base_url == primary.base_url
+    assert vision.api_key == primary.api_key
+    assert vision.api_protocol == primary.api_protocol
+    assert vision.reasoning_effort == "medium"
+    assert vision.timeout_seconds == 321
+    assert vision.max_retries == 4
+    assert vision.request_interval_seconds == 2.5
+    assert vision.generation_dict() == {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "seed": 7,
+        "presence_penalty": 0.25,
+        "top_k": 40,
+        "min_p": 0.1,
+        "repetition_penalty": 1.1,
+        "enable_thinking": True,
+    }
+    assert vision.litellm_timeout_seconds == 300
+
+
+def test_vision_provider_flags_override_primary_provider() -> None:
+    primary = ProviderConfig("https://solver.test/v1", "main-secret", "solver-model")
+    args = cli.build_parser().parse_args(
+        [
+            "benchmark",
+            "v2-compare",
+            "--dataset",
+            "dataset",
+            "--category",
+            "Template",
+            "--vision-model",
+            "vision-model",
+            "--vision-base-url",
+            "https://vision.test/v1",
+            "--vision-api-key",
+            "vision-secret",
+            "--vision-api-protocol",
+            "chat-completions",
+            "--vision-reasoning-effort",
+            "medium",
+            "--vision-temperature",
+            "0",
+            "--vision-top-p",
+            "1",
+            "--vision-enable-thinking",
+        ]
+    )
+
+    vision = cli._vision_provider(args, primary)
+
+    assert vision is not None
+    assert vision.public_dict() == {
+        "base_url": "https://vision.test/v1",
+        "model": "vision-model",
+        "api_protocol": "chat-completions",
+        "reasoning_effort": "medium",
+        "requested_reasoning_effort": "medium",
+        "timeout_seconds": primary.timeout_seconds,
+        "max_retries": primary.max_retries,
+        "request_interval_seconds": primary.request_interval_seconds,
+        "store_responses": vision.store_responses,
+        "litellm_timeout_seconds": primary.litellm_timeout_seconds,
+        "generation": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "enable_thinking": True,
+        },
+        "api_key_configured": True,
+    }
+    assert vision.api_key == "vision-secret"
+
+
 def test_benchmark_compare_parses_plugin_composition_override() -> None:
     args = cli.build_parser().parse_args(
         [

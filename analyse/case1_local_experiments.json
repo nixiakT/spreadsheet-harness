@@ -1,0 +1,3565 @@
+{
+  "transport": [
+    {
+      "task_id": "3002",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/3002/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/3002-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "G5",
+          "before": "=IF(E5=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E5,$F$5:$F$15,\"\\u003c\\u003e\"&$F5)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E5=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E5,$F$5:$F$15,\"<>\"&$F5)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G6",
+          "before": "=IF(E6=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E6,$F$5:$F$15,\"\\u003c\\u003e\"&$F6)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E6=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E6,$F$5:$F$15,\"<>\"&$F6)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G7",
+          "before": "=IF(E7=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E7,$F$5:$F$15,\"\\u003c\\u003e\"&$F7)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E7=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E7,$F$5:$F$15,\"<>\"&$F7)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G8",
+          "before": "=IF(E8=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E8,$F$5:$F$15,\"\\u003c\\u003e\"&$F8)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E8=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E8,$F$5:$F$15,\"<>\"&$F8)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G9",
+          "before": "=IF(E9=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E9,$F$5:$F$15,\"\\u003c\\u003e\"&$F9)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E9=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E9,$F$5:$F$15,\"<>\"&$F9)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G10",
+          "before": "=IF(E10=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E10,$F$5:$F$15,\"\\u003c\\u003e\"&$F10)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E10=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E10,$F$5:$F$15,\"<>\"&$F10)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G11",
+          "before": "=IF(E11=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E11,$F$5:$F$15,\"\\u003c\\u003e\"&$F11)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E11=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E11,$F$5:$F$15,\"<>\"&$F11)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G12",
+          "before": "=IF(E12=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E12,$F$5:$F$15,\"\\u003c\\u003e\"&$F12)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E12=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E12,$F$5:$F$15,\"<>\"&$F12)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G13",
+          "before": "=IF(E13=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E13,$F$5:$F$15,\"\\u003c\\u003e\"&$F13)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E13=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E13,$F$5:$F$15,\"<>\"&$F13)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G14",
+          "before": "=IF(E14=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E14,$F$5:$F$15,\"\\u003c\\u003e\"&$F14)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E14=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E14,$F$5:$F$15,\"<>\"&$F14)>0,\"Multiple\",\"Single\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G15",
+          "before": "=IF(E15=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E15,$F$5:$F$15,\"\\u003c\\u003e\"&$F15)\\u003e0,\"Multiple\",\"Single\"))",
+          "after": "=IF(E15=\"\",\"\",IF(COUNTIFS($E$5:$E$15,$E15,$F$5:$F$15,\"<>\"&$F15)>0,\"Multiple\",\"Single\"))"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "399-14",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/399-14/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/399-14-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "N7",
+          "before": "=IF(Q7\\u003e40,40,Q7)",
+          "after": "=IF(Q7>40,40,Q7)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N8",
+          "before": "=IF(Q7\\u003e40,40,Q8)",
+          "after": "=IF(Q7>40,40,Q8)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N9",
+          "before": "=IF(Q7\\u003e40,40,Q9)",
+          "after": "=IF(Q7>40,40,Q9)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N10",
+          "before": "=IF(Q7\\u003e40,40,Q10)",
+          "after": "=IF(Q7>40,40,Q10)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N11",
+          "before": "=IF(Q7\\u003e40,40,Q11)",
+          "after": "=IF(Q7>40,40,Q11)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N12",
+          "before": "=IF(Q7\\u003e40,40,Q12)",
+          "after": "=IF(Q7>40,40,Q12)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N13",
+          "before": "=IF(Q7\\u003e40,40,Q13)",
+          "after": "=IF(Q7>40,40,Q13)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N14",
+          "before": "=IF(Q7\\u003e40,40,Q14)",
+          "after": "=IF(Q7>40,40,Q14)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N15",
+          "before": "=IF(Q7\\u003e40,40,Q15)",
+          "after": "=IF(Q7>40,40,Q15)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N16",
+          "before": "=IF(Q7\\u003e40,40,Q16)",
+          "after": "=IF(Q7>40,40,Q16)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N17",
+          "before": "=IF(Q7\\u003e40,40,Q17)",
+          "after": "=IF(Q7>40,40,Q17)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N18",
+          "before": "=IF(Q7\\u003e40,40,Q18)",
+          "after": "=IF(Q7>40,40,Q18)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N19",
+          "before": "=IF(Q7\\u003e40,40,Q19)",
+          "after": "=IF(Q7>40,40,Q19)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N20",
+          "before": "=IF(Q7\\u003e40,40,Q20)",
+          "after": "=IF(Q7>40,40,Q20)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N21",
+          "before": "=IF(Q7\\u003e40,40,Q21)",
+          "after": "=IF(Q7>40,40,Q21)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N22",
+          "before": "=IF(Q7\\u003e40,40,Q22)",
+          "after": "=IF(Q7>40,40,Q22)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "N23",
+          "before": "=IF(Q7\\u003e40,40,Q23)",
+          "after": "=IF(Q7>40,40,Q23)"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "50324",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/50324/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/50324-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Analyse",
+          "cell": "D5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K5",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C5,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "D6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K6",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C6,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "D7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K7",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C7,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "D8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K8",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C8,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "D9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K9",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C9,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "D10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K10",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C10,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "D11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K11",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C11,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "D12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(D$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "E12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(E$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "F12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(F$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "G12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(G$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "H12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(H$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "I12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(I$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "J12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(J$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        },
+        {
+          "sheet": "Analyse",
+          "cell": "K12",
+          "before": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))\\u003e0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))\\u003e0))/30",
+          "after": "=SUMPRODUCT((INDEX(Datensatz!$D$4:$K$33,,MATCH($C12,Datensatz!$D$3:$K$3,0))>0)*(INDEX(Datensatz!$D$4:$K$33,,MATCH(K$4,Datensatz!$D$3:$K$3,0))>0))/30"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "56599",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/56599/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/56599-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "B6",
+          "before": "=LOOKUP(2,1/((G6:G30\\u003c=A6)*(H6:H30\\u003e=A6)),J6:J30)",
+          "after": "=LOOKUP(2,1/((G6:G30<=A6)*(H6:H30>=A6)),J6:J30)"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "58138",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/58138/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/58138-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "D2",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A2)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A2),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A2)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A2),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D3",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A3)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A3),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A3)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A3),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D4",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A4)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A4),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A4)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A4),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D5",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A5)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A5),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A5)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A5),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D6",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A6)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A6),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A6)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A6),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D7",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A7)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A7),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A7)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A7),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D8",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A8)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A8),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A8)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D9",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A9)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A9),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A9)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A9),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D10",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A10)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A10),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A10)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A10),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D11",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A11)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A11),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A11)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A11),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D12",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A12)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A12),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A12)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A12),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D13",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A13)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A13),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A13)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A13),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D14",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A14)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A14),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A14)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A14),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D15",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A15)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A15),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A15)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A15),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D16",
+          "before": "=IF(SUMPRODUCT(($A$2:$A$16=A16)*ISNUMBER($C$2:$C$16))\\u003e0,MAXIFS($C$2:$C$16,$A$2:$A$16,A16),\"\")",
+          "after": "=IF(SUMPRODUCT(($A$2:$A$16=A16)*ISNUMBER($C$2:$C$16))>0,MAXIFS($C$2:$C$16,$A$2:$A$16,A16),\"\")"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "58687",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/planner-contract-rerun-retries-20260914/financial/workers/worker-3/runs/58687/ours/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/58687-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "A9",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A10",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A11",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A12",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A13",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A14",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A15",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A16",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A17",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A18",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A19",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A20",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A21",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A22",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A23",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A24",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A25",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A26",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A27",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A28",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A29",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A30",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A31",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A32",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A33",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A34",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A35",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A36",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A37",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A38",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A39",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A40",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A41",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A42",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A43",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A44",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A45",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A46",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A47",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A48",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A49",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A50",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A51",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A52",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A53",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A54",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A55",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A56",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A57",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A58",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A59",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A60",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A61",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A62",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A63",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A64",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A65",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A66",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A67",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A68",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A69",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A70",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A71",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A72",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A73",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A74",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A75",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A76",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A77",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A78",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A79",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A80",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A81",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A82",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A83",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A84",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A85",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A86",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A87",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A88",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A89",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A90",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A91",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A92",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A93",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A94",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A95",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A96",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A97",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A98",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A99",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "A100",
+          "before": "=IF(ROW()-ROW($A$8)\\u003c=$M$6,ROW()-ROW($A$8),\"\")",
+          "after": "=IF(ROW()-ROW($A$8)<=$M$6,ROW()-ROW($A$8),\"\")"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "592-34",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/592-34/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/592-34-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "C2",
+          "before": "=TEXTSPLIT(B2,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B2,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C3",
+          "before": "=TEXTSPLIT(B3,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B3,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C4",
+          "before": "=TEXTSPLIT(B4,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B4,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C5",
+          "before": "=TEXTSPLIT(B5,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B5,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C6",
+          "before": "=TEXTSPLIT(B6,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B6,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C7",
+          "before": "=TEXTSPLIT(B7,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B7,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C8",
+          "before": "=TEXTSPLIT(B8,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B8,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C9",
+          "before": "=TEXTSPLIT(B9,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B9,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C10",
+          "before": "=TEXTSPLIT(B10,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B10,\"<br/>\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C11",
+          "before": "=TEXTSPLIT(B11,\"\\u003cbr/\\u003e\")",
+          "after": "=TEXTSPLIT(B11,\"<br/>\")"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "66-24",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/66-24/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/66-24-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Items Older than 30 days",
+          "cell": "E3",
+          "before": "=FILTER('Imported Data'!A2:T14,('Imported Data'!E2:E14\\u003e=Z1)*('Imported Data'!E2:E14\\u003c=Z2))",
+          "after": "=FILTER('Imported Data'!A2:T14,('Imported Data'!E2:E14>=Z1)*('Imported Data'!E2:E14<=Z2))"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "85-38",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/85-38/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/85-38-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "SwiftMD",
+          "cell": "N3",
+          "before": "=IF(AND(H3=\"Child living at home\",(TODAY()-F3)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H3=\"Child living at home\",(TODAY()-F3)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N4",
+          "before": "=IF(AND(H4=\"Child living at home\",(TODAY()-F4)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H4=\"Child living at home\",(TODAY()-F4)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N5",
+          "before": "=IF(AND(H5=\"Child living at home\",(TODAY()-F5)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H5=\"Child living at home\",(TODAY()-F5)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N6",
+          "before": "=IF(AND(H6=\"Child living at home\",(TODAY()-F6)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H6=\"Child living at home\",(TODAY()-F6)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N7",
+          "before": "=IF(AND(H7=\"Child living at home\",(TODAY()-F7)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H7=\"Child living at home\",(TODAY()-F7)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N8",
+          "before": "=IF(AND(H8=\"Child living at home\",(TODAY()-F8)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H8=\"Child living at home\",(TODAY()-F8)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N9",
+          "before": "=IF(AND(H9=\"Child living at home\",(TODAY()-F9)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H9=\"Child living at home\",(TODAY()-F9)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N10",
+          "before": "=IF(AND(H10=\"Child living at home\",(TODAY()-F10)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H10=\"Child living at home\",(TODAY()-F10)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N11",
+          "before": "=IF(AND(H11=\"Child living at home\",(TODAY()-F11)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H11=\"Child living at home\",(TODAY()-F11)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N12",
+          "before": "=IF(AND(H12=\"Child living at home\",(TODAY()-F12)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H12=\"Child living at home\",(TODAY()-F12)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N13",
+          "before": "=IF(AND(H13=\"Child living at home\",(TODAY()-F13)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H13=\"Child living at home\",(TODAY()-F13)/365.25>26),\"Delete\",\"\")"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "N14",
+          "before": "=IF(AND(H14=\"Child living at home\",(TODAY()-F14)/365.25\\u003e26),\"Delete\",\"\")",
+          "after": "=IF(AND(H14=\"Child living at home\",(TODAY()-F14)/365.25>26),\"Delete\",\"\")"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "9448",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/9448/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/9448-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Data",
+          "cell": "U9",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U10",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U11",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U12",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U13",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U14",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U15",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U16",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U17",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        },
+        {
+          "sheet": "Data",
+          "cell": "U18",
+          "before": "=LOOKUP(2,1/(I9:T9\\u003c\\u003e\"\"),I$7:T$7)",
+          "after": "=LOOKUP(2,1/(I9:T9<>\"\"),I$7:T$7)"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "52575",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-3/runs/52575/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/52575-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet2",
+          "cell": "F2",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B2,$E$2:$E$92,E2,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B2,$E$2:$E$92,E2,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B2,$E$2:$E$92,E2,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B2,$E$2:$E$92,E2,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F3",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B3,$E$2:$E$92,E3,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B3,$E$2:$E$92,E3,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B3,$E$2:$E$92,E3,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B3,$E$2:$E$92,E3,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F4",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B4,$E$2:$E$92,E4,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B4,$E$2:$E$92,E4,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B4,$E$2:$E$92,E4,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B4,$E$2:$E$92,E4,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F5",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B5,$E$2:$E$92,E5,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B5,$E$2:$E$92,E5,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B5,$E$2:$E$92,E5,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B5,$E$2:$E$92,E5,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F6",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B6,$E$2:$E$92,E6,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B6,$E$2:$E$92,E6,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B6,$E$2:$E$92,E6,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B6,$E$2:$E$92,E6,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F7",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B7,$E$2:$E$92,E7,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B7,$E$2:$E$92,E7,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B7,$E$2:$E$92,E7,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B7,$E$2:$E$92,E7,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F8",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B8,$E$2:$E$92,E8,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B8,$E$2:$E$92,E8,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B8,$E$2:$E$92,E8,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B8,$E$2:$E$92,E8,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F9",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B9,$E$2:$E$92,E9,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B9,$E$2:$E$92,E9,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B9,$E$2:$E$92,E9,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B9,$E$2:$E$92,E9,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F10",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B10,$E$2:$E$92,E10,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B10,$E$2:$E$92,E10,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B10,$E$2:$E$92,E10,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B10,$E$2:$E$92,E10,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F11",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B11,$E$2:$E$92,E11,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B11,$E$2:$E$92,E11,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B11,$E$2:$E$92,E11,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B11,$E$2:$E$92,E11,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F12",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B12,$E$2:$E$92,E12,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B12,$E$2:$E$92,E12,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B12,$E$2:$E$92,E12,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B12,$E$2:$E$92,E12,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F13",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B13,$E$2:$E$92,E13,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B13,$E$2:$E$92,E13,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B13,$E$2:$E$92,E13,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B13,$E$2:$E$92,E13,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F14",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B14,$E$2:$E$92,E14,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B14,$E$2:$E$92,E14,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B14,$E$2:$E$92,E14,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B14,$E$2:$E$92,E14,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F15",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B15,$E$2:$E$92,E15,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B15,$E$2:$E$92,E15,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B15,$E$2:$E$92,E15,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B15,$E$2:$E$92,E15,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F16",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B16,$E$2:$E$92,E16,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B16,$E$2:$E$92,E16,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B16,$E$2:$E$92,E16,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B16,$E$2:$E$92,E16,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F17",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B17,$E$2:$E$92,E17,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B17,$E$2:$E$92,E17,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B17,$E$2:$E$92,E17,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B17,$E$2:$E$92,E17,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F18",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B18,$E$2:$E$92,E18,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B18,$E$2:$E$92,E18,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B18,$E$2:$E$92,E18,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B18,$E$2:$E$92,E18,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F19",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B19,$E$2:$E$92,E19,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B19,$E$2:$E$92,E19,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B19,$E$2:$E$92,E19,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B19,$E$2:$E$92,E19,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F20",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B20,$E$2:$E$92,E20,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B20,$E$2:$E$92,E20,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B20,$E$2:$E$92,E20,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B20,$E$2:$E$92,E20,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F21",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B21,$E$2:$E$92,E21,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B21,$E$2:$E$92,E21,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B21,$E$2:$E$92,E21,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B21,$E$2:$E$92,E21,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F22",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B22,$E$2:$E$92,E22,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B22,$E$2:$E$92,E22,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B22,$E$2:$E$92,E22,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B22,$E$2:$E$92,E22,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F23",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B23,$E$2:$E$92,E23,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B23,$E$2:$E$92,E23,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B23,$E$2:$E$92,E23,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B23,$E$2:$E$92,E23,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F24",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B24,$E$2:$E$92,E24,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B24,$E$2:$E$92,E24,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B24,$E$2:$E$92,E24,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B24,$E$2:$E$92,E24,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F25",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B25,$E$2:$E$92,E25,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B25,$E$2:$E$92,E25,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B25,$E$2:$E$92,E25,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B25,$E$2:$E$92,E25,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F26",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B26,$E$2:$E$92,E26,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B26,$E$2:$E$92,E26,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B26,$E$2:$E$92,E26,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B26,$E$2:$E$92,E26,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F27",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B27,$E$2:$E$92,E27,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B27,$E$2:$E$92,E27,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B27,$E$2:$E$92,E27,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B27,$E$2:$E$92,E27,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F28",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B28,$E$2:$E$92,E28,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B28,$E$2:$E$92,E28,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B28,$E$2:$E$92,E28,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B28,$E$2:$E$92,E28,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F29",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B29,$E$2:$E$92,E29,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B29,$E$2:$E$92,E29,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B29,$E$2:$E$92,E29,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B29,$E$2:$E$92,E29,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F30",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B30,$E$2:$E$92,E30,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B30,$E$2:$E$92,E30,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B30,$E$2:$E$92,E30,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B30,$E$2:$E$92,E30,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F31",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B31,$E$2:$E$92,E31,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B31,$E$2:$E$92,E31,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B31,$E$2:$E$92,E31,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B31,$E$2:$E$92,E31,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F32",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B32,$E$2:$E$92,E32,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B32,$E$2:$E$92,E32,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B32,$E$2:$E$92,E32,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B32,$E$2:$E$92,E32,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F33",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B33,$E$2:$E$92,E33,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B33,$E$2:$E$92,E33,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B33,$E$2:$E$92,E33,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B33,$E$2:$E$92,E33,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F34",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B34,$E$2:$E$92,E34,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B34,$E$2:$E$92,E34,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B34,$E$2:$E$92,E34,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B34,$E$2:$E$92,E34,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F35",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B35,$E$2:$E$92,E35,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B35,$E$2:$E$92,E35,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B35,$E$2:$E$92,E35,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B35,$E$2:$E$92,E35,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F36",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B36,$E$2:$E$92,E36,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B36,$E$2:$E$92,E36,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B36,$E$2:$E$92,E36,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B36,$E$2:$E$92,E36,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F37",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B37,$E$2:$E$92,E37,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B37,$E$2:$E$92,E37,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B37,$E$2:$E$92,E37,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B37,$E$2:$E$92,E37,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F38",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B38,$E$2:$E$92,E38,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B38,$E$2:$E$92,E38,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B38,$E$2:$E$92,E38,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B38,$E$2:$E$92,E38,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F39",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B39,$E$2:$E$92,E39,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B39,$E$2:$E$92,E39,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B39,$E$2:$E$92,E39,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B39,$E$2:$E$92,E39,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F40",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B40,$E$2:$E$92,E40,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B40,$E$2:$E$92,E40,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B40,$E$2:$E$92,E40,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B40,$E$2:$E$92,E40,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F41",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B41,$E$2:$E$92,E41,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B41,$E$2:$E$92,E41,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B41,$E$2:$E$92,E41,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B41,$E$2:$E$92,E41,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F42",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B42,$E$2:$E$92,E42,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B42,$E$2:$E$92,E42,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B42,$E$2:$E$92,E42,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B42,$E$2:$E$92,E42,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F43",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B43,$E$2:$E$92,E43,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B43,$E$2:$E$92,E43,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B43,$E$2:$E$92,E43,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B43,$E$2:$E$92,E43,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F44",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B44,$E$2:$E$92,E44,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B44,$E$2:$E$92,E44,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B44,$E$2:$E$92,E44,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B44,$E$2:$E$92,E44,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F45",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B45,$E$2:$E$92,E45,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B45,$E$2:$E$92,E45,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B45,$E$2:$E$92,E45,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B45,$E$2:$E$92,E45,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F46",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B46,$E$2:$E$92,E46,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B46,$E$2:$E$92,E46,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B46,$E$2:$E$92,E46,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B46,$E$2:$E$92,E46,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F47",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B47,$E$2:$E$92,E47,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B47,$E$2:$E$92,E47,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B47,$E$2:$E$92,E47,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B47,$E$2:$E$92,E47,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F48",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B48,$E$2:$E$92,E48,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B48,$E$2:$E$92,E48,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B48,$E$2:$E$92,E48,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B48,$E$2:$E$92,E48,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F49",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B49,$E$2:$E$92,E49,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B49,$E$2:$E$92,E49,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B49,$E$2:$E$92,E49,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B49,$E$2:$E$92,E49,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F50",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B50,$E$2:$E$92,E50,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B50,$E$2:$E$92,E50,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B50,$E$2:$E$92,E50,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B50,$E$2:$E$92,E50,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F51",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B51,$E$2:$E$92,E51,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B51,$E$2:$E$92,E51,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B51,$E$2:$E$92,E51,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B51,$E$2:$E$92,E51,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F52",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B52,$E$2:$E$92,E52,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B52,$E$2:$E$92,E52,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B52,$E$2:$E$92,E52,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B52,$E$2:$E$92,E52,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F53",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B53,$E$2:$E$92,E53,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B53,$E$2:$E$92,E53,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B53,$E$2:$E$92,E53,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B53,$E$2:$E$92,E53,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F54",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B54,$E$2:$E$92,E54,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B54,$E$2:$E$92,E54,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B54,$E$2:$E$92,E54,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B54,$E$2:$E$92,E54,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F55",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B55,$E$2:$E$92,E55,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B55,$E$2:$E$92,E55,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B55,$E$2:$E$92,E55,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B55,$E$2:$E$92,E55,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F56",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B56,$E$2:$E$92,E56,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B56,$E$2:$E$92,E56,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B56,$E$2:$E$92,E56,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B56,$E$2:$E$92,E56,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F57",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B57,$E$2:$E$92,E57,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B57,$E$2:$E$92,E57,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B57,$E$2:$E$92,E57,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B57,$E$2:$E$92,E57,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F58",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B58,$E$2:$E$92,E58,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B58,$E$2:$E$92,E58,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B58,$E$2:$E$92,E58,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B58,$E$2:$E$92,E58,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F59",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B59,$E$2:$E$92,E59,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B59,$E$2:$E$92,E59,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B59,$E$2:$E$92,E59,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B59,$E$2:$E$92,E59,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F60",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B60,$E$2:$E$92,E60,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B60,$E$2:$E$92,E60,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B60,$E$2:$E$92,E60,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B60,$E$2:$E$92,E60,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F61",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B61,$E$2:$E$92,E61,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B61,$E$2:$E$92,E61,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B61,$E$2:$E$92,E61,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B61,$E$2:$E$92,E61,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F62",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B62,$E$2:$E$92,E62,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B62,$E$2:$E$92,E62,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B62,$E$2:$E$92,E62,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B62,$E$2:$E$92,E62,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F63",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B63,$E$2:$E$92,E63,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B63,$E$2:$E$92,E63,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B63,$E$2:$E$92,E63,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B63,$E$2:$E$92,E63,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F64",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B64,$E$2:$E$92,E64,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B64,$E$2:$E$92,E64,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B64,$E$2:$E$92,E64,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B64,$E$2:$E$92,E64,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F65",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B65,$E$2:$E$92,E65,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B65,$E$2:$E$92,E65,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B65,$E$2:$E$92,E65,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B65,$E$2:$E$92,E65,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F66",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B66,$E$2:$E$92,E66,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B66,$E$2:$E$92,E66,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B66,$E$2:$E$92,E66,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B66,$E$2:$E$92,E66,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F67",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B67,$E$2:$E$92,E67,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B67,$E$2:$E$92,E67,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B67,$E$2:$E$92,E67,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B67,$E$2:$E$92,E67,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F68",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B68,$E$2:$E$92,E68,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B68,$E$2:$E$92,E68,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B68,$E$2:$E$92,E68,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B68,$E$2:$E$92,E68,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F69",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B69,$E$2:$E$92,E69,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B69,$E$2:$E$92,E69,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B69,$E$2:$E$92,E69,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B69,$E$2:$E$92,E69,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F70",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B70,$E$2:$E$92,E70,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B70,$E$2:$E$92,E70,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B70,$E$2:$E$92,E70,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B70,$E$2:$E$92,E70,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F71",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B71,$E$2:$E$92,E71,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B71,$E$2:$E$92,E71,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B71,$E$2:$E$92,E71,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B71,$E$2:$E$92,E71,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F72",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B72,$E$2:$E$92,E72,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B72,$E$2:$E$92,E72,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B72,$E$2:$E$92,E72,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B72,$E$2:$E$92,E72,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F73",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B73,$E$2:$E$92,E73,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B73,$E$2:$E$92,E73,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B73,$E$2:$E$92,E73,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B73,$E$2:$E$92,E73,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F74",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B74,$E$2:$E$92,E74,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B74,$E$2:$E$92,E74,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B74,$E$2:$E$92,E74,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B74,$E$2:$E$92,E74,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F75",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B75,$E$2:$E$92,E75,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B75,$E$2:$E$92,E75,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B75,$E$2:$E$92,E75,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B75,$E$2:$E$92,E75,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F76",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B76,$E$2:$E$92,E76,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B76,$E$2:$E$92,E76,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B76,$E$2:$E$92,E76,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B76,$E$2:$E$92,E76,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F77",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B77,$E$2:$E$92,E77,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B77,$E$2:$E$92,E77,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B77,$E$2:$E$92,E77,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B77,$E$2:$E$92,E77,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F78",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B78,$E$2:$E$92,E78,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B78,$E$2:$E$92,E78,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B78,$E$2:$E$92,E78,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B78,$E$2:$E$92,E78,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F79",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B79,$E$2:$E$92,E79,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B79,$E$2:$E$92,E79,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B79,$E$2:$E$92,E79,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B79,$E$2:$E$92,E79,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F80",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B80,$E$2:$E$92,E80,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B80,$E$2:$E$92,E80,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B80,$E$2:$E$92,E80,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B80,$E$2:$E$92,E80,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F81",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B81,$E$2:$E$92,E81,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B81,$E$2:$E$92,E81,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B81,$E$2:$E$92,E81,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B81,$E$2:$E$92,E81,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F82",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B82,$E$2:$E$92,E82,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B82,$E$2:$E$92,E82,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B82,$E$2:$E$92,E82,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B82,$E$2:$E$92,E82,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F83",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B83,$E$2:$E$92,E83,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B83,$E$2:$E$92,E83,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B83,$E$2:$E$92,E83,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B83,$E$2:$E$92,E83,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F84",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B84,$E$2:$E$92,E84,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B84,$E$2:$E$92,E84,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B84,$E$2:$E$92,E84,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B84,$E$2:$E$92,E84,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F85",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B85,$E$2:$E$92,E85,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B85,$E$2:$E$92,E85,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B85,$E$2:$E$92,E85,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B85,$E$2:$E$92,E85,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F86",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B86,$E$2:$E$92,E86,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B86,$E$2:$E$92,E86,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B86,$E$2:$E$92,E86,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B86,$E$2:$E$92,E86,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F87",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B87,$E$2:$E$92,E87,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B87,$E$2:$E$92,E87,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B87,$E$2:$E$92,E87,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B87,$E$2:$E$92,E87,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F88",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B88,$E$2:$E$92,E88,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B88,$E$2:$E$92,E88,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B88,$E$2:$E$92,E88,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B88,$E$2:$E$92,E88,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F89",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B89,$E$2:$E$92,E89,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B89,$E$2:$E$92,E89,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B89,$E$2:$E$92,E89,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B89,$E$2:$E$92,E89,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F90",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B90,$E$2:$E$92,E90,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B90,$E$2:$E$92,E90,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B90,$E$2:$E$92,E90,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B90,$E$2:$E$92,E90,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F91",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B91,$E$2:$E$92,E91,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B91,$E$2:$E$92,E91,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B91,$E$2:$E$92,E91,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B91,$E$2:$E$92,E91,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        },
+        {
+          "sheet": "Sheet2",
+          "cell": "F92",
+          "before": "=IF(AND(COUNTIFS($B$2:$B$92,B92,$E$2:$E$92,E92,$C$2:$C$92,\"Sick Day\")\\u003e0,COUNTIFS($B$2:$B$92,B92,$E$2:$E$92,E92,$D$2:$D$92,\"Overtime\")\\u003e0),\"Y\",\"\")",
+          "after": "=IF(AND(COUNTIFS($B$2:$B$92,B92,$E$2:$E$92,E92,$C$2:$C$92,\"Sick Day\")>0,COUNTIFS($B$2:$B$92,B92,$E$2:$E$92,E92,$D$2:$D$92,\"Overtime\")>0),\"Y\",\"\")"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "53117",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-3/runs/53117/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/53117-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "D2",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D3",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D4",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D5",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D6",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D7",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D8",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D9",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D10",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D11",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D12",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D13",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D14",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D15",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D16",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D17",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D18",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D19",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D20",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D21",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D22",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D23",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D24",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D25",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D26",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D27",
+          "before": "=IF(C2\\u003c\\u003e\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"\\u003c\\u003eUS\"))",
+          "after": "=IF(C2<>\"US\",C2,MAXIFS(B:B,A:A,A2,C:C,\"<>US\"))"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "91-34",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-3/runs/91-34/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/91-34-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "SwiftMD",
+          "cell": "O3",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O4",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O5",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O6",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O7",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O8",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O9",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O10",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O11",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O12",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O13",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O14",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O15",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O16",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O17",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O18",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O19",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O20",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O21",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O22",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O23",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O24",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O25",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O26",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O27",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O28",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O29",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O30",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O31",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O32",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O33",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O34",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O35",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O36",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O37",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O38",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O39",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O40",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O41",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        },
+        {
+          "sheet": "SwiftMD",
+          "cell": "O42",
+          "before": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3\\u003c\\u003e\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"\\u003c\\u003eEmployee\")=2),\"Delete\",\"\"))",
+          "after": "=IF(C3=\"\",\"\",IF(AND(G3=\"Yes\",H3<>\"Employee\",COUNTIFS($C$3:$C3,C3,$D$3:$D3,D3,$F$3:$F3,F3,$G$3:$G3,\"Yes\",$H$3:$H3,\"<>Employee\")=2),\"Delete\",\"\"))"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "CF_21040",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-3/runs/CF_21040/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/CF_21040-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "B4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L4",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A4)*($B$14:$B$16=L$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "B5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L5",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A5)*($B$14:$B$16=L$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "B6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L6",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A6)*($B$14:$B$16=L$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "B7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L7",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A7)*($B$14:$B$16=L$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "B8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L8",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A8)*($B$14:$B$16=L$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "B9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L9",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A9)*($B$14:$B$16=L$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "B10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L10",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A10)*($B$14:$B$16=L$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "B11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=B$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=B$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=C$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=C$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=D$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=D$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=E$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=E$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "F11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=F$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=F$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "G11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=G$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=G$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "H11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=H$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=H$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "I11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=I$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=I$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "J11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=J$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=J$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "K11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=K$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=K$3))>0"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "L11",
+          "before": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=L$3))\\u003e0",
+          "after": "=SUMPRODUCT(($A$14:$A$16=$A11)*($B$14:$B$16=L$3))>0"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "52050",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-4/runs/52050/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/52050-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "BE3",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D3:BC3)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D3:BC3)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE4",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D4:BC4)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D4:BC4)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE5",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D5:BC5)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D5:BC5)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE6",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D6:BC6)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D6:BC6)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE7",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D7:BC7)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D7:BC7)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE8",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D8:BC8)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D8:BC8)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE9",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D9:BC9)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D9:BC9)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE10",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D10:BC10)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D10:BC10)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE11",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D11:BC11)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D11:BC11)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE12",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D12:BC12)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D12:BC12)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE13",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D13:BC13)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D13:BC13)"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "BE14",
+          "before": "=SUMIF(D$2:BC$2,\"\\u003e=\"&$B$2,D14:BC14)",
+          "after": "=SUMIF(D$2:BC$2,\">=\"&$B$2,D14:BC14)"
+        }
+      ],
+      "official_case1_pass": true
+    },
+    {
+      "task_id": "565-19",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-4/runs/565-19/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/565-19-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "Sheet1",
+          "cell": "C2",
+          "before": "=IF(COUNTIFS(A:A,A2,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A2,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D2",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E2",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C3",
+          "before": "=IF(COUNTIFS(A:A,A3,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A3,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D3",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E3",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C4",
+          "before": "=IF(COUNTIFS(A:A,A4,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A4,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D4",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E4",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C5",
+          "before": "=IF(COUNTIFS(A:A,A5,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A5,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D5",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E5",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C6",
+          "before": "=IF(COUNTIFS(A:A,A6,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A6,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D6",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E6",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C7",
+          "before": "=IF(COUNTIFS(A:A,A7,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A7,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D7",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E7",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C8",
+          "before": "=IF(COUNTIFS(A:A,A8,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A8,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D8",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E8",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C9",
+          "before": "=IF(COUNTIFS(A:A,A9,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A9,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D9",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E9",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C10",
+          "before": "=IF(COUNTIFS(A:A,A10,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A10,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D10",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E10",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C11",
+          "before": "=IF(COUNTIFS(A:A,A11,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A11,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D11",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E11",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C12",
+          "before": "=IF(COUNTIFS(A:A,A12,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A12,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D12",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E12",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C13",
+          "before": "=IF(COUNTIFS(A:A,A13,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A13,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D13",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E13",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C14",
+          "before": "=IF(COUNTIFS(A:A,A14,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A14,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D14",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E14",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C15",
+          "before": "=IF(COUNTIFS(A:A,A15,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A15,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D15",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E15",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "C16",
+          "before": "=IF(COUNTIFS(A:A,A16,B:B,$F$1)\\u003e0,ROW(),\"\")",
+          "after": "=IF(COUNTIFS(A:A,A16,B:B,$F$1)>0,ROW(),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "D16",
+          "before": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(A:A,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        },
+        {
+          "sheet": "Sheet1",
+          "cell": "E16",
+          "before": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16\\u003c\\u003e\"\"),ROW()-ROW($D$1))),\"\")",
+          "after": "=IFERROR(INDEX(B:B,AGGREGATE(15,6,$C$2:$C$16/($C$2:$C$16<>\"\"),ROW()-ROW($D$1))),\"\")"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "58656",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-4/runs/58656/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/58656-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "DATA",
+          "cell": "K126",
+          "before": "=IF(AND(G126=\"n\", D126\\u003eDATE(A126,4,21)), 1, IF(AND(G126=\"n\", J125\\u003e21), K125+1, K125))",
+          "after": "=IF(AND(G126=\"n\", D126>DATE(A126,4,21)), 1, IF(AND(G126=\"n\", J125>21), K125+1, K125))"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "K127",
+          "before": "=IF(AND(G127=\"n\", D126\\u003eDATE(A127,4,21)), 1, IF(AND(G127=\"n\", J125\\u003e21), K126+1, K126))",
+          "after": "=IF(AND(G127=\"n\", D126>DATE(A127,4,21)), 1, IF(AND(G127=\"n\", J125>21), K126+1, K126))"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "K128",
+          "before": "=IF(AND(G128=\"n\", D126\\u003eDATE(A128,4,21)), 1, IF(AND(G128=\"n\", J125\\u003e21), K127+1, K127))",
+          "after": "=IF(AND(G128=\"n\", D126>DATE(A128,4,21)), 1, IF(AND(G128=\"n\", J125>21), K127+1, K127))"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "K129",
+          "before": "=IF(AND(G129=\"n\", D126\\u003eDATE(A129,4,21)), 1, IF(AND(G129=\"n\", J125\\u003e21), K128+1, K128))",
+          "after": "=IF(AND(G129=\"n\", D126>DATE(A129,4,21)), 1, IF(AND(G129=\"n\", J125>21), K128+1, K128))"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "K130",
+          "before": "=IF(AND(G130=\"n\", D126\\u003eDATE(A130,4,21)), 1, IF(AND(G130=\"n\", J125\\u003e21), K129+1, K129))",
+          "after": "=IF(AND(G130=\"n\", D126>DATE(A130,4,21)), 1, IF(AND(G130=\"n\", J125>21), K129+1, K129))"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "K131",
+          "before": "=IF(AND(G131=\"n\", D126\\u003eDATE(A131,4,21)), 1, IF(AND(G131=\"n\", J125\\u003e21), K130+1, K130))",
+          "after": "=IF(AND(G131=\"n\", D126>DATE(A131,4,21)), 1, IF(AND(G131=\"n\", J125>21), K130+1, K130))"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "K132",
+          "before": "=IF(AND(G132=\"n\", D126\\u003eDATE(A132,4,21)), 1, IF(AND(G132=\"n\", J125\\u003e21), K131+1, K131))",
+          "after": "=IF(AND(G132=\"n\", D126>DATE(A132,4,21)), 1, IF(AND(G132=\"n\", J125>21), K131+1, K131))"
+        }
+      ],
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "82-38",
+      "original": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-4/runs/82-38/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-transport-audit-8t1a_vm7/82-38-transport-fixed.xlsx",
+      "changes": [
+        {
+          "sheet": "DATA",
+          "cell": "D2",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "D3",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "D4",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "D5",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "D6",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "D7",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "D8",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        },
+        {
+          "sheet": "DATA",
+          "cell": "D9",
+          "before": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2\\u003c\\u003e\"TOTAL\"))+1),\"\"),\"\")",
+          "after": "=IF(E2=\"SH1\",IFERROR(INDEX(SH1!D:D,AGGREGATE(15,6,ROW(SH1!D$1:D$100)/(SH1!D$1:D$100=\"INVOICE NO\"),COUNTIFS(A$1:A2,\"TOTAL\",E$1:E2,\"SH1\")+(A2<>\"TOTAL\"))+1),\"\"),\"\")"
+        }
+      ],
+      "official_case1_pass": false
+    }
+  ],
+  "coverage": [
+    {
+      "task_id": "37228",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/37228/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-q5sxss4o/37228-coverage-fixed.xlsx",
+      "formula_unchanged": "=IF(E2=1,IF(ISNUMBER(FIND(\" / \",F2)),LEFT(F2,FIND(\" / \",F2)-1),F2),IF(ISNUMBER(FIND(\" / \",F2)),MID(F2,FIND(\" / \",F2)+3,LEN(F2)),\"\"))",
+      "range": "Sheet1!G2:G23",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "49782",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-2/runs/49782/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-q5sxss4o/49782-coverage-fixed.xlsx",
+      "formula_unchanged": "=IFERROR(INDIRECT(\"'\"&A4&\"'!C6\") & \"-\" & COUNTIF($A$4:A4,A4), \"\")",
+      "range": "Sub CO's!B4:B11",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": true
+    },
+    {
+      "task_id": "50472",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-3/runs/50472/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-q5sxss4o/50472-coverage-fixed.xlsx",
+      "formula_unchanged": "=VALUE(LEFT(A1,FIND(\" \",A1&\" \")-1))",
+      "range": "Sheet1!B1:B17",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "56451",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-2/runs/56451/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-q5sxss4o/56451-coverage-fixed.xlsx",
+      "formula_unchanged": "=INDEX('Sheet 2'!$A$1:$F$7,MATCH($A2,'Sheet 2'!$A:$A,0),COLUMN(B1))",
+      "range": "Sheet1!B2:F7",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": true
+    }
+  ],
+  "coverage_semantic": [
+    {
+      "task_id": "37228",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/37228/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-xsp2dqa9/37228-coverage-fixed.xlsx",
+      "formula": "=IF(F2=\"\",\"\",IF(ISNUMBER(FIND(\" / \",F2)),IF(E2=1,LEFT(F2,FIND(\" / \",F2)-1),MID(F2,FIND(\" / \",F2)+3,LEN(F2))),F2))",
+      "semantic_guards": true,
+      "range": "Sheet1!G2:G23",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": true
+    },
+    {
+      "task_id": "49782",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-2/runs/49782/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-xsp2dqa9/49782-coverage-fixed.xlsx",
+      "formula": "=IFERROR(INDIRECT(\"'\"&A4&\"'!C6\") & \"-\" & COUNTIF($A$4:A4,A4), \"\")",
+      "semantic_guards": true,
+      "range": "Sub CO's!B4:B11",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": true
+    },
+    {
+      "task_id": "50472",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-3/runs/50472/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-xsp2dqa9/50472-coverage-fixed.xlsx",
+      "formula": "=IF(A1=\"\",\"\",VALUE(LEFT(A1,FIND(\" \",A1&\" \")-1)))",
+      "semantic_guards": true,
+      "range": "Sheet1!B1:B17",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": true
+    },
+    {
+      "task_id": "56451",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-2/runs/56451/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "candidate": "/tmp/v1-case1-coverage-audit-xsp2dqa9/56451-coverage-fixed.xlsx",
+      "formula": "=INDEX('Sheet 2'!$A$1:$F$7,MATCH($A2,'Sheet 2'!$A:$A,0),COLUMN(B1))",
+      "semantic_guards": true,
+      "range": "Sheet1!B2:F7",
+      "range_source": "last nonempty input key cell",
+      "official_case1_pass": true
+    }
+  ],
+  "recalculation_control": [
+    {
+      "task_id": "52050",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-4/runs/52050/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "source_sha256": "6de73d96cc0a29998a33e9c94cee272f392bcf03157c56ae835ff67adfa92cd0",
+      "control": "/tmp/v1-case1-recalc-control-iuaph4q8/52050.xlsx",
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "37228",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-1/runs/37228/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "source_sha256": "33d766ed67efeae6ee454f92bd44e181bee8f33c68d9106c538e2cdd9f868b2e",
+      "control": "/tmp/v1-case1-recalc-control-iuaph4q8/37228.xlsx",
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "49782",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-2/runs/49782/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "source_sha256": "ee3d428286f415ad6883f8e3dd5e0acded710058a69809b01dd11c7b7bce1b1e",
+      "control": "/tmp/v1-case1-recalc-control-iuaph4q8/49782.xlsx",
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "50472",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-3/runs/50472/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "source_sha256": "078da52dbddbe9d8dc074f4907224ba2af373f67bd520ee0ab0221cba44d1fee",
+      "control": "/tmp/v1-case1-recalc-control-iuaph4q8/50472.xlsx",
+      "official_case1_pass": false
+    },
+    {
+      "task_id": "56451",
+      "source": "/data/zju-160/tongzeyuan/spreadsheet-harness/benchmarks/results/spreadsheetbench-v1-harness-representative-200-seed42-planner-contract-rerun-20260914b/workers/worker-2/runs/56451/spreadsheet-harness-financial/case-1/artifacts/output.xlsx",
+      "source_sha256": "e0806789b3b54778a95d3c96fcbd5a146392e993d11c8a5cb892ddd408dd8104",
+      "control": "/tmp/v1-case1-recalc-control-iuaph4q8/56451.xlsx",
+      "official_case1_pass": false
+    }
+  ]
+}

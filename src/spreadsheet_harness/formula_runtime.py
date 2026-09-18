@@ -419,14 +419,12 @@ def _sheet_formula_cells(raw: bytes, *, sheet: str) -> dict[FormulaCoordinate, F
             "text": _canonical_formula_text(formula_text),
         }
         # LibreOffice rewrites literal error-valued cells (for example an input
-        # ``#N/A``) as ``<f>#N/A</f>`` during recalculation.  That is a value
-        # representation change, not a model-authored formula mutation.  Keep
-        # real error-producing formulas such as ``=NA()`` in the inventory while
-        # ignoring only this exact literal form.
-        if (
-            cached_type == "e"
-            and effective["text"].upper() in _SPREADSHEET_ERROR_VALUES
-        ):
+        # ``#N/A``) as ``<f>#N/A</f>`` during recalculation.  Depending on the
+        # writer, the rewritten cell may carry ``t="e"`` or no type attribute.
+        # This is a value representation change, not a model-authored formula
+        # mutation.  Keep real error-producing formulas such as ``=NA()`` in the
+        # inventory while ignoring only this exact literal form.
+        if effective["text"].upper() in _SPREADSHEET_ERROR_VALUES:
             continue
         formula_sha256 = hashlib.sha256(
             json.dumps(

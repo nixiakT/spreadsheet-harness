@@ -1,0 +1,39 @@
+backbone,benchmark,category,metric,method,score,ci_low,ci_high,n_tasks,n_cases,seed,source_file
+DeepSeek-V4-Flash,SpreadsheetBench v2,Overall,Exact,Bare,,,,,,,
+DeepSeek-V4-Flash,SpreadsheetBench v2,Overall,Modification,Bare,,,,,,,
+Qwen3-Coder-480B,SpreadsheetBench v1,Overall,Soft,SHEETHARNESS-BASIC,,,,200,,41,benchmarks/results/ours-basic-qwen-v1-20260917/aggregate_summary.json
+Qwen3-Coder-480B,SpreadsheetBench v1,Overall,Hard,SHEETHARNESS-BASIC,,,,200,,41,benchmarks/results/ours-basic-qwen-v1-20260917/aggregate_summary.json
+Qwen3-Coder-480B,SpreadsheetBench v2,Overall,Exact,Bare,,,,,,,
+Qwen3-Coder-480B,SpreadsheetBench v2,Overall,Modification,Bare,,,,,,,
+Qwen3-Coder-480B,SpreadsheetBench v2,Overall,Exact,SHEETHARNESS-BASIC,,,,297,,41,benchmarks/results/ours-basic-qwen-v2-20260917
+Qwen3-Coder-480B,SpreadsheetBench v2,Overall,Modification,SHEETHARNESS-BASIC,,,,297,,41,benchmarks/results/ours-basic-qwen-v2-20260917
+Qwen3-Coder-480B,SpreadsheetBench v2,Overall,Exact,SHEETHARNESS-FINANCIAL,,,,297,,41,benchmarks/results/ours-qwen-v2-run2-20260916
+Qwen3-Coder-480B,SpreadsheetBench v2,Overall,Modification,SHEETHARNESS-FINANCIAL,,,,297,,41,benchmarks/results/ours-qwen-v2-run2-20260916
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Soft,Bare,46.45,,,200,,41,benchmarks/results/spreadsheetbench-v1-bare-deepseek-v4-flash-representative-200-internal-seed41-20260915/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Hard,Bare,38.30,,,200,,41,benchmarks/results/spreadsheetbench-v1-bare-deepseek-v4-flash-representative-200-internal-seed41-20260915/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Soft,SHEETHARNESS-BASIC,32.81,,,200,,41,benchmarks/results/spreadsheetbench-v1-harness-basic-1.1-matched-200-seed41-20260915b/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Hard,SHEETHARNESS-BASIC,27.89,,,200,,41,benchmarks/results/spreadsheetbench-v1-harness-basic-1.1-matched-200-seed41-20260915b/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Soft,SHEETHARNESS-FINANCIAL,28.49,,,200,,41,benchmarks/results/spreadsheetbench-v1-harness-financial-1.1-matched-200-seed41-20260915b/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Hard,SHEETHARNESS-FINANCIAL,23.12,,,200,,41,benchmarks/results/spreadsheetbench-v1-harness-financial-1.1-matched-200-seed41-20260915b/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Soft,SHEETHARNESS-FINANCIAL,32.46,,,200,,41,benchmarks/results/ours-deepseek-v1-run2-20260916/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v1,Overall,Hard,SHEETHARNESS-FINANCIAL,26.32,,,200,,41,benchmarks/results/ours-deepseek-v1-run2-20260916/aggregate_summary.json
+Qwen3-Coder-480B,SpreadsheetBench v1,Overall,Soft,Bare,29.34,,,912,,41,benchmarks/results/spreadsheetbench-v1-bare-qwen3-coder-480b-full-20260915-r3/summary.json
+Qwen3-Coder-480B,SpreadsheetBench v1,Overall,Hard,Bare,24.54,,,912,,41,benchmarks/results/spreadsheetbench-v1-bare-qwen3-coder-480b-full-20260915-r3/summary.json
+Qwen3-Coder-480B,SpreadsheetBench v1,Overall,Soft,SHEETHARNESS-FINANCIAL,29.69,,,200,,41,benchmarks/results/ours-qwen-v1-run2-20260916/aggregate_summary.json
+Qwen3-Coder-480B,SpreadsheetBench v1,Overall,Hard,SHEETHARNESS-FINANCIAL,26.04,,,200,,41,benchmarks/results/ours-qwen-v1-run2-20260916/aggregate_summary.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Template,Exact,SHEETHARNESS-BASIC,24.74,,,97,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Template,Modification,SHEETHARNESS-BASIC,69.20,,,97,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Financial Modeling,Exact,SHEETHARNESS-BASIC,4.00,,,100,100,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Financial Modeling,Modification,SHEETHARNESS-BASIC,51.17,,,100,100,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Debugging,Exact,SHEETHARNESS-BASIC,7.14,,,100,98,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Debugging,Modification,SHEETHARNESS-BASIC,43.43,,,100,98,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Overall,Exact,SHEETHARNESS-BASIC,11.86,,,297,295,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Overall,Modification,SHEETHARNESS-BASIC,54.53,,,297,295,41,benchmarks/results/deepseek-v4-flash-harness-v26-basic-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Template,Exact,SHEETHARNESS-FINANCIAL,19.59,,,97,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Template,Modification,SHEETHARNESS-FINANCIAL,68.55,,,97,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Financial Modeling,Exact,SHEETHARNESS-FINANCIAL,22.68,,,100,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Financial Modeling,Modification,SHEETHARNESS-FINANCIAL,68.52,,,100,97,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Debugging,Exact,SHEETHARNESS-FINANCIAL,8.08,,,100,99,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Debugging,Modification,SHEETHARNESS-FINANCIAL,44.51,,,100,99,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Overall,Exact,SHEETHARNESS-FINANCIAL,16.72,,,297,293,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json
+DeepSeek-V4-Flash,SpreadsheetBench v2,Overall,Modification,SHEETHARNESS-FINANCIAL,60.42,,,297,293,41,benchmarks/results/deepseek-v4-flash-harness-v26-all-v2-p6-20260915/tasks/*/results.json

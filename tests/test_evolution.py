@@ -240,6 +240,148 @@ def test_generation_rejects_trajectory_without_evaluator_outcome(tmp_path: Path)
     assert not (tmp_path / "candidates").exists()
 
 
+def test_generation_repairs_invalid_frontmatter_without_repeating_lessons(tmp_path: Path) -> None:
+    trajectory = tmp_path / "trajectory.jsonl"
+    _write_trajectory(trajectory, [_row("benchmark.evaluated", {"passed": False})])
+    valid = "---\nname: spreadsheet-core\ndescription: A bounded repair.\n---\n\nInspect target boundaries.\n"
+    client = FakeResponsesClient(["lesson", "Missing YAML", valid])
+    candidate = generate_candidate([trajectory], tmp_path, client, candidate_id="repair")
+    assert len(client.payloads) == 3
+    assert candidate.skill_path.read_text() == valid
+    provenance = json.loads(candidate.provenance_path.read_text())
+    assert provenance["format_repair_count"] == 1
+
+
+def test_generation_resumes_lessons_after_a_failed_consolidation(tmp_path: Path) -> None:
+    trajectory = tmp_path / "trajectory.jsonl"
+    _write_trajectory(trajectory, [_row("benchmark.evaluated", {"passed": False})])
+    client = FakeResponsesClient(["lesson", "Missing YAML"])
+    with pytest.raises(ValueError, match="YAML frontmatter"):
+        generate_candidate([trajectory], tmp_path, client, candidate_id="resume", format_retries=0)
+    valid = "---\nname: spreadsheet-core\ndescription: A bounded repair.\n---\n\nInspect target boundaries.\n"
+    second = FakeResponsesClient([valid])
+    candidate = generate_candidate([trajectory], tmp_path, second, candidate_id="resume")
+    assert len(second.payloads) == 1
+    assert candidate.skill_path.read_text() == valid
+
+
+def test_candidate_identity_and_empty_body_are_rejected() -> None:
+    with pytest.raises(ValueError, match="name must be"):
+        evolution._normalize_skill(
+            "---\nname: wrong\ndescription: Description.\n---\n\nBody.", expected_name="correct"
+        )
+    with pytest.raises(ValueError, match="nonempty instruction body"):
+        evolution._normalize_skill("---\nname: ok\ndescription: Description.\n---\n\n")
+
+
+def test_candidate_normalization_recovers_thinking_provider_preamble() -> None:
+    wrapped = (
+        "I will compare several remedies internally.\n"
+        "</think>---\n"
+        "name: spreadsheet-core\n"
+        "description: A bounded repair.\n"
+        "---\n\n"
+        "Inspect target boundaries.\n"
+    )
+    assert evolution._normalize_skill(wrapped, expected_name="spreadsheet-core") == (
+        "---\n"
+        "name: spreadsheet-core\n"
+        "description: A bounded repair.\n"
+        "---\n\n"
+        "Inspect target boundaries.\n"
+    )
+
+
+def test_candidate_normalization_does_not_recover_wrong_skill_identity() -> None:
+    wrapped = (
+        "analysis\n---\nname: wrong\ndescription: Wrong coordinate.\n---\n\nBody."
+    )
+    with pytest.raises(ValueError, match="YAML frontmatter"):
+        evolution._normalize_skill(wrapped, expected_name="spreadsheet-core")
+
+
+def test_consolidation_prompt_distinguishes_repair_and_negative_evidence() -> None:
+    prompt = evolution._CONSOLIDATION_INSTRUCTIONS
+    assert "repair`` is a failure of the accepted incumbent" in prompt
+    assert "rejected-candidate-regression" in prompt
+    assert "do not turn those failures into desired\nbehavior" in prompt
+
+
+def test_evidence_contains_tool_actions_and_original_request(tmp_path: Path) -> None:
+    trajectory = tmp_path / "trajectory.jsonl"
+    _write_trajectory(trajectory, [
+        _row("agent.started", {"instruction": "Fill A1 only", "skills": []}),
+        _row("tool.called", {"name": "write", "arguments": {"cell": "A2"}}),
+        _row("tool.returned", {"name": "write", "result": {"ok": True}}),
+        _row("benchmark.evaluated", {"passed": False}),
+    ])
+    context = extract_trajectory_evidence(trajectory).for_prompt()["execution_context"]
+    assert context[0]["payload"]["instruction"] == "Fill A1 only"
+    assert context[1]["payload"]["arguments"]["cell"] == "A2"
+
+
+def test_early_planner_writes_survive_long_readonly_tail(tmp_path: Path) -> None:
+    trajectory = tmp_path / "trajectory.jsonl"
+    rows = [
+        _row("agent.started", {"instruction": "Complete requested formulas."}),
+        _row("harness.planner_actions.applied", {"count": 23, "actions": []}),
+        _row("workbook.mutation.committed", {}),
+    ]
+    for _ in range(30):
+        rows.extend([
+            _row("tool.called", {"name": "code_interpreter", "arguments": {"code": "read()"}}),
+            _row("tool.returned", {"name": "code_interpreter", "result": {"ok": True, "workbook_changed": False}}),
+        ])
+    rows.append(_row("benchmark.evaluated", {"passed": False}))
+    _write_trajectory(trajectory, rows)
+    evidence = extract_trajectory_evidence(trajectory, max_items_per_category=2)
+    assert evidence.diagnostics["planner_applied_writes"] == 23
+    assert evidence.diagnostics["max_readonly_code_streak"] == 30
+    assert evidence.diagnostics["committed_mutations"] == 1
+    assert any(e["event"] == "harness.planner_actions.applied" for e in evidence.decision_events)
+    assert evidence.decision_events[0]["event_index"] == 2
+
+
+def test_stderr_tail_retains_actual_exception_and_redacts_secrets(tmp_path: Path) -> None:
+    trajectory = tmp_path / "trajectory.jsonl"
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    _write_trajectory(trajectory, [
+        _row("tool.called", {"name": "code_interpreter", "arguments": {"code": "x[d]"}}),
+        _row("tool.returned", {"name": "code_interpreter", "result": {
+            "ok": False, "exit_code": 1,
+            "stderr": "Traceback\n" + "frame\n" * 1000 + secret + "\nTypeError: unhashable type: 'dict'\n",
+        }}),
+        _row("benchmark.evaluated", {"passed": False}),
+    ])
+    evidence = extract_trajectory_evidence(trajectory)
+    error = evidence.tool_errors[0]
+    assert error["error_type"] == "TypeError"
+    assert "unhashable type" in error["error"]
+    assert error["event_index"] == 2
+    assert secret not in json.dumps(evidence.for_prompt())
+    assert "[REDACTED]" in error["stderr_tail"]
+
+
+def test_proposer_projection_withholds_reference_answers_not_audit_evidence() -> None:
+    raw = {"official_score": {"error_message": "Regression error at Income!E34: answer=-126685.714, output=0"},
+           "golden_path": "/secret/case_golden.xlsx", "expected_value": 1234,
+           "trace_path": "/replay/trajectory.jsonl"}
+    clean = evolution.proposer_visible(raw)
+    assert "-126685.714" not in json.dumps(clean)
+    assert "expected_value" not in clean and "golden_path" not in clean
+    assert "output=0" in clean["official_score"]["error_message"]
+    assert clean["trace_path"] == raw["trace_path"]
+    assert "-126685.714" in raw["official_score"]["error_message"]
+
+
+def test_proposer_keeps_model_proposed_formula_not_golden_values() -> None:
+    raw = {"event": "harness.planner_actions.applied", "payload": {
+        "actions": [{"target": "E11", "expected_value": "=SUM(E7:E10)"}]
+    }}
+    clean = evolution.proposer_visible(raw)
+    assert clean["payload"]["actions"][0]["expected_value"] == "=SUM(E7:E10)"
+
+
 def test_evolution_generation_uses_and_records_provider_controls(tmp_path: Path) -> None:
     trajectory = tmp_path / "trajectory.jsonl"
     _write_trajectory(trajectory, [_row("benchmark.evaluated", {"passed": True})])

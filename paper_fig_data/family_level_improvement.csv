@@ -1,0 +1,1 @@
+suite,family_id,n_tasks,static_score,general_only_score,domain_only_score,evolved_score,delta_evolved_vs_static,delta_evolved_vs_general,delta_evolved_vs_domain,static_success_rate,evolved_success_rate,run_id,split,source_file

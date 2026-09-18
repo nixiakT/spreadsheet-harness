@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
 from .code_interpreter import LocalCodeInterpreter
@@ -26,6 +26,7 @@ from .formula_runtime import (
     formula_inventory,
     formula_runtime_report,
 )
+from .openpyxl_compat import load_workbook
 from .session import WorkbookSession
 
 _INSPECT_MAX_CELLS = 500
@@ -163,6 +164,91 @@ def _bounded_text(value: Any, limit: int) -> str | None:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)] + "…"
+
+
+def _official_view_xlsx(
+    path: Path,
+    *,
+    mode: str = "content",
+    sheet: str | None = None,
+    start_row: int | None = None,
+    end_row: int | None = None,
+    start_col: int | str | None = None,
+    end_col: int | str | None = None,
+    cols: str | None = None,
+) -> str:
+    """Small host-side implementation of the released ``view_xlsx`` contract."""
+
+    workbook = load_workbook(path, data_only=False, keep_links=True)
+    try:
+        visible = [
+            ws for ws in workbook.worksheets
+            if getattr(ws, "sheet_state", "visible") == "visible"
+        ]
+        if mode == "list":
+            return "Sheets: " + repr([ws.title for ws in visible])
+        if mode != "content":
+            raise ToolInputError("mode must be 'list' or 'content'")
+        if not visible:
+            return "No visible sheets"
+        wanted = sheet.strip().casefold() if isinstance(sheet, str) else None
+        target = next(
+            (ws for ws in visible if wanted is None or ws.title.strip().casefold() == wanted),
+            None,
+        )
+        if target is None:
+            raise ToolInputError(
+                f"Worksheet not found: {sheet!r}; available={[ws.title for ws in visible]!r}"
+            )
+        min_col, min_row, max_col, max_row = range_boundaries(target.calculate_dimension())
+
+        def col_index(value: Any, default: int) -> int:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                raise ToolInputError("column bounds must be letters or positive integers")
+            if isinstance(value, int):
+                result = value
+            else:
+                text = str(value).strip().replace("$", "")
+                match = re.fullmatch(r"([A-Za-z]{1,3})(?:[1-9][0-9]*)?", text)
+                if match is None:
+                    raise ToolInputError(f"Invalid column reference: {value!r}")
+                result = column_index_from_string(match.group(1))
+            if result < 1:
+                raise ToolInputError("column bounds must be positive")
+            return result
+
+        selected_min = col_index(start_col, min_col)
+        selected_max = col_index(end_col, max_col)
+        if cols is not None:
+            intervals: list[tuple[int, int]] = []
+            for piece in str(cols).replace("$", "").split(","):
+                endpoints = [part.strip() for part in piece.split(":") if part.strip()]
+                if not endpoints or len(endpoints) > 2:
+                    raise ToolInputError(f"Invalid column range: {cols!r}")
+                left = col_index(endpoints[0], min_col)
+                right = col_index(endpoints[-1], left)
+                intervals.append((min(left, right), max(left, right)))
+            selected_min = min(left for left, _ in intervals)
+            selected_max = max(right for _, right in intervals)
+        selected_min = max(min_col, selected_min)
+        selected_max = min(max_col, selected_max)
+        if selected_max < selected_min:
+            raise ToolInputError("Requested columns do not intersect worksheet bounds")
+        actual_start = max(1, int(start_row)) if start_row is not None else min_row
+        actual_end = max(actual_start, int(end_row)) if end_row is not None else max_row
+        actual_end = min(actual_end, max_row)
+        lines = [f"Sheet: {target.title}", f"Data range: {target.calculate_dimension()}"]
+        for row in range(actual_start, actual_end + 1):
+            values = [
+                target.cell(row=row, column=col).value
+                for col in range(selected_min, selected_max + 1)
+            ]
+            lines.append(f"Row {row}: {values!r}")
+        return "\n".join(lines)
+    finally:
+        workbook.close()
 
 
 def _latex_escape(value: Any, *, max_chars: int) -> tuple[str, bool]:
@@ -332,6 +418,10 @@ class SpreadsheetToolRegistry:
         self._pending_formula_validation: tuple[FormulaCoordinate, ...] = ()
         self._handlers: dict[str, Callable[[dict[str, Any]], ToolOutcome]] = {
             "list_sheets": self._list_sheets,
+            # Official SpreadsheetBench compatibility tools.  ``view_xlsx`` is
+            # intentionally read-only; ``bash`` runs in the same bounded
+            # workspace transaction as code_interpreter.
+            "view_xlsx": self._view_xlsx,
             "inspect_range": self._inspect_range,
             "range_to_latex": self._range_to_latex,
             "find_cells": self._find_cells,
@@ -348,6 +438,7 @@ class SpreadsheetToolRegistry:
             "undo_last": self._undo_last,
         }
         if self.interpreter:
+            self._handlers["bash"] = self._bash
             self._handlers["code_interpreter"] = self._code_interpreter
 
     @property
@@ -377,6 +468,26 @@ class SpreadsheetToolRegistry:
                 "list_sheets",
                 "List worksheets, visibility, used dimensions, merges and tables.",
                 _object_schema({}, []),
+            ),
+            self._schema(
+                "view_xlsx",
+                (
+                    "Official-protocol-compatible, read-only workbook view. Use mode=list for "
+                    "visible sheet names, or mode=content for a bounded row window with formulas "
+                    "and values. Sheet names are matched forgivingly; do not guess a sheet name."
+                ),
+                _object_schema(
+                    {
+                        "mode": {"type": "string", "enum": ["list", "content"], "default": "content"},
+                        "sheet": {**sheet, "type": ["string", "null"]},
+                        "start_row": {"type": ["integer", "null"], "minimum": 1},
+                        "end_row": {"type": ["integer", "null"], "minimum": 1},
+                        "start_col": {"type": ["string", "integer", "null"]},
+                        "end_col": {"type": ["string", "integer", "null"]},
+                        "cols": {"type": ["string", "null"], "description": "Column interval such as A:J."},
+                    },
+                    [],
+                ),
             ),
             self._schema(
                 "inspect_range",
@@ -566,6 +677,29 @@ class SpreadsheetToolRegistry:
         if self.interpreter:
             schemas.append(
                 self._schema(
+                    "bash",
+                    (
+                        "Run a bounded bash command in the isolated task workspace. The command "
+                        "receives SHEET_WORKBOOK and SHEET_WORKSPACE; use those variables instead "
+                        "of guessed paths. Workbook edits are transactional and invalid formula "
+                        "changes are rolled back. Prefer view_xlsx for read-only inspection."
+                    ),
+                    _object_schema(
+                        {
+                            "command": {"type": "string", "minLength": 1},
+                            "timeout_seconds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 60,
+                                "default": 60,
+                            },
+                        },
+                        ["command"],
+                    ),
+                )
+            )
+            schemas.append(
+                self._schema(
                     "code_interpreter",
                     (
                         "Run trusted Python in the task workspace for analysis and direct "
@@ -656,6 +790,41 @@ class SpreadsheetToolRegistry:
 
     def _list_sheets(self, _: dict[str, Any]) -> ToolOutcome:
         return ToolOutcome(self.session.list_sheets())
+
+    def _view_xlsx(self, args: dict[str, Any]) -> ToolOutcome:
+        """Expose the released official ``view_xlsx`` shape as a native tool."""
+        mode = args.get("mode", "content")
+        if mode not in {"list", "content"}:
+            raise ToolInputError("mode must be 'list' or 'content'")
+        # Keep native observations bounded even when a model omits a row window.
+        start_row = args.get("start_row")
+        end_row = args.get("end_row")
+        if mode == "content" and end_row is None:
+            start = int(start_row) if start_row is not None else 1
+            end_row = start + 99
+        rendered = _official_view_xlsx(
+            self.session.workbook_path,
+            mode=mode,
+            sheet=args.get("sheet"),
+            start_row=start_row,
+            end_row=end_row,
+            start_col=args.get("start_col"),
+            end_col=args.get("end_col"),
+            cols=args.get("cols"),
+        )
+        # A direct tool observation should never crowd out the next model turn.
+        if len(rendered) > 24_000:
+            rendered = rendered[:23_900] + "\n[truncated by harness at 24000 characters]"
+        return ToolOutcome(
+            {
+                "ok": True,
+                "mode": mode,
+                "sheet": args.get("sheet"),
+                "start_row": start_row,
+                "end_row": end_row,
+                "view": rendered,
+            }
+        )
 
     def _inspect_range(self, args: dict[str, Any]) -> ToolOutcome:
         returned_range, bounds = _bounded_inspection_range(args["range_ref"])
@@ -792,24 +961,40 @@ class SpreadsheetToolRegistry:
         return ToolOutcome({"ok": True, **self._last_render})
 
     def _view_image(self, args: dict[str, Any]) -> ToolOutcome:
-        candidate = Path(args["image_path"])
-        if not candidate.is_absolute():
-            candidate = (self.session.workspace / candidate).resolve()
+        if self._last_render is None:
+            raise ToolInputError("Call render_workbook before view_image")
+        latest_pages = self._last_render.get("pages")
+        page_records = [
+            page
+            for page in latest_pages
+            if isinstance(page, dict) and isinstance(page.get("image_path"), str)
+        ] if isinstance(latest_pages, list) else []
+        requested = str(args["image_path"])
+        candidate_path = Path(requested)
+        if candidate_path.is_absolute():
+            candidate = candidate_path.resolve()
         else:
-            candidate = candidate.resolve()
+            # Render results expose both an absolute ``image_path`` and a concise
+            # page ``path``. Vision models commonly echo the concise value. Resolve
+            # it only through the latest render manifest; never accept an arbitrary
+            # workspace-relative path.
+            matching_pages = [
+                page
+                for page in page_records
+                if page.get("path") == requested
+                or Path(str(page["image_path"])).name == requested
+            ]
+            candidate = (
+                Path(str(matching_pages[0]["image_path"])).resolve()
+                if len(matching_pages) == 1
+                else (self.session.workspace / candidate_path).resolve()
+            )
         render_root = (self.session.paths.artifacts / "render").resolve()
         if render_root not in candidate.parents or candidate.suffix.lower() != ".png":
             raise ToolInputError(
                 "view_image only accepts PNGs produced in this run's render directory"
             )
-        if self._last_render is None:
-            raise ToolInputError("Call render_workbook before view_image")
-        latest_pages = self._last_render.get("pages")
-        latest_paths = {
-            Path(page["image_path"]).resolve()
-            for page in latest_pages
-            if isinstance(page, dict) and isinstance(page.get("image_path"), str)
-        } if isinstance(latest_pages, list) else set()
+        latest_paths = {Path(str(page["image_path"])).resolve() for page in page_records}
         if candidate not in latest_paths:
             raise ToolInputError(
                 "view_image only accepts a page returned by the most recent render_workbook call"
@@ -927,4 +1112,13 @@ class SpreadsheetToolRegistry:
             raise ToolInputError("code_interpreter is disabled")
         return ToolOutcome(
             self.interpreter.run(args["code"], timeout_seconds=args.get("timeout_seconds"))
+        )
+
+    def _bash(self, args: dict[str, Any]) -> ToolOutcome:
+        if not self.interpreter:
+            raise ToolInputError("bash is disabled")
+        return ToolOutcome(
+            self.interpreter.run_bash(
+                args["command"], timeout_seconds=args.get("timeout_seconds")
+            )
         )

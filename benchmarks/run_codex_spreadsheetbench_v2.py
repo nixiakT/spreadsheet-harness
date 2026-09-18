@@ -142,7 +142,14 @@ def load_tasks(dataset: Path, categories: list[str] | None, task_ids: set[str]) 
     return tasks
 
 
-def make_codex_home(base_dir: Path, port: int, api_key: str, skill: Path, task_key: str) -> Path:
+def make_codex_home(
+    base_dir: Path,
+    port: int,
+    api_key: str,
+    skill: Path,
+    task_key: str,
+    model: str = "DeepSeek-V4-Flash",
+) -> Path:
     home = base_dir / "codex-home"
     home.mkdir(mode=0o700, parents=True)
     (home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": api_key}), encoding="utf-8")
@@ -151,7 +158,7 @@ def make_codex_home(base_dir: Path, port: int, api_key: str, skill: Path, task_k
         "\n".join(
             [
                 'model_provider = "litellm"',
-                'model = "DeepSeek-V4-Flash"',
+                f'model = "{model}"',
                 'model_reasoning_effort = "medium"',
                 "disable_response_storage = true",
                 'preferred_auth_method = "apikey"',
@@ -260,7 +267,14 @@ def run_one(
         + skill_text,
         encoding="utf-8",
     )
-    codex_home = make_codex_home(runtime_root / slug, proxy_port, api_key, skill, slug)
+    codex_home = make_codex_home(
+        runtime_root / slug,
+        proxy_port,
+        api_key,
+        skill,
+        slug,
+        model=model,
+    )
     input_source = (dataset / category / str(task["spreadsheet_path"])).resolve(strict=True)
     input_path = task_root / "input.xlsx"
     if not input_path.is_file():

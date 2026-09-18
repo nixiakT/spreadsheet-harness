@@ -16,6 +16,18 @@ from openpyxl.reader.drawings import find_images
 from openpyxl.reader.excel import ExcelReader
 from openpyxl.xml.functions import fromstring
 
+try:
+    from lxml.etree import XMLSyntaxError
+except ImportError:
+    XMLSyntaxError = ParseError
+
+
+def _is_unbound_prefix_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "unbound prefix" in message or (
+        "namespace prefix" in message and "not defined" in message
+    )
+
 _OOXML_NAMESPACE_URIS = {
     "cp": "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
     "dc": "http://purl.org/dc/elements/1.1/",
@@ -107,8 +119,8 @@ def _repaired_archive_bytes(source: str | PathLike[str]) -> bytes | None:
                 if info.filename in _OOXML_METADATA_XML:
                     try:
                         fromstring(payload)
-                    except ParseError as exc:
-                        if "unbound prefix" in str(exc):
+                    except (ParseError, XMLSyntaxError) as exc:
+                        if _is_unbound_prefix_error(exc):
                             candidate = _repair_unbound_prefix_xml(
                                 payload.decode("utf-8", errors="ignore")
                             ).encode("utf-8")
@@ -140,7 +152,7 @@ def load_workbook(
 ) -> Any:
     """Load a workbook with an isolated, idempotent chartsheet reader fix."""
 
-    parse_error: ParseError | None = None
+    parse_error: Exception | None = None
     try:
         return _load_workbook_once(
             filename,
@@ -150,8 +162,8 @@ def load_workbook(
             keep_links=keep_links,
             rich_text=rich_text,
         )
-    except ParseError as exc:
-        if "unbound prefix" not in str(exc) or not isinstance(filename, (str, PathLike)):
+    except (ParseError, XMLSyntaxError) as exc:
+        if not _is_unbound_prefix_error(exc) or not isinstance(filename, (str, PathLike)):
             raise
         parse_error = exc
     repaired = _repaired_archive_bytes(filename)

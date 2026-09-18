@@ -54,7 +54,7 @@ def run_one(
     task: dict[str, Any], *, dataset: Path, run_root: Path, runtime_root: Path,
     proxy_port: int, skill: Path, model: str, max_turns: int, max_output_tokens: int,
     task_timeout: float, evaluator: Path, recalculate_before_evaluation: bool,
-    api_key_file: Path,
+    api_key_file: Path, defer_evaluation: bool = False,
 ) -> dict[str, Any]:
     category = task["_category"]
     task_id = str(task["id"])
@@ -207,14 +207,16 @@ def run_one(
     ready = workbook_is_valid(output_path)
     recalculated = False
     recalculation_error: str | None = None
-    if ready and recalculate_before_evaluation and category != "Visualization":
+    if ready and recalculate_before_evaluation and not defer_evaluation and category != "Visualization":
         backup = task_root / "output.pre-recalc.xlsx"
         if not backup.exists():
             shutil.copy2(output_path, backup)
         recalculated, recalculation_error = recalculate_workbook(output_path, output_path)
         ready = workbook_is_valid(output_path)
     requests, exceeded = request_state()
-    if ready:
+    if ready and defer_evaluation:
+        status = "generated"
+    elif ready:
         status = "completed"
     elif timed_out:
         status = "timeout"
@@ -237,7 +239,8 @@ def run_one(
     }
     if recalculation_error and not recalculated:
         record["recalculation_error"] = recalculation_error
-    if ready and category != "Visualization":
+    record["evaluation_deferred"] = bool(ready and defer_evaluation)
+    if ready and category != "Visualization" and not defer_evaluation:
         try:
             evaluator_output = task_root / f"{task_id}_output.xlsx"
             shutil.copy2(output_path, evaluator_output)

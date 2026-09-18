@@ -1,0 +1,9 @@
+suite,H_state,D_state,composition_name,accuracy,ci_low,ci_high,n_families,run_id,source_file
+Fin-269,H0,D0,C00,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json
+Fin-269,H*,D0,C10,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json
+Fin-269,H0,D*,C01,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json
+Fin-269,H*,D*,C11,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json
+Fin-1.5K,H0,D0,C00,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json
+Fin-1.5K,H*,D0,C10,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json
+Fin-1.5K,H0,D*,C01,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json
+Fin-1.5K,H*,D*,C11,,,,,paper36-heldout-pilot-qwen36plus-20260917,benchmarks/results/paper36-heldout-pilot-qwen36plus-20260917/protocol.json

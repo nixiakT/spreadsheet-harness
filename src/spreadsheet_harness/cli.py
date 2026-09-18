@@ -146,6 +146,67 @@ def _provider(args: argparse.Namespace) -> ProviderConfig:
     )
 
 
+def _vision_provider(
+    args: argparse.Namespace,
+    primary: ProviderConfig,
+) -> ProviderConfig | None:
+    vision_model = getattr(args, "vision_model", None)
+    if not vision_model:
+        return None
+    vision_key_file = getattr(args, "vision_api_key_file", None)
+    vision_api_key = getattr(args, "vision_api_key", None)
+    vision_request_timeout = getattr(args, "vision_request_timeout", None)
+    inherited_api_key = (
+        primary.api_key if vision_key_file is None and vision_api_key is None else None
+    )
+    return ProviderConfig.discover(
+        base_url=getattr(args, "vision_base_url", None) or primary.base_url,
+        api_key=vision_api_key if vision_api_key is not None else inherited_api_key,
+        api_key_file=vision_key_file,
+        model=vision_model,
+        api_protocol=getattr(args, "vision_api_protocol", None) or primary.api_protocol,
+        reasoning_effort=(
+            getattr(args, "vision_reasoning_effort", None)
+            or primary.requested_reasoning_effort
+            or primary.reasoning_effort
+        ),
+        timeout_seconds=(
+            primary.timeout_seconds if vision_request_timeout is None else vision_request_timeout
+        ),
+        max_retries=(
+            primary.max_retries
+            if getattr(args, "vision_request_retries", None) is None
+            else args.vision_request_retries
+        ),
+        request_interval_seconds=(
+            primary.request_interval_seconds
+            if getattr(args, "vision_request_interval_seconds", None) is None
+            else args.vision_request_interval_seconds
+        ),
+        temperature=(
+            primary.temperature
+            if getattr(args, "vision_temperature", None) is None
+            else args.vision_temperature
+        ),
+        top_p=(primary.top_p if getattr(args, "vision_top_p", None) is None else args.vision_top_p),
+        seed=primary.seed,
+        presence_penalty=primary.presence_penalty,
+        top_k=primary.top_k,
+        min_p=primary.min_p,
+        repetition_penalty=primary.repetition_penalty,
+        enable_thinking=(
+            primary.enable_thinking
+            if getattr(args, "vision_enable_thinking", None) is None
+            else args.vision_enable_thinking
+        ),
+        litellm_timeout_seconds=(
+            primary.litellm_timeout_seconds
+            if getattr(args, "vision_litellm_timeout", None) is None
+            else args.vision_litellm_timeout
+        ),
+    )
+
+
 def _default_skill_root() -> Path:
     return Path(__file__).resolve().parents[2] / "skills"
 
@@ -850,8 +911,10 @@ def cmd_benchmark_v2_compare(args: argparse.Namespace) -> int:
         if args.output
         else Path("benchmarks/results") / ("spreadsheetbench-v2-paired-" + _now_id())
     )
+    config = _provider(args)
     summary = run_spreadsheetbench_v2_comparison(
-        config=_provider(args),
+        config=config,
+        vision_config=_vision_provider(args, config),
         dataset_root=args.dataset,
         evaluator_path=args.official_evaluator,
         output_dir=output,
@@ -907,8 +970,10 @@ def cmd_benchmark_v2_visual_generate(args: argparse.Namespace) -> int:
         categories=("Visualization",),
     )
     selected = select_spreadsheetbench_v2_tasks(tasks, args.task_id) if args.task_id else tasks
+    config = _provider(args)
     summary = run_spreadsheetbench_v2_comparison(
-        config=_provider(args),
+        config=config,
+        vision_config=_vision_provider(args, config),
         dataset_root=args.dataset,
         evaluator_path=args.visual_evaluator,
         output_dir=args.output,
@@ -950,8 +1015,10 @@ def cmd_benchmark_v1_compare(args: argparse.Namespace) -> int:
         if missing:
             raise HarnessError("Unknown SpreadsheetBench v1 task IDs: " + ", ".join(missing))
         tasks = [by_id[task_id] for task_id in requested]
+    config = _provider(args)
     summary = run_spreadsheetbench_v1_comparison(
-        config=_provider(args),
+        config=config,
+        vision_config=_vision_provider(args, config),
         dataset_root=args.dataset,
         output_dir=args.output,
         skill_registry=_skills(args),
@@ -1097,6 +1164,8 @@ def cmd_evolve_generate(args: argparse.Namespace) -> int:
             base_skill=args.base_skill,
             lesson_max_output_tokens=args.lesson_max_output_tokens,
             consolidation_max_output_tokens=args.consolidation_max_output_tokens,
+            attribution_context=args.attribution_context,
+            evidence_max_items_per_category=args.evidence_max_items_per_category,
         )
     _json_print(
         {
@@ -1377,6 +1446,44 @@ def _add_provider_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_vision_provider_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--vision-model",
+        help="Separate vision verifier model; required by the spreadsheet-agent arm",
+    )
+    parser.add_argument("--vision-base-url", help="Vision provider API base URL ending in /v1")
+    parser.add_argument("--vision-api-key", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--vision-api-key-file",
+        type=Path,
+        metavar="PATH",
+        help="Read the vision provider key from an owner-only file",
+    )
+    parser.add_argument("--vision-api-protocol", choices=API_PROTOCOLS)
+    parser.add_argument(
+        "--vision-reasoning-effort",
+        choices=[*REASONING_EFFORTS, *REASONING_ALIASES],
+    )
+    parser.add_argument("--vision-request-timeout", type=float)
+    parser.add_argument("--vision-request-retries", type=int, choices=range(0, 6))
+    parser.add_argument("--vision-request-interval-seconds", type=float)
+    parser.add_argument("--vision-litellm-timeout", type=float)
+    parser.add_argument("--vision-temperature", type=float)
+    parser.add_argument("--vision-top-p", type=float)
+    thinking = parser.add_mutually_exclusive_group()
+    thinking.add_argument(
+        "--vision-enable-thinking",
+        dest="vision_enable_thinking",
+        action="store_true",
+        default=None,
+    )
+    thinking.add_argument(
+        "--vision-disable-thinking",
+        dest="vision_enable_thinking",
+        action="store_false",
+    )
+
+
 def _max_output_tokens_value(value: str) -> int | None:
     normalized = str(value).strip().lower()
     if normalized in {"0", "none", "unlimited", "no-limit"}:
@@ -1584,7 +1691,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         choices=(
             "bare",
+            "paper-vision",
+            "spreadsheet-agent",
             "ours",
+            "spreadsheet-rl-native",
             "spreadsheet-harness-basic",
             "spreadsheet-harness-financial",
         ),
@@ -1600,6 +1710,7 @@ def build_parser() -> argparse.ArgumentParser:
     v1_compare.add_argument("--resume", action="store_true")
     v1_compare.add_argument("--seal-interrupted-current", action="store_true")
     _add_provider_flags(v1_compare)
+    _add_vision_provider_flags(v1_compare)
     v1_compare.set_defaults(handler=cmd_benchmark_v1_compare)
 
     v1_audit = benchmark_commands.add_parser(
@@ -1647,6 +1758,7 @@ def build_parser() -> argparse.ArgumentParser:
             "spreadsheet-rl-minimal",
             "spreadsheet-rl-native",
             "paper-vision",
+            "spreadsheet-agent",
             "spreadsheet-harness-basic",
             "spreadsheet-harness-financial",
         ),
@@ -1697,6 +1809,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="On resume, seal the unresolved current arm as not_scored without replaying it",
     )
     _add_provider_flags(v2_compare)
+    _add_vision_provider_flags(v2_compare)
     v2_compare.set_defaults(handler=cmd_benchmark_v2_compare)
 
     harbor_normalize = benchmark_commands.add_parser(
@@ -1726,6 +1839,7 @@ def build_parser() -> argparse.ArgumentParser:
             "spreadsheet-rl-minimal",
             "spreadsheet-rl-native",
             "paper-vision",
+            "spreadsheet-agent",
             "spreadsheet-harness-basic",
             "spreadsheet-harness-financial",
         ),
@@ -1758,6 +1872,7 @@ def build_parser() -> argparse.ArgumentParser:
     v2_visual_generate.add_argument("--resume", action="store_true")
     v2_visual_generate.add_argument("--seal-interrupted-current", action="store_true")
     _add_provider_flags(v2_visual_generate)
+    _add_vision_provider_flags(v2_visual_generate)
     v2_visual_generate.set_defaults(handler=cmd_benchmark_v2_visual_generate)
 
     v2_audit = benchmark_commands.add_parser(
@@ -1818,6 +1933,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=_max_output_tokens_value,
         default=8_000,
         help="Candidate consolidation output cap; use unlimited to omit max_tokens",
+    )
+    generate.add_argument(
+        "--attribution-context",
+        type=Path,
+        help="JSON attribution manifest mapping each trajectory to a plugin coordinate",
+    )
+    generate.add_argument(
+        "--evidence-max-items-per-category",
+        type=int,
+        default=12,
+        help="Bound success/failure/tool-error events included per trajectory",
     )
     _add_provider_flags(generate)
     generate.set_defaults(handler=cmd_evolve_generate)

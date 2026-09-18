@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import resource
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2107,3 +2108,205 @@ runpy.run_path(
             if rollback_snapshot is not None:
                 rollback_snapshot.unlink(missing_ok=True)
             mutation_marker.unlink(missing_ok=True)
+
+    def run_bash(self, command: str, *, timeout_seconds: int | None = None) -> dict[str, Any]:
+        """Run a bounded shell command in the isolated task workspace.
+
+        This is the compatibility counterpart of the official protocol's ``bash``
+        tool.  It deliberately shares the Python tool's workspace boundary and
+        transaction semantics: a failing command, timeout, or invalid formula
+        transaction cannot leave a partial managed workbook behind.  The command
+        receives ``SHEET_WORKBOOK`` and ``SHEET_WORKSPACE``; callers should use
+        those variables rather than guessing an artifact path.
+        """
+
+        if not isinstance(command, str) or not command.strip():
+            raise ToolInputError("command must not be empty")
+        if len(command) > 30_000:
+            raise ToolInputError("command exceeds the 30,000 character limit")
+        timeout = timeout_seconds or self.default_timeout
+        if timeout < 1 or timeout > 60:
+            raise ToolInputError("timeout_seconds must be between 1 and 60")
+
+        before_sha256 = _file_sha256(self.workbook)
+        identifier = uuid.uuid4().hex
+        script = self.code_dir / f"bash_{identifier}.sh"
+        script.write_text(command, encoding="utf-8")
+        rollback_snapshot: Path | None = None
+        if self.workbook.is_file():
+            rollback_snapshot = (
+                self.code_dir / f".workbook_before_bash_{identifier}{self.workbook.suffix}"
+            )
+            shutil.copy2(self.workbook, rollback_snapshot)
+        marker: Path | None = None
+        if self.require_isolation:
+            marker = self.code_dir / f".sandbox_started_bash_{identifier}"
+            # Unlike the Python launcher, a shell has no harness-owned entrypoint
+            # that can create the strict-start marker.  Prefix the script with a
+            # workspace-local touch so a missing marker still fails closed.
+            script.write_text(
+                f"touch -- {shlex.quote(str(marker))}\n{command}\n",
+                encoding="utf-8",
+            )
+        command_argv = ["/bin/bash", "--noprofile", "--norc", str(script)]
+        if self.require_isolation:
+            if marker is None:
+                raise CodeIsolationError("Strict sandbox launcher was not prepared")
+            argv = _strict_command(self.workspace, command_argv)
+            sandbox = f"{STRICT_ISOLATION_POLICY}: writable workspace, runtime allowlist, no network"
+        else:
+            argv = command_argv
+            sandbox = "cwd+rlimit (trusted shell)"
+            bubblewrap = shutil.which("bwrap") if platform.system() == "Linux" else None
+            if bubblewrap:
+                argv = [
+                    bubblewrap,
+                    "--die-with-parent",
+                    "--new-session",
+                    "--unshare-net",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--bind",
+                    str(self.workspace),
+                    str(self.workspace),
+                    "--proc",
+                    "/proc",
+                    "--dev",
+                    "/dev",
+                    "--chdir",
+                    str(self.workspace),
+                    *command_argv,
+                ]
+                sandbox = "bubblewrap: read-only host, writable workspace, network disabled"
+
+        environment = _environment(
+            self.workspace,
+            self.workbook,
+            mutation_marker=self.code_dir / f".managed_bash_mutation_{identifier}",
+        )
+        try:
+            completed = self._execute(argv, environment=environment, timeout=timeout)
+            if self.require_isolation and (marker is None or not marker.is_file()):
+                raise CodeIsolationError(
+                    "Strict comparison sandbox did not start; refusing unsandboxed fallback: "
+                    + self._bounded_diagnostic(completed.stderr)
+                )
+            bubblewrap_error: str | None = None
+            namespace_failure = (
+                not self.require_isolation
+                and sandbox.startswith("bubblewrap:")
+                and completed.returncode != 0
+                and any(
+                    marker_text in completed.stderr.lower()
+                    for marker_text in (
+                        "creating new namespace failed",
+                        "operation not permitted",
+                        "permission denied",
+                    )
+                )
+            )
+            if namespace_failure:
+                bubblewrap_error = self._bounded_diagnostic(completed.stderr)
+                completed = self._execute(command_argv, environment=environment, timeout=timeout)
+                sandbox = "cwd+rlimit fallback (bubblewrap unavailable; trusted shell)"
+
+            stdout, stdout_truncated = self._bounded_output(completed.stdout)
+            stderr, stderr_truncated = self._bounded_output(completed.stderr)
+            after_sha256 = _file_sha256(self.workbook)
+            workbook_changed = before_sha256 != after_sha256
+
+            def rollback_result(error: str) -> dict[str, Any]:
+                rejected_sha256 = after_sha256
+                if workbook_changed:
+                    _restore_workbook(rollback_snapshot, self.workbook)
+                restored_sha256 = _file_sha256(self.workbook)
+                return {
+                    "ok": False,
+                    "exit_code": completed.returncode,
+                    "error": error,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "truncated": stdout_truncated or stderr_truncated,
+                    "sandbox": sandbox,
+                    "bubblewrap_error": bubblewrap_error,
+                    "script": str(script.relative_to(self.workspace)),
+                    "workbook_sha256_before": before_sha256,
+                    "workbook_sha256_rejected": rejected_sha256,
+                    "workbook_sha256_after": restored_sha256,
+                    "workbook_changed": False,
+                    "workbook_rolled_back": workbook_changed,
+                    "managed_mutation_attempted": workbook_changed,
+                }
+
+            if completed.returncode != 0:
+                return rollback_result(
+                    "Bash command failed"
+                    + ("; partial workbook edits were rolled back" if workbook_changed else "")
+                )
+            if workbook_changed:
+                try:
+                    invalid_refs, formula_text = validate_formula_transaction(
+                        rollback_snapshot, self.workbook
+                    )
+                except Exception as exc:
+                    return rollback_result(
+                        "Workbook edit rolled back because the saved artifact could not pass "
+                        f"formula validation: {type(exc).__name__}: "
+                        f"{self._bounded_diagnostic(str(exc))}"
+                    )
+                if invalid_refs or formula_text:
+                    error, _validation = _formula_validation_failure(invalid_refs, formula_text)
+                    return rollback_result(error)
+            return {
+                "ok": True,
+                "exit_code": completed.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+                "sandbox": sandbox,
+                "bubblewrap_error": bubblewrap_error,
+                "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": workbook_changed,
+                "managed_mutation_attempted": workbook_changed,
+                "message": (
+                    "Workbook changed. Verify the exact target range, then submit_result."
+                    if workbook_changed
+                    else _unchanged_workbook_message(
+                        exit_code=completed.returncode, stderr=stderr
+                    )
+                ),
+            }
+        except subprocess.TimeoutExpired as exc:
+            after_sha256 = _file_sha256(self.workbook)
+            workbook_changed = before_sha256 != after_sha256
+            if workbook_changed:
+                _restore_workbook(rollback_snapshot, self.workbook)
+                after_sha256 = _file_sha256(self.workbook)
+            stdout, stdout_truncated = self._bounded_output(exc.stdout)
+            stderr, stderr_truncated = self._bounded_output(exc.stderr)
+            return {
+                "ok": False,
+                "error": f"Bash command timed out after {timeout} seconds"
+                + ("; partial workbook edits were rolled back" if workbook_changed else ""),
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+                "sandbox": sandbox,
+                "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": False,
+                "workbook_rolled_back": workbook_changed,
+                "managed_mutation_attempted": workbook_changed,
+            }
+        finally:
+            script.unlink(missing_ok=True)
+            if marker is not None:
+                marker.unlink(missing_ok=True)
+            if rollback_snapshot is not None:
+                rollback_snapshot.unlink(missing_ok=True)
+            environment_marker = Path(environment["SHEET_MUTATION_MARKER"])
+            environment_marker.unlink(missing_ok=True)

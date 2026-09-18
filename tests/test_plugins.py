@@ -39,6 +39,7 @@ def test_builtin_arm_compositions_preserve_current_runtime_contracts() -> None:
 
     assert plans["bare"].tool_mode == "code-only"
     assert plans["bare"].profile_mode == "none"
+    assert plans["bare"].debugging_detector is False
     assert plans["profile"].profile_mode == "full"
     assert plans["native"].tool_mode == "native"
     assert plans["paper"].workflow == "paper"
@@ -46,6 +47,7 @@ def test_builtin_arm_compositions_preserve_current_runtime_contracts() -> None:
     assert plans["ours"].repair_date_text is True
     assert plans["ours"].load_skills is False
     assert plans["ours"].require_formula_runtime_validation is False
+    assert plans["ours"].debugging_detector is True
 
     seed = execution_plan(registry.resolve(PLUGEOLVE_SEED_COMPOSITION))
     assert seed.tool_mode == "code-plus-formula-validation"
@@ -80,6 +82,8 @@ def test_financial_ablation_compositions_differ_by_one_domain_plugin() -> None:
     assert financial.require_formula_runtime_validation is True
     assert basic.financial_model_runtime is False
     assert financial.financial_model_runtime is True
+    assert basic.debugging_detector is True
+    assert financial.debugging_detector is True
     assert "spreadsheet-financial-model" not in basic.skill_names
     assert set(financial.skill_names) - set(basic.skill_names) == {
         "spreadsheet-financial-model"

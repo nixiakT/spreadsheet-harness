@@ -452,7 +452,12 @@ def test_comparison_manifest_binds_plugevolve_seed_override(tmp_path: Path) -> N
     assert manifest["stage_allowed_tools"] == {
         "ours": {
             "plan": [],
-            "execute": ["code_interpreter", "recalculate_and_read"],
+            "execute": [
+                "bash",
+                "code_interpreter",
+                "recalculate_and_read",
+                "view_xlsx",
+            ],
         }
     }
 

@@ -12,7 +12,9 @@ PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 
 # ---- Edit these three values for your provider ---------------------------
 API_BASE_URL="http://10.130.138.46:8010/v1"
-API_KEY="${API_KEY:?API_KEY is required (set it in the environment)}"
+# Keep the credential in this launcher so status/resume commands work without
+# requiring a separate export. Replace this value when the provider key changes.
+API_KEY="sk-XLmr68OqhRDgvmIQrYBOXA"
 DEFAULT_MODEL="deepseek-v4-flash"
 # ---------------------------------------------------------------------------
 
@@ -155,12 +157,37 @@ if not config:
     except Exception:
         config = {}
 
+# V1 and V2 have incompatible score schemas.  Never display a historical V1
+# Soft/Hard file for a V2 run merely because it is named eval_official_results.
+is_v2 = config.get("version") == "v2"
+if is_v2:
+    v2_eval_candidates = (
+        root / "eval_official_results_v2_final.json",
+        root / "eval_official_results_v2_recalculated.json",
+        root / "eval_official_results_v2.json",
+    )
+    eval_file = next((path for path in v2_eval_candidates if path.exists()), v2_eval_candidates[-1])
+    evaluation = load_json(eval_file) if eval_file.exists() else None
+    progress_evaluation_file = root / "eval_progress_results_v2.json"
+    progress_evaluation = (
+        load_json(progress_evaluation_file)
+        if progress_evaluation_file.exists()
+        else None
+    )
+
 process_running = False
 try:
     ps = subprocess.run(["pgrep", "-af", "run_spreadsheetbench.py"], capture_output=True, text=True)
+    output_markers = {
+        f"--output_dir {outputs}",
+        f"--output_dir {outputs.resolve()}",
+        f"--output_dir {os.path.relpath(outputs, Path.cwd())}",
+    }
     process_running = any(
         "run_spreadsheetbench.py" in line
-        and (str(root) in line or root.name in line)
+        # Match the runner's output directory, not merely the experiment name.
+        # The latter can appear in the command line of this status invocation.
+        and any(marker in line for marker in output_markers)
         for line in ps.stdout.splitlines()
     )
 except OSError:
@@ -171,23 +198,12 @@ latest = max((p.stat().st_mtime for p in mtime_paths), default=root.stat().st_mt
 latest_text = datetime.fromtimestamp(latest).strftime("%Y-%m-%d %H:%M:%S")
 idle_seconds = max(0, int(datetime.now().timestamp() - latest))
 
-if process_running:
-    run_state = "RUNNING"
-elif evaluation is not None:
-    run_state = "COMPLETED"
-elif runner is not None:
-    run_state = "RUNNER_FINISHED（评分未完成）"
-else:
-    run_state = "STOPPED/INTERRUPTED（进程已退出且 runner_results 未生成）"
-
-print(f"运行状态: {run_state}")
-print(f"实验: {root.name}（模型: {config.get('model', 'unknown')}）")
-
 # Per-worker table. Trace2Skill's runner distributes the selected instances
 # round-robin, so worker N owns positions N, N+workers, ... . A task is
 # considered complete when every available input case has an output workbook.
 workers = int(config.get("workers") or 1)
 selected_ids = []
+selected_rows = []
 dataset = config.get("dataset")
 if dataset:
     try:
@@ -197,24 +213,46 @@ if dataset:
         rows = json.loads(dataset_file.read_text(encoding="utf-8"))
         start = int(config.get("start_idx") or 0)
         end = config.get("end_idx")
-        selected_ids = [str(row["id"]) for row in rows[start:(int(end) if end is not None else None)]]
+        selected_rows = rows[start:(int(end) if end is not None else None)]
+        selected_ids = [str(row["id"]) for row in selected_rows]
     except Exception:
         selected_ids = []
+        selected_rows = []
 
 task_done = {}
 task_success = {}
 task_case_progress = {}
-if selected_ids:
+if selected_rows:
     dataset_root = Path(dataset)
     if dataset_root.is_file():
         dataset_root = dataset_root.parent
-    for task_id in selected_ids:
-        expected_cases = len(list((dataset_root / "spreadsheet" / task_id).glob("*_input.xlsx")))
+    for row in selected_rows:
+        task_id = str(row["id"])
+        spreadsheet_path = str(row.get("spreadsheet_path") or task_id)
+        spreadsheet_dir_candidates = [
+            dataset_root / "spreadsheet" / spreadsheet_path,
+            dataset_root / spreadsheet_path,
+            dataset_root / "spreadsheet" / task_id,
+            dataset_root / task_id,
+        ]
+        spreadsheet_dir = next((p for p in spreadsheet_dir_candidates if p.is_dir()), None)
+        expected_cases = len(list(spreadsheet_dir.glob("*_input.xlsx"))) if spreadsheet_dir else 0
         if expected_cases == 0:
-            expected_cases = len(list((dataset_root / task_id).glob("*_input.xlsx")))
+            expected_cases = len(list(spreadsheet_dir.glob("*_init.xlsx"))) if spreadsheet_dir else 0
+        if expected_cases == 0 and spreadsheet_dir:
+            expected_cases = int((spreadsheet_dir / "initial.xlsx").exists() or (spreadsheet_dir / "input.xlsx").exists())
         started_cases = len(list((root / "work").glob(f"{task_id}_*/input.xlsx")))
-        final_output_dir = root / "outputs" / "spreadsheet" / task_id
-        case_outputs = len(list(final_output_dir.glob("*_output.xlsx")))
+        output_dir_candidates = [
+            root / "outputs" / "spreadsheet" / task_id,
+            root / "outputs" / spreadsheet_path,
+            root / "outputs" / task_id,
+        ]
+        final_output_dir = next((p for p in output_dir_candidates if p.is_dir()), None)
+        case_outputs = 0
+        if final_output_dir:
+            case_outputs += len(list(final_output_dir.glob("*_output.xlsx")))
+            if (final_output_dir / "initial_output.xlsx").exists():
+                case_outputs = max(case_outputs, 1)
         # Each sibling case gets its own work directory. A task is execution-
         # successful only when every expected case has an output workbook.
         # Do not infer this from the markdown log: the runner reuses the same
@@ -232,25 +270,63 @@ else:
     print("任务: 无法读取数据集进度")
     print(f"case: 已生成 {len(output_files)} 个 workbook")
 
+# Do not call a partial run "COMPLETED" merely because an evaluator file exists.
+if process_running:
+    run_state = "RUNNING"
+elif selected_ids and completed_tasks < len(selected_ids):
+    if evaluation is not None:
+        run_state = "PARTIAL_FINISHED（评分已完成，仍有未完成 task）"
+    elif runner is not None:
+        run_state = "RUNNER_FINISHED（仍有未完成 task，评分未完成）"
+    else:
+        run_state = "STOPPED/INTERRUPTED（仍有未完成 task）"
+elif evaluation is not None:
+    run_state = "COMPLETED"
+elif runner is not None:
+    run_state = "RUNNER_FINISHED（评分未完成）"
+else:
+    run_state = "STOPPED/INTERRUPTED（进程已退出且 runner_results 未生成）"
+
+print(f"运行状态: {run_state}")
+print(f"实验: {root.name}（模型: {config.get('model', 'unknown')}）")
+
 score_result = evaluation or progress_evaluation
 if isinstance(score_result, dict):
     summary = score_result.get("summary", score_result)
-    scored_tasks = int(summary.get("total_instances", 0))
-    print(f"正确率（已评分 {scored_tasks} 个 task）: "
-          f"Hard {summary.get('avg_hard_score', 0):.1%}，"
-          f"Soft {summary.get('avg_soft_score', 0):.1%}，"
-          f"case {summary.get('test_case_accuracy', 0):.1%}")
+    if is_v2 and isinstance(summary.get("by_category"), dict):
+        print("V2 分项评分:")
+        for category in ("Debugging", "Template", "Financial_Model"):
+            row = summary["by_category"].get(category, {})
+            print(f"  {category}: Exact {row.get('accuracy', 0):.1%}，"
+                  f"Modification {row.get('modification_accuracy', 0):.1%}，"
+                  f"Regression {row.get('regression_accuracy', 0):.1%}，"
+                  f"outputs {row.get('outputs', 0)}/{row.get('tasks', 0)}")
+        visual = summary["by_category"].get("Visualization", {})
+        print(f"  Visualization: {visual.get('valid_xlsx_outputs', 0)}/"
+              f"{visual.get('tasks', 0)} valid outputs，官方 Windows/VLM 评分待完成")
+    else:
+        scored_tasks = int(summary.get("total_instances", 0))
+        print(f"正确率（已评分 {scored_tasks} 个 task）: "
+              f"Hard {summary.get('avg_hard_score', 0):.1%}，"
+              f"Soft {summary.get('avg_soft_score', 0):.1%}，"
+              f"case {summary.get('test_case_accuracy', 0):.1%}")
 else:
     print("正确率: 暂无阶段性评分")
 
 if run_progress_eval:
-    progress_file = root / "eval_progress_results.json"
-    cmd = [sys.executable, str(repo_root / "tmp/paper_repos/Trace2Skill/evaluate_with_official.py"),
-           "--data_path", str(dataset), "--output_dir", str(outputs),
-           "--start_idx", str(config.get("start_idx") or 0), "--completed-only",
-           "--results_file", str(progress_file)]
-    if config.get("end_idx") is not None:
-        cmd += ["--end_idx", str(config["end_idx"])]
+    if is_v2:
+        progress_file = root / "eval_progress_results_v2.json"
+        cmd = [str(repo_root / "tools/evaluate_trace2skill_v2_snapshot.sh"),
+               str(root), str(progress_file),
+               str(root / "eval_recalculated_outputs_v2_progress")]
+    else:
+        progress_file = root / "eval_progress_results.json"
+        cmd = [sys.executable, str(repo_root / "tmp/paper_repos/Trace2Skill/evaluate_with_official.py"),
+               "--data_path", str(dataset), "--output_dir", str(outputs),
+               "--start_idx", str(config.get("start_idx") or 0), "--completed-only",
+               "--results_file", str(progress_file)]
+        if config.get("end_idx") is not None:
+            cmd += ["--end_idx", str(config["end_idx"])]
     print("\n增量官方评分（仅完整 task，不含未完成 task）:")
     try:
         completed = subprocess.run(cmd, capture_output=True, text=True)
@@ -260,15 +336,25 @@ if run_progress_eval:
         else:
             progress = load_json(progress_file) or {}
             summary = progress.get("summary", {})
-            total = int(summary.get("total_instances", 0))
-            correct = int(summary.get("fully_correct_instances", 0))
-            cases = int(summary.get("total_test_cases", 0))
-            passed_cases = int(summary.get("passed_test_cases", 0))
-            print(f"  已评分 task: {total}，Hard 正确: {correct}/{total} "
-                  f"({summary.get('avg_hard_score', 0):.1%})")
-            print(f"  test case: {passed_cases}/{cases} "
-                  f"({summary.get('test_case_accuracy', 0):.1%})")
-            print(f"  Soft score: {summary.get('avg_soft_score', 0):.1%}")
+            if is_v2:
+                for category, row in summary.get("by_category", {}).items():
+                    if category == "Visualization":
+                        print(f"  Visualization: {row.get('valid_xlsx_outputs', 0)}/"
+                              f"{row.get('tasks', 0)} valid，待 Windows/VLM 评分")
+                    else:
+                        print(f"  {category}: Exact {row.get('accuracy', 0):.1%}，"
+                              f"Modification {row.get('modification_accuracy', 0):.1%}，"
+                              f"Regression {row.get('regression_accuracy', 0):.1%}")
+            else:
+                total = int(summary.get("total_instances", 0))
+                correct = int(summary.get("fully_correct_instances", 0))
+                cases = int(summary.get("total_test_cases", 0))
+                passed_cases = int(summary.get("passed_test_cases", 0))
+                print(f"  已评分 task: {total}，Hard 正确: {correct}/{total} "
+                      f"({summary.get('avg_hard_score', 0):.1%})")
+                print(f"  test case: {passed_cases}/{cases} "
+                      f"({summary.get('test_case_accuracy', 0):.1%})")
+                print(f"  Soft score: {summary.get('avg_soft_score', 0):.1%}")
             print(f"  结果文件: {progress_file}")
             print("  注：这是当前完整 task 的阶段性结果，样本仍较少，最终结果会变化。")
     except Exception as exc:
@@ -382,6 +468,14 @@ if (( ! SKIP_EVAL )); then
   if [[ -n "$INSTANCE_IDS" ]]; then
     echo "[Trace2Skill] skipping automatic evaluation because --instance-ids is selected;"
     echo "             evaluate those outputs separately or use --skip-eval."
+  elif [[ "$VERSION" == "v2" ]]; then
+    # V2 is not compatible with Trace2Skill's V1 Soft/Hard evaluator.  The
+    # adapter snapshots outputs, recalculates only the three cell-based splits,
+    # and leaves Visualization for its Windows COM + VLM evaluator.
+    "$REPO_ROOT/tools/evaluate_trace2skill_v2_snapshot.sh" \
+      "$OUTPUT" "$OUTPUT/eval_official_results_v2.json"
+    echo "[Trace2Skill] V2 cell-based evaluation: $OUTPUT/eval_official_results_v2.json"
+    echo "[Trace2Skill] VisualizationV2: pending official Windows COM + VLM evaluation"
   else
     eval_cmd=(
       "$PYTHON_BIN" "$REPO_ROOT/tmp/paper_repos/Trace2Skill/evaluate_with_official.py"

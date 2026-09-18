@@ -14,9 +14,11 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +158,7 @@ def build_arms(
     h_candidate: Path,
     d_candidate: Path,
     coordination_candidate: Path,
+    safety_candidate: Path | None = None,
 ) -> tuple[Arm, ...]:
     if not BASELINE.is_dir():
         raise RuntimeError(f"Frozen baseline skill root is missing: {BASELINE}")
@@ -191,6 +194,36 @@ def build_arms(
             shutil.copy2(source, destination / directory / "SKILL.md")
         root_by_name[name] = destination
 
+    # Keep the verification gate as an explicit, isolated arm.  It is copied into the
+    # existing verification capability rather than registered as a new runtime plugin, so
+    # the comparison changes only the model-facing instruction surface.  This arm is
+    # optional for backwards compatibility with older candidate roots.
+    if safety_candidate is not None:
+        if not safety_candidate.is_file():
+            raise RuntimeError(f"Missing safety-gate candidate: {safety_candidate}")
+        name = "h1d1-safety"
+        destination = roots / name
+        if not destination.exists():
+            shutil.copytree(BASELINE, destination)
+        for directory, source in (
+            ("spreadsheet-structure", h_candidate),
+            ("spreadsheet-financial-model", d_candidate),
+            ("spreadsheet-verification", safety_candidate),
+        ):
+            (destination / directory).mkdir(parents=True, exist_ok=True)
+            target = destination / directory / "SKILL.md"
+            # The source lives in its own repository directory to avoid a duplicate skill
+            # during ordinary discovery. Once materialized under the canonical verification
+            # directory, keep the ABI name expected by the composition.
+            content = source.read_text(encoding="utf-8")
+            content = content.replace(
+                "name: spreadsheet-verification-safety",
+                "name: spreadsheet-verification",
+                1,
+            )
+            target.write_text(content, encoding="utf-8")
+        root_by_name[name] = destination
+
     registry = default_plugin_registry()
     base = PLUGEOLVE_SEED_COMPOSITION
     candidates = enumerate_single_plugin_candidates(
@@ -219,6 +252,8 @@ def build_arms(
         "h1d1-core-enable": core,
         "h1d1-profile4": profile4,
     }
+    if safety_candidate is not None:
+        specs["h1d1-safety"] = base
     arms: list[Arm] = []
     for name, spec in specs.items():
         path = root / "compositions" / f"{name}.json"
@@ -239,6 +274,10 @@ def run_one(
     api_key_file: Path,
     max_calls: int,
     timeout: float,
+    request_retries: int = 5,
+    request_interval: float = 1.1,
+    request_timeout: float = 1800,
+    task_attempts: int = 3,
 ) -> dict[str, Any]:
     output = root / "runs" / arm.name / dataset / task_id.replace("/", "_")
     summary = output / "summary.json"
@@ -280,6 +319,14 @@ def run_one(
         "unlimited",
         "--task-timeout",
         str(timeout),
+        "--request-timeout",
+        str(request_timeout),
+        "--litellm-timeout",
+        str(request_timeout),
+        "--request-retries",
+        str(request_retries),
+        "--request-interval-seconds",
+        str(request_interval),
         "--arm-order-seed",
         "20260913",
         "--base-url",
@@ -300,21 +347,46 @@ def run_one(
         "1",
         "--enable-thinking",
     ]
-    log = output.with_suffix(".log")
-    with log.open("w", encoding="utf-8") as handle:
-        completed = subprocess.run(command, cwd=REPO, stdout=handle, stderr=subprocess.STDOUT, check=False)
+    completed_returncode = 2
     payload: dict[str, Any] = {}
-    if summary.is_file():
-        try:
-            payload = json.loads(summary.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    for attempt in range(1, max(1, task_attempts) + 1):
+        if output.exists():
+            archived = output.with_name(
+                f"{output.name}.incomplete.{datetime.now().strftime('%Y%m%dT%H%M%S')}.{os.getpid()}.a{attempt}"
+            )
+            output.rename(archived)
+        log = output.with_suffix(".log")
+        if log.exists():
+            archived_log = log.with_name(
+                f"{log.name}.incomplete.{datetime.now().strftime('%Y%m%dT%H%M%S')}.{os.getpid()}.a{attempt}"
+            )
+            log.rename(archived_log)
+        with log.open("w", encoding="utf-8") as handle:
+            completed = subprocess.run(command, cwd=REPO, stdout=handle, stderr=subprocess.STDOUT, check=False)
+        completed_returncode = completed.returncode
+        payload = {}
+        if summary.is_file():
+            try:
+                payload = json.loads(summary.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+        if payload.get("study_complete"):
+            return {
+                "arm": arm.name,
+                "dataset": dataset,
+                "task_id": task_id,
+                "status": "scored",
+                "returncode": completed_returncode,
+                "attempt": attempt,
+                "summary": payload,
+            }
     return {
         "arm": arm.name,
         "dataset": dataset,
         "task_id": task_id,
-        "status": "scored" if payload.get("study_complete") else "failed",
-        "returncode": completed.returncode,
+        "status": "failed",
+        "returncode": completed_returncode,
+        "attempt": max(1, task_attempts),
         "summary": payload,
     }
 

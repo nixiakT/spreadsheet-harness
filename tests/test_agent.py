@@ -37,6 +37,7 @@ from spreadsheet_harness.errors import (
 from spreadsheet_harness.formula_runtime import formula_coordinate_sha256
 from spreadsheet_harness.session import WorkbookSession
 from spreadsheet_harness.tools import SpreadsheetToolRegistry, ToolOutcome
+from spreadsheet_harness.trajectory import read_trajectory
 
 
 def test_code_interpreter_edit_preflight_requires_mutation_and_save() -> None:
@@ -995,6 +996,216 @@ def test_agent_forced_tool_prefix_fails_closed_on_later_turn(
         ).run("inspect")
 
 
+def test_agent_can_require_text_immediately_after_forced_tool_prefix(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ToolThenTextClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> ToolThenTextClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-tool",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-tool",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-text",
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "verified"}],
+                    }
+                ],
+                "verified",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ToolThenTextClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "tool-then-text")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        SpreadsheetToolRegistry(session, enable_code=False),
+        forced_tool_prefix=("list_sheets",),
+        text_only_after_forced_prefix=True,
+        max_turns=2,
+    ).run("Inspect, then answer")
+
+    assert [tool["name"] for tool in ToolThenTextClient.requests[0]["tools"]] == [
+        "list_sheets"
+    ]
+    assert "tools" not in ToolThenTextClient.requests[1]
+    assert not any(
+        item.get("type") in {"function_call", "function_call_output"}
+        for item in ToolThenTextClient.requests[1]["input"]
+    )
+    assert "untrusted_forced_tool_result" in str(ToolThenTextClient.requests[1]["input"])
+    assert result.final_text == "verified"
+    assert result.post_prefix_tool_choice == "none"
+
+
+def test_text_only_after_forced_prefix_preserves_attached_image(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    image_path = tmp_path / "verification.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-evidence")
+
+    class ImageTools:
+        def __init__(self, session: WorkbookSession) -> None:
+            self.session = session
+            self.schemas = [
+                {
+                    "type": "function",
+                    "name": "view_image",
+                    "description": "view image",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ]
+
+        def invoke(self, name: str, _: dict[str, Any]) -> ToolOutcome:
+            assert name == "view_image"
+            return ToolOutcome({"ok": True, "image": str(image_path)}, image_path)
+
+    class ImageThenTextClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> ImageThenTextClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn == 1:
+                return ResponseTurn(
+                    "response-image",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-image",
+                            "name": "view_image",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-text",
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "verified"}],
+                    }
+                ],
+                "verified",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ImageThenTextClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "image-text-only")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        ImageTools(session),
+        forced_tool_prefix=("view_image",),
+        text_only_after_forced_prefix=True,
+        max_turns=2,
+    ).run("View, then verify")
+
+    final_request = ImageThenTextClient.requests[1]
+    assert "tools" not in final_request
+    assert "input_image" in json.dumps(final_request["input"])
+    assert "untrusted_forced_tool_result" in str(final_request["input"])
+    assert result.final_text == "verified"
+
+
+def test_agent_can_reserve_last_turn_for_text_after_optional_tools(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class InspectThenTextClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> InspectThenTextClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn < 3:
+                return ResponseTurn(
+                    f"response-tool-{self.turn}",
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": f"call-{self.turn}",
+                            "name": "list_sheets",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                    {},
+                )
+            return ResponseTurn(
+                "response-text",
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "summary"}],
+                    }
+                ],
+                "summary",
+                {},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", InspectThenTextClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "reserve-final-text")
+    result = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        SpreadsheetToolRegistry(session, enable_code=False),
+        forced_tool_prefix=("list_sheets",),
+        reserve_final_text_turn=True,
+        max_turns=3,
+    ).run("Inspect, then summarize")
+
+    assert "tools" in InspectThenTextClient.requests[1]
+    assert "tools" not in InspectThenTextClient.requests[2]
+    assert "untrusted_forced_tool_result" in str(InspectThenTextClient.requests[2]["input"])
+    assert result.final_text == "summary"
+
+
 def test_agent_forced_turn_rejects_extra_calls_before_tool_execution(
     sample_workbook: Path, tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -1417,6 +1628,95 @@ def test_agent_forces_code_recovery_after_stalled_edit(
         event for event in events if event["event"] == "agent.read_only_code_deadline_rejected"
     ]
     assert deadline_events[0]["payload"]["prior_read_only_code_calls"] == 3
+
+
+def test_native_view_xlsx_shares_pre_edit_inspection_budget(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ViewBudgetClient:
+        requests: list[dict[str, Any]] = []
+
+        def __init__(self, _: ProviderConfig) -> None:
+            self.turn = 0
+
+        def __enter__(self) -> ViewBudgetClient:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def create(self, payload: dict[str, Any], **__: Any) -> ResponseTurn:
+            self.requests.append(payload)
+            self.turn += 1
+            if self.turn <= 3:
+                return ResponseTurn(
+                    f"view-{self.turn}",
+                    [{
+                        "type": "function_call",
+                        "call_id": f"view-call-{self.turn}",
+                        "name": "view_xlsx",
+                        "arguments": json.dumps({"mode": "list"}),
+                    }],
+                    "",
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+            if self.turn == 4:
+                assert payload["tool_choice"] == {
+                    "type": "function",
+                    "name": "code_interpreter",
+                }
+                return ResponseTurn(
+                    "edit",
+                    [{
+                        "type": "function_call",
+                        "call_id": "edit-call",
+                        "name": "code_interpreter",
+                        "arguments": json.dumps({
+                            "code": (
+                                "import sheet_harness\n"
+                                "wb=sheet_harness.load_workbook()\n"
+                                "wb.active['A1']='edited'\n"
+                                "sheet_harness.save_workbook(wb)"
+                            )
+                        }),
+                    }],
+                    "",
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+            return ResponseTurn(
+                "submit",
+                [{
+                    "type": "function_call",
+                    "call_id": "submit-call",
+                    "name": "submit_result",
+                    "arguments": "{}",
+                }],
+                "",
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+    monkeypatch.setattr("spreadsheet_harness.agent.ResponsesClient", ViewBudgetClient)
+    session = WorkbookSession.create(sample_workbook, tmp_path / "view-budget")
+    tools = SpreadsheetToolRegistry(
+        session,
+        allowed_tools={"code_interpreter", "view_xlsx"},
+    )
+    agent = SpreadsheetAgent(
+        ProviderConfig("https://example.test/v1", "not-a-real-key", "test-model"),
+        tools,
+        required_tool_termination=True,
+        require_workbook_change=True,
+        max_read_only_code_calls_before_edit=2,
+        max_turns=5,
+    )
+
+    # The fourth response makes the edit; the third view is rejected without
+    # being invoked and triggers the existing forced editor route.
+    result = agent.run("Edit the workbook")
+    assert result.final_text == "Spreadsheet task completed."
+    events = read_trajectory(session.paths.trajectory)
+    rejected = [e for e in events if e["event"] == "agent.read_only_code_deadline_rejected"]
+    assert rejected[-1]["payload"]["prior_read_only_view_calls"] == 2
 
 
 def test_agent_forces_penultimate_recovery_and_reserves_final_submit_after_rollback(
@@ -3909,6 +4209,7 @@ def test_required_tool_termination_forces_submit_only_on_final_turn(
     assert result.final_text == "Spreadsheet task completed."
     assert [tool["name"] for tool in FinalTurnClient.requests[0]["tools"]] == [
         "list_sheets",
+        "view_xlsx",
         "inspect_range",
         "range_to_latex",
         "find_cells",

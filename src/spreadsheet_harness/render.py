@@ -820,6 +820,8 @@ _LIBREOFFICE_CALCULATE_ALL_SCRIPT = textwrap.dedent(
     import sys
     import time
     import uno
+    import zipfile
+    from xml.etree import ElementTree
     from com.sun.star.beans import PropertyValue
 
     port = int(sys.argv[1])
@@ -860,6 +862,25 @@ _LIBREOFFICE_CALCULATE_ALL_SCRIPT = textwrap.dedent(
         )
         if document is None:
             raise RuntimeError("LibreOffice did not open the spreadsheet")
+        # Calc can resolve an Excel VBA codeName/name collision by appending
+        # ' -1' to the visible sheet name even in .xlsx files. Restore only
+        # that exact, ordered import transformation through UNO (which also
+        # updates references), before calculation. All other inventory changes
+        # remain failures at the outer integrity gate.
+        source_filename = uno.fileUrlToSystemPath(source_url)
+        if source_filename.lower().endswith(".xlsx"):
+            with zipfile.ZipFile(source_filename) as archive:
+                workbook_root = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+            ns = workbook_root.tag.split("}")[0] + "}"
+            expected_names = [s.attrib["name"] for s in workbook_root.find(ns + "sheets")]
+            sheets = document.getSheets()
+            observed_names = list(sheets.getElementNames())
+            if (len(expected_names) == len(observed_names)
+                    and all(actual == expected or actual == expected + " -1"
+                            for expected, actual in zip(expected_names, observed_names))):
+                for index, (expected, actual) in enumerate(zip(expected_names, observed_names)):
+                    if actual != expected:
+                        sheets.getByIndex(index).setName(expected)
         document.enableAutomaticCalculation(True)
         document.IsIterationEnabled = iterative
         if iterative:
@@ -1493,6 +1514,36 @@ def _replace_ooxml_parts(path: Path, replacements: Mapping[str, bytes]) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def repair_mistyped_error_caches(path: Path) -> int:
+    """Repair numeric-typed Excel error caches without changing their values.
+
+    For recovery of artifacts emitted by the old array-formula restorer only.
+    Callers must use a copy and record its before/after hash. This does not
+    repair formulas or conceal Excel calculation errors.
+    """
+    from openpyxl.cell.cell import ERROR_CODES
+
+    replacements: dict[str, bytes] = {}
+    count = 0
+    with zipfile.ZipFile(path) as package:
+        for part in _worksheet_parts_by_name(package).values():
+            root = _parse_inventory_xml(package.read(part), label=part)
+            namespace = _xml_namespace(root.tag)
+            changed = 0
+            for cell in root.iter(f"{{{namespace}}}c"):
+                value = cell.find(f"{{{namespace}}}v")
+                if (cell.attrib.get("t", "n") == "n" and value is not None
+                        and value.text in ERROR_CODES):
+                    cell.set("t", "e")
+                    changed += 1
+            if changed:
+                replacements[part] = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+                count += changed
+    if replacements:
+        _replace_ooxml_parts(path, replacements)
+    return count
 
 
 def patch_font_colors_ooxml(
@@ -2194,11 +2245,12 @@ def _seed_ooxml_formula_cached_values(target: Path, seed: Path) -> dict[str, int
         with zipfile.ZipFile(target) as target_package, zipfile.ZipFile(seed) as seed_package:
             target_parts = _worksheet_parts_by_name(target_package)
             seed_parts = _worksheet_parts_by_name(seed_package)
-            if set(target_parts) != set(seed_parts):
-                raise RenderError(
-                    "Formula cache seed sheet names do not match the recalculation workbook"
-                )
             for sheet_name, target_part in target_parts.items():
+                # The seed is the pre-edit input, not a structural contract.
+                # Legitimate sheet addition/removal/rename must not fail recalc.
+                # Seed only identically named sheets; never match by position.
+                if sheet_name not in seed_parts:
+                    continue
                 seed_part = seed_parts[sheet_name]
                 target_root = _parse_inventory_xml(
                     target_package.read(target_part), label=f"target worksheet {sheet_name!r}"
@@ -2338,6 +2390,7 @@ def _restore_array_formula_sheet_xml(
     converted_xml: bytes,
     *,
     valid_style_count: int,
+    shared_strings: tuple[str, ...] = (),
 ) -> tuple[bytes, int, int]:
     source_root = _parse_inventory_xml(source_xml, label="source worksheet")
     converted_root = _parse_inventory_xml(converted_xml, label="converted worksheet")
@@ -2414,6 +2467,28 @@ def _restore_array_formula_sheet_xml(
                 restored.append(
                     ElementTree.fromstring(ElementTree.tostring(converted_value))
                 )
+            # A cache and its OOXML type are inseparable. In particular Calc
+            # may return #NAME? (t=e) for an unsupported CSE expression; keeping
+            # the source numeric type produces an unreadable workbook.
+            converted_type = converted_cell.attrib.get("t")
+            if converted_type is None:
+                restored.attrib.pop("t", None)
+            else:
+                restored.set("t", converted_type)
+            if converted_type in {"s", "inlineStr"}:
+                if converted_type == "s":
+                    try:
+                        cached_string = shared_strings[int(converted_value.text)]
+                    except (AttributeError, TypeError, ValueError, IndexError) as exc:
+                        raise RenderError("Invalid shared-string cache in array formula") from exc
+                else:
+                    inline = converted_cell.find(f"{{{namespace}}}is")
+                    cached_string = "".join(n.text or "" for n in inline.iter(f"{{{namespace}}}t")) if inline is not None else ""
+                for child in list(restored):
+                    if child.tag in {value_tag, f"{{{namespace}}}is"}:
+                        restored.remove(child)
+                ElementTree.SubElement(restored, value_tag).text = cached_string
+                restored.set("t", "str")
             parent = next(
                 row
                 for row in converted_sheet_data
@@ -2443,6 +2518,11 @@ def _restore_ooxml_array_formulas(source: Path, converted: Path) -> dict[str, in
             source_parts = _worksheet_parts_by_name(source_package)
             converted_parts = _worksheet_parts_by_name(converted_package)
             valid_style_count = _converted_cell_style_count(converted_package)
+            shared_strings: tuple[str, ...] = ()
+            if _SHARED_STRINGS_XML_PART in converted_package.namelist():
+                strings_root = _parse_inventory_xml(converted_package.read(_SHARED_STRINGS_XML_PART), label="array cache strings")
+                strings_ns = _xml_namespace(strings_root.tag)
+                shared_strings = tuple("".join(n.text or "" for n in item.iter(f"{{{strings_ns}}}t")) for item in strings_root)
             replacements: dict[str, bytes] = {}
             regions = 0
             cells = 0
@@ -2456,6 +2536,7 @@ def _restore_ooxml_array_formulas(source: Path, converted: Path) -> dict[str, in
                     source_package.read(source_part),
                     converted_package.read(converted_part),
                     valid_style_count=valid_style_count,
+                    shared_strings=shared_strings,
                 )
                 if part_regions:
                     replacements[converted_part] = repaired

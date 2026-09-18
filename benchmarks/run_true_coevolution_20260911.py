@@ -42,6 +42,10 @@ COORDINATES = (
     ("harness", "spreadsheet-structure"),
     ("domain", "spreadsheet-financial-model"),
 )
+COORDINATE_MAP = {
+    "H": ("harness", "spreadsheet-structure"),
+    "D": ("domain", "spreadsheet-financial-model"),
+}
 DATASETS = {
     "v06": REPO / "benchmarks/data/normalized-harbor/v06-financial-269",
     "enhanced-v2": REPO / "benchmarks/data/normalized-harbor/v2-enhanced-financial-1565",
@@ -76,6 +80,11 @@ FINAL_ARMS = ("h0d0", "h1d0", "h0d1", "h1d1")
 RECURRENT_GATE_EXCLUSIONS = {
     "Financial_Model/fina_Debu_01_c0",
     "Financial_Model/fina_Fina_02_PP_c0",
+    # This case's forced code-interpreter turn repeatedly reaches the absolute
+    # 1800-second provider deadline.  The evaluator can still score the partial
+    # workbook, but that score is infrastructure-tainted and must not enter a
+    # candidate proposal or acceptance decision.
+    "Financial_Model/fina_Fina_eus_140c5d9253_FinStmtEx_c0",
 }
 
 
@@ -303,6 +312,32 @@ def is_scored_summary(path: Path) -> bool:
         return False
 
 
+def has_unrecovered_model_failure(run_dir: Path) -> bool:
+    """True when any arm's final model outcome is a failure, not a response.
+
+    Output-limit recovery deliberately records ``model.failed`` before making
+    another request, so the mere presence of a failure event is insufficient.
+    A later ``model.responded`` means the failure was recovered.
+    """
+
+    trajectories = sorted(run_dir.rglob("trajectory.jsonl"))
+    if not trajectories:
+        return True
+    for path in trajectories:
+        last_outcome: str | None = None
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            name = str(event.get("event") or "").casefold()
+            if name in {"model.failed", "model.responded"}:
+                last_outcome = name
+        if last_outcome == "model.failed":
+            return True
+    return False
+
+
 def summary_payload(run_dir: Path) -> dict[str, Any]:
     path = run_dir / "summary.json"
     if not is_scored_summary(path):
@@ -378,12 +413,13 @@ class Experiment:
     def recover_scored_archive(self, output: Path) -> bool:
         """Restore a scored run that an older completion check misclassified."""
 
-        if is_scored_summary(output / "summary.json"):
+        if is_scored_summary(output / "summary.json") and not has_unrecovered_model_failure(output):
             return True
         scored_archives = [
             path
             for path in sorted(output.parent.glob(f"{output.name}.incomplete.*"))
             if is_scored_summary(path / "summary.json")
+            and not has_unrecovered_model_failure(path)
         ]
         if not scored_archives:
             return False
@@ -481,7 +517,11 @@ class Experiment:
                     stderr=subprocess.STDOUT,
                     check=False,
                 )
-            if completed.returncode == 0 and is_scored_summary(output / "summary.json"):
+            if (
+                completed.returncode == 0
+                and is_scored_summary(output / "summary.json")
+                and not has_unrecovered_model_failure(output)
+            ):
                 self.record_status(phase, label, task, "scored", 0, attempt)
                 return
             code = completed.returncode or 2
@@ -572,21 +612,38 @@ class Experiment:
                 ),
                 default=0,
             )
-            if any(name == "model.failed" or "provider.failed" in name for name in names):
-                route, reason = "infrastructure", "provider/model failure event"
-            elif tool_errors or any("planner.failed" in name for name in names):
-                route, reason = "interface", f"tool_errors={tool_errors} or planner failure"
-            elif score["regression_accuracy"] < 1.0:
-                route, reason = "harness", "unchanged-cell regression"
-            elif score["modification_accuracy"] < 1.0:
-                route, reason = "domain", "incorrect or incomplete target-cell modification"
+            if has_unrecovered_model_failure(run_dir):
+                routes = ["infrastructure"]
+                reasons = ["final model outcome was an unrecovered failure"]
+            elif score["accuracy"] >= 1.0:
+                # Tool friction in a passing trajectory is useful as a
+                # no-regression constraint, not as repair evidence.
+                routes = ["none"]
+                reasons = ["official evaluator passed"]
             else:
-                route, reason = "none", "official evaluator passed"
+                routes = []
+                reasons = []
+                if tool_errors or any("planner.failed" in name for name in names):
+                    routes.append("interface")
+                    reasons.append(f"tool_errors={tool_errors} or planner failure")
+                if score["regression_accuracy"] < 1.0:
+                    routes.append("harness")
+                    reasons.append("unchanged-cell regression")
+                if score["modification_accuracy"] < 1.0:
+                    routes.append("domain")
+                    reasons.append("incorrect or incomplete target-cell modification")
+                if not routes:
+                    routes.append("domain")
+                    reasons.append("exact failure without a lower-level evaluator diagnosis")
             attributions.append(
                 {
                     **task.to_dict(),
-                    "route": route,
-                    "reason": reason,
+                    "routes": routes,
+                    # Retain the scalar fields for old audit consumers while
+                    # making the multi-label attribution authoritative.
+                    "route": routes[0],
+                    "reasons": reasons,
+                    "reason": "; ".join(reasons),
                     "score": score,
                     "trajectory": str(trajectory_path(run_dir).relative_to(self.root)),
                     "trajectory_sha256": sha256_file(trajectory_path(run_dir)),
@@ -606,6 +663,8 @@ class Experiment:
         evidence_phase: str,
         evidence_label: str,
         evidence_tasks: Sequence[Task],
+        anchor_phase: str | None = None,
+        anchor_label: str | None = None,
     ) -> tuple[Path, Path]:
         candidate_id = f"r{round_number:02d}-{coordinate}-a{attempt}"
         generation_root = self.root / "generation" / candidate_id
@@ -618,33 +677,152 @@ class Experiment:
         attributions = self.attribute_failures(
             evidence_phase, evidence_label, evidence_tasks, attribution_path
         )
+        resolved_anchor_phase = anchor_phase or evidence_phase
+        resolved_anchor_label = anchor_label or evidence_label
+        if (resolved_anchor_phase, resolved_anchor_label) == (evidence_phase, evidence_label):
+            anchor_attributions = attributions
+        else:
+            anchor_attribution_path = self.root / "attribution" / f"{resolved_anchor_label}.json"
+            anchor_attributions = self.attribute_failures(
+                resolved_anchor_phase,
+                resolved_anchor_label,
+                evidence_tasks,
+                anchor_attribution_path,
+            )
         desired_routes = {"harness", "interface"} if coordinate == "harness" else {"domain"}
-        selected = [
-            task
-            for task, attribution in zip(evidence_tasks, attributions, strict=True)
-            if task.role == "development" and attribution["route"] in desired_routes
+        evidence_rows = list(zip(evidence_tasks, attributions, anchor_attributions, strict=True))
+
+        # Search targets are failures of the accepted incumbent, not failures
+        # introduced by the immediately preceding rejected candidate.  The
+        # latter are negative evidence and must be paired with the incumbent's
+        # passing trajectory; otherwise retries are explicitly told to repair
+        # behavior that the candidate is required to preserve.
+        repair_rows = [
+            (task, evidence, anchor)
+            for task, evidence, anchor in evidence_rows
+            if task.role == "development"
+            and float(anchor["score"]["accuracy"]) < 1.0
+            and desired_routes.intersection(anchor["routes"])
+            and "infrastructure" not in anchor["routes"]
         ]
         selection_policy = "coordinate-attributed-development-failures"
-        if not selected:
-            selected = [
-                task
-                for task, attribution in zip(evidence_tasks, attributions, strict=True)
-                if task.role == "development" and attribution["route"] != "infrastructure"
+        if not repair_rows:
+            repair_rows = [
+                (task, evidence, anchor)
+                for task, evidence, anchor in evidence_rows
+                if task.role == "development"
+                and float(anchor["score"]["accuracy"]) < 1.0
+                and "infrastructure" not in anchor["routes"]
             ]
-            selection_policy = "fallback-all-scored-development-trajectories"
-        if not selected:
+            selection_policy = "fallback-all-incumbent-failed-development-trajectories"
+        if not repair_rows and not any(
+            task.role == "development"
+            and float(anchor["score"]["accuracy"]) >= 1.0
+            and float(evidence["score"]["accuracy"]) < 1.0
+            for task, evidence, anchor in evidence_rows
+        ):
             raise RuntimeError(f"No eligible development trajectories for {candidate_id}")
+
+        repair_ids = {task.task_id for task, _evidence, _anchor in repair_rows}
+        selected_records: list[tuple[Task, Path, str, Mapping[str, Any]]] = []
+        repair_tasks: list[Task] = []
+        constraint_tasks: list[Task] = []
+        regression_tasks: list[Task] = []
+        incumbent_anchor_tasks: list[Task] = []
+        for task, evidence, anchor in evidence_rows:
+            if task.role != "development":
+                continue
+            evidence_path = trajectory_path(self.task_dir(evidence_phase, evidence_label, task))
+            anchor_path = trajectory_path(
+                self.task_dir(resolved_anchor_phase, resolved_anchor_label, task)
+            )
+            evidence_passed = float(evidence["score"]["accuracy"]) >= 1.0
+            anchor_passed = float(anchor["score"]["accuracy"]) >= 1.0
+            if task.task_id in repair_ids:
+                repair_tasks.append(task)
+                # The accepted incumbent is the object being repaired, so its
+                # failure remains the authoritative repair trace on every
+                # retry.  A rejected candidate is supplementary contrastive
+                # evidence: it may demonstrate either a useful partial fix or
+                # a new failure, but never replaces the incumbent target.
+                selected_records.append((task, anchor_path, "repair", anchor))
+                if evidence_path != anchor_path:
+                    role = (
+                        "successful-rejected-candidate-example"
+                        if evidence_passed
+                        else "rejected-candidate-failure-example"
+                    )
+                    selected_records.append((task, evidence_path, role, evidence))
+                continue
+            if anchor_passed and not evidence_passed and evidence_path != anchor_path:
+                regression_tasks.append(task)
+                incumbent_anchor_tasks.append(task)
+                selected_records.append(
+                    (task, evidence_path, "rejected-candidate-regression", evidence)
+                )
+                selected_records.append(
+                    (task, anchor_path, "current-incumbent-no-regression-anchor", anchor)
+                )
+            elif evidence_passed:
+                constraint_tasks.append(task)
+                selected_records.append(
+                    (task, evidence_path, "no-regression-constraint", evidence)
+                )
+
+        # A path may be reached through equivalent evidence roles; keep the
+        # first (repair has highest priority by construction).
+        records_by_path: dict[Path, tuple[Task, str, Mapping[str, Any]]] = {}
+        for task, path, role, attribution in selected_records:
+            records_by_path.setdefault(path, (task, role, attribution))
+        selected_tasks_by_id = {
+            task.task_id: task for task, _role, _attribution in records_by_path.values()
+        }
         selection_document = {
             "candidate_id": candidate_id,
             "coordinate": coordinate,
             "policy": selection_policy,
             "desired_routes": sorted(desired_routes),
-            "selected_tasks": [task.to_dict() for task in selected],
+            "repair_tasks": [task.to_dict() for task in repair_tasks],
+            "no_regression_constraint_tasks": [task.to_dict() for task in constraint_tasks],
+            "rejected_candidate_regression_tasks": [task.to_dict() for task in regression_tasks],
+            "incumbent_anchor_tasks": [task.to_dict() for task in incumbent_anchor_tasks],
+            "anchor_phase": resolved_anchor_phase,
+            "anchor_label": resolved_anchor_label,
+            "selected_tasks": [task.to_dict() for task in selected_tasks_by_id.values()],
+            "selected_evidence": [
+                {
+                    "trajectory": str(path),
+                    "task_id": task.task_id,
+                    "evidence_role": role,
+                }
+                for path, (task, role, _attribution) in records_by_path.items()
+            ],
         }
         atomic_json(generation_root / "evidence-selection.json", selection_document)
-        trajectories = [
-            trajectory_path(self.task_dir(evidence_phase, evidence_label, task)) for task in selected
-        ]
+        trajectories = list(records_by_path)
+        attribution_context = {
+            "schema_version": "true-hd-proposer-attribution-v1",
+            "candidate_id": candidate_id,
+            "requested_coordinate": coordinate,
+            "requested_skill_name": skill_name,
+            "instruction": (
+                "Mutate only the requested coordinate. Repair only incumbent failures. "
+                "A rejected-candidate-regression is negative evidence, not a new repair target; "
+                "contrast it with its current-incumbent anchor and preserve the passing behavior."
+            ),
+            "records": {
+                str(path): {
+                    "task_id": task.task_id,
+                    "evidence_role": role,
+                    "routes": attribution["routes"],
+                    "reasons": attribution["reasons"],
+                    "score": attribution["score"],
+                }
+                for path, (task, role, attribution) in records_by_path.items()
+            },
+        }
+        attribution_context_path = generation_root / "proposer-attribution.json"
+        atomic_json(attribution_context_path, attribution_context)
         command = [
             str(HARNESS),
             "evolve",
@@ -658,6 +836,8 @@ class Experiment:
             skill_name,
             "--base-skill",
             str(incumbent_root / skill_name / "SKILL.md"),
+            "--attribution-context",
+            str(attribution_context_path),
             "--lesson-max-output-tokens",
             "unlimited",
             "--consolidation-max-output-tokens",
@@ -667,9 +847,17 @@ class Experiment:
             "--api-key-file",
             str(self.args.api_key_file),
             "--model",
-            self.args.model,
+            self.args.generator_model,
             "--api-protocol",
             "chat-completions",
+            "--request-timeout",
+            "1800",
+            "--litellm-timeout",
+            "1800",
+            "--request-retries",
+            "5",
+            "--request-interval-seconds",
+            str(self.args.request_interval),
             "--reasoning-effort",
             "medium",
             "--seed",
@@ -723,7 +911,11 @@ def grouped_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, fl
 
 
 def candidate_decision(
-    incumbent: Sequence[Mapping[str, Any]], candidate: Sequence[Mapping[str, Any]]
+    incumbent: Sequence[Mapping[str, Any]],
+    candidate: Sequence[Mapping[str, Any]],
+    *,
+    min_quality_delta: float = 0.0,
+    min_modification_delta: float = -0.06,
 ) -> dict[str, Any]:
     incumbent_groups = grouped_metrics(incumbent)
     candidate_groups = grouped_metrics(candidate)
@@ -745,10 +937,10 @@ def candidate_decision(
         blockers.append("transfer-exact-pass-regression")
     if deltas["role:regression"]["regression_accuracy"] < -1e-12:
         blockers.append("unchanged-cell-regression")
-    if deltas["all"]["modification_accuracy"] < -0.06:
-        blockers.append("target-cell-accuracy-drop-over-0.06")
-    if quality_delta < -1e-12:
-        blockers.append("negative-weighted-quality-delta")
+    if deltas["all"]["modification_accuracy"] < min_modification_delta - 1e-12:
+        blockers.append("target-cell-accuracy-below-floor")
+    if quality_delta < min_quality_delta - 1e-12:
+        blockers.append("weighted-quality-below-required-delta")
     return {
         "schema_version": "true-hd-candidate-decision-v1",
         "accepted": not blockers,
@@ -761,8 +953,8 @@ def candidate_decision(
             "development_accuracy_min_delta": 0.0,
             "transfer_accuracy_min_delta": 0.0,
             "regression_unchanged_cell_min_delta": 0.0,
-            "overall_modification_accuracy_min_delta": -0.06,
-            "weighted_quality_min_delta": 0.0,
+            "overall_modification_accuracy_min_delta": min_modification_delta,
+            "weighted_quality_min_delta": min_quality_delta,
             "weighted_quality": "accuracy + 0.25*modification_accuracy + 0.10*regression_accuracy",
         },
     }
@@ -893,6 +1085,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-url", default="http://10.130.138.46:8010/v1")
     parser.add_argument("--api-key-file", type=Path, default=Path("/tmp/spreadsheet-harness-litellm.key"))
     parser.add_argument("--model", default=MODEL)
+    parser.add_argument(
+        "--generator-model",
+        default=None,
+        help="Candidate proposer model; defaults to --model for historical compatibility",
+    )
+    parser.add_argument(
+        "--coordinate-sequence",
+        default="H,D,H,D",
+        help="Comma-separated accepted-coordinate schedule, using H and D",
+    )
     parser.add_argument("--parallelism", type=int, default=8)
     parser.add_argument("--task-attempts", type=int, default=2)
     parser.add_argument("--candidate-attempts", type=int, default=2)
@@ -902,16 +1104,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task-timeout", type=int, default=3600)
     parser.add_argument("--request-interval", type=float, default=0.5)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="Run and freeze only the shared evolution baseline evidence",
+    )
     parser.add_argument("--fast-gate", action="store_true")
     parser.add_argument("--prewarm-baseline-heldout", action="store_true")
+    parser.add_argument(
+        "--search-only",
+        action="store_true",
+        help="Freeze the accepted endpoint without opening held-out tasks",
+    )
+    parser.add_argument("--min-quality-delta", type=float, default=0.0)
+    parser.add_argument("--min-modification-delta", type=float, default=-0.06)
     args = parser.parse_args(argv)
+    args.generator_model = args.generator_model or args.model
+    tokens = tuple(part.strip().upper() for part in args.coordinate_sequence.split(",") if part.strip())
+    if not tokens or any(token not in COORDINATE_MAP for token in tokens):
+        parser.error("--coordinate-sequence must contain only comma-separated H and D")
+    args.coordinates = tuple(COORDINATE_MAP[token] for token in tokens)
     if (
         args.parallelism < 1
         or args.task_attempts < 1
         or args.candidate_attempts < 1
         or args.gate_model_calls < 1
         or args.target_rounds < 1
-        or args.target_rounds > len(COORDINATES)
+        or args.target_rounds > len(args.coordinates)
         or args.heldout_limit < 0
     ):
         parser.error("parallelism, attempt limits, gate-model-calls, target-rounds, and heldout-limit are invalid")
@@ -958,6 +1177,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     if not args.fast_gate:
         recurrent_tasks = evolution_tasks
+    search_tasks = recurrent_tasks if args.fast_gate else evolution_tasks
     print(
         json.dumps(
             {
@@ -966,6 +1186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "heldout_tasks": len(heldout_tasks),
                 "split_counts": manifest["counts"],
                 "model": args.model,
+                "generator_model": args.generator_model,
+                "coordinate_sequence": [coordinate for coordinate, _ in args.coordinates],
                 "parallelism": args.parallelism,
                 "recurrent_gate_tasks": len(recurrent_tasks),
             },
@@ -1002,13 +1224,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             result_root / "recurrent-gate-protocol.json",
             {
                 "schema_version": "true-hd-recurrent-gate-v1",
-                "first_candidate_replay": "all development, transfer, and regression tasks",
-                "subsequent_candidate_replay": "recurrent gate subset",
+                "first_candidate_replay": "recurrent gate subset",
+                "subsequent_candidate_replay": "same recurrent gate subset",
                 "recurrent_gate_task_ids": [task.task_id for task in recurrent_tasks],
                 "challenge_task_ids": sorted(RECURRENT_GATE_EXCLUSIONS),
                 "rationale": (
-                    "Preserve full first-round validation while moving two 50-call C3 "
-                    "long-tail cases out of the serial coordinate-update path."
+                    "Use the same clean seven-case gate for every candidate while "
+                    "moving three infrastructure-tainted long-tail cases out of the "
+                    "serial coordinate-update path."
                 ),
             },
         )
@@ -1022,7 +1245,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     current_root = Path(str(state["current_skill_root"]))
     accepted_records = list(state.get("accepted_rounds") or [])
 
-    experiment.run_batch("evolution", "incumbent-r00", baseline, evolution_tasks)
+    experiment.run_batch("evolution", "incumbent-r00", baseline, search_tasks)
+    if args.baseline_only:
+        endpoint = {
+            "schema_version": "true-hd-shared-baseline-v1",
+            "completed_at": utc_now(),
+            "solver_model": args.model,
+            "task_count": len(search_tasks),
+            "skill_root": str(baseline),
+            "heldout_opened": False,
+        }
+        atomic_json(result_root / "baseline-final.json", endpoint)
+        print(json.dumps(endpoint, indent=2), flush=True)
+        return 0
     incumbent_phase = "evolution"
     incumbent_label = (
         str(accepted_records[-1]["candidate_id"])
@@ -1031,16 +1266,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     evidence_phase = incumbent_phase
     evidence_label = incumbent_label
-    evidence_tasks = evolution_tasks
+    evidence_tasks = search_tasks
 
     while len(accepted_records) < args.target_rounds:
         round_number = len(accepted_records) + 1
-        coordinate, skill_name = COORDINATES[round_number - 1]
+        coordinate, skill_name = args.coordinates[round_number - 1]
         accepted = False
         for attempt in range(1, args.candidate_attempts + 1):
-            candidate_tasks = (
-                evolution_tasks if round_number == 1 and attempt == 1 else recurrent_tasks
-            )
+            candidate_tasks = search_tasks
             candidate_id = f"r{round_number:02d}-{coordinate}-a{attempt}"
             decision_path = result_root / "decisions" / f"{candidate_id}.json"
             _, candidate_root = experiment.generate_candidate(
@@ -1052,6 +1285,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 evidence_phase=evidence_phase,
                 evidence_label=evidence_label,
                 evidence_tasks=evidence_tasks,
+                anchor_phase=incumbent_phase,
+                anchor_label=incumbent_label,
             )
             candidate_max_calls = (
                 50 if round_number == 1 and attempt == 1 else args.gate_model_calls
@@ -1067,7 +1302,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 incumbent_phase, incumbent_label, candidate_tasks
             )
             candidate_rows = experiment.result_rows("evolution", candidate_id, candidate_tasks)
-            decision = candidate_decision(incumbent_rows, candidate_rows)
+            decision = candidate_decision(
+                incumbent_rows,
+                candidate_rows,
+                min_quality_delta=args.min_quality_delta,
+                min_modification_delta=args.min_modification_delta,
+            )
             decision.update(
                 {
                     "candidate_id": candidate_id,
@@ -1131,6 +1371,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"No acceptable {coordinate} candidate after {args.candidate_attempts} attempts; "
                 "the coordinate was not advanced"
             )
+
+    if args.search_only:
+        endpoint = {
+            "schema_version": "true-hd-search-endpoint-v1",
+            "completed_at": utc_now(),
+            "solver_model": args.model,
+            "generator_model": args.generator_model,
+            "coordinate_sequence": [record["coordinate"] for record in accepted_records],
+            "accepted_rounds": accepted_records,
+            "baseline_skill_root": str(baseline),
+            "endpoint_skill_root": str(current_root),
+            "heldout_opened": False,
+            "min_quality_delta": args.min_quality_delta,
+            "min_modification_delta": args.min_modification_delta,
+        }
+        atomic_json(result_root / "search-final.json", endpoint)
+        state.update({"status": "search-complete", "completed_at": utc_now()})
+        atomic_json(state_path, state)
+        print(json.dumps(endpoint, indent=2), flush=True)
+        return 0
 
     # A factorial report is meaningful only after every requested coordinate
     # update has actually been accepted.  The old accelerated run was allowed
