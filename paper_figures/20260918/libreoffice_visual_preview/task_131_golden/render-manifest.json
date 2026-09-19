@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "source": {
+    "name": "Task 131_golden.xlsx",
+    "format": "xlsx",
+    "sha256": "e489f59518958253dee1ce998cd602fdfe372dfc6dfad6f37ff5f6855bf71006"
+  },
+  "backend": "libreoffice-headless+pymupdf",
+  "version": {
+    "libreoffice": "LibreOffice 7.3.7.2 30(Build:2)",
+    "pymupdf": "1.28.2"
+  },
+  "hash": "e489f59518958253dee1ce998cd602fdfe372dfc6dfad6f37ff5f6855bf71006",
+  "mode": "per_sheet",
+  "dpi": 120,
+  "manifest_path": "/data/zju-160/tongzeyuan/spreadsheet-harness/paper_figures/20260918/libreoffice_visual_preview/task_131_golden/render-manifest.json",
+  "page_count": 2,
+  "pages": [
+    {
+      "index": 1,
+      "page": 1,
+      "path": "sheet-0001-page-0001.png",
+      "image_path": "/data/zju-160/tongzeyuan/spreadsheet-harness/paper_figures/20260918/libreoffice_visual_preview/task_131_golden/sheet-0001-page-0001.png",
+      "sha256": "f3cfe7ae972886891e025614baebdfbcda7f660079ada021e25e9705599231dc",
+      "width": 993,
+      "height": 1404,
+      "sheet": "Sheet1",
+      "sheet_page": 1
+    },
+    {
+      "index": 2,
+      "page": 2,
+      "path": "sheet-0001-page-0002.png",
+      "image_path": "/data/zju-160/tongzeyuan/spreadsheet-harness/paper_figures/20260918/libreoffice_visual_preview/task_131_golden/sheet-0001-page-0002.png",
+      "sha256": "a640bc7c7cd9a8b8865c9e463faf6da0abca5b26fbb3ec3b6fc9d6f4f5b4a5ea",
+      "width": 993,
+      "height": 1404,
+      "sheet": "Sheet1",
+      "sheet_page": 2
+    }
+  ]
+}

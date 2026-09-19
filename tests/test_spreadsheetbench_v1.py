@@ -186,6 +186,45 @@ provenance:
     workbook.close()
 
 
+def test_v1_replays_comparison_formula_identically_to_case1(tmp_path: Path) -> None:
+    import yaml
+
+    from spreadsheet_harness.arms import _apply_safe_planner_actions, _yaml_evidence
+    from spreadsheet_harness.session import WorkbookSession
+
+    source = tmp_path / "source.xlsx"
+    _book(source, 7)
+    formula = '=IF(A1>0,"<ok>","\\u003c")'
+    raw_plan = yaml.safe_dump({
+        "actions": [{"action": "write_formula", "target": "Sheet!B1", "value": formula}],
+        "provenance": [{"sheet": "Sheet", "range": "A1:B1"}],
+    })
+    session = WorkbookSession.create(source, tmp_path / "case1")
+    result = _apply_safe_planner_actions(
+        session, instruction="Fill B1.",
+        normalized_plan=_yaml_evidence(raw_plan, stage="plan", preserve_strings=True),
+        preserve_plan_strings=True,
+        deterministic_evidence="{}",
+    )
+    assert result == 1
+    frozen = v1_planner_replay_plan(
+        {"stages": [{"name": "plan", "agent": {"final_text": raw_plan}}]},
+        session.paths.trajectory,
+    )
+    assert frozen == raw_plan
+    replay = replay_v1_calls(
+        source, tmp_path / "case2", [], instruction="Fill B1.", planner_plan=frozen,
+        preserve_plan_strings=True,
+    )
+    assert replay["planner_actions_replayed"] == 1
+    for path in (session.workbook_path, replay["output_workbook"]):
+        workbook = load_workbook(path)
+        try:
+            assert workbook["Sheet"]["B1"].value == formula
+        finally:
+            workbook.close()
+
+
 def test_v1_audit_keeps_authentic_not_scored_run_incomplete(
     tmp_path: Path, monkeypatch,
 ) -> None:

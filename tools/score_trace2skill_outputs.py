@@ -24,6 +24,11 @@ def main() -> int:
     ap.add_argument("root", type=Path, help="Trace2Skill result root")
     ap.add_argument("--dataset", type=Path, default=Path("benchmarks/data/spreadsheetbench-v2"))
     ap.add_argument("--manifest", type=Path, default=Path("benchmarks/results/spreadsheetbench-v2-glm52-nothinking-30-4arm-20260904/manifest.json"))
+    ap.add_argument(
+        "--output",
+        type=Path,
+        help="Result JSON path; defaults to ROOT/results.json",
+    )
     args = ap.parse_args()
     root = args.root.resolve()
     manifest = json.loads(args.manifest.read_text())
@@ -46,11 +51,18 @@ def main() -> int:
         slug = task_id.replace("/", "_")
         output_root = root / "outputs"
         work_root = root / "work"
-        candidates = [p for p in output_root.glob(f"**/{slug}*output.xlsx") if p.is_file()]
+        category_slug = f"{task.category}_{task.item_id}"
+        candidates = [p for p in output_root.glob(f"{category_slug}/**/*output.xlsx") if p.is_file()]
         # Trace2Skill uses either the task slug directory or the original
-        # workbook stem; fall back to an exact item-id search if necessary.
+        # workbook stem. Keep the category directory mandatory because V2
+        # item IDs repeat across Debugging, Financial_Model, and Template.
         if not candidates:
-            candidates = [p for p in output_root.glob(f"**/*{task.item_id}*output.xlsx") if p.is_file()]
+            candidates = [
+                p
+                for category_dir in output_root.glob(f"{task.category}_{task.item_id}*")
+                for p in category_dir.glob("**/*output.xlsx")
+                if p.is_file()
+            ]
         # A task that reaches ACTION: TASK_COMPLETE but fails the public
         # runner's bookkeeping can still leave a valid work/output.xlsx.
         if not candidates:
@@ -73,7 +85,8 @@ def main() -> int:
             row.update({"error_type": type(exc).__name__, "error": str(exc), "output_workbook": str(output),
                         "model_failure_reason": "trace2skill_evaluator_failure"})
         rows.append(row)
-    out = root / "results.json"
+    out = args.output.resolve() if args.output else root / "results.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n")
     print(f"wrote {out}: {sum(r['status']=='completed' for r in rows)}/{len(rows)} scored")
     return 0

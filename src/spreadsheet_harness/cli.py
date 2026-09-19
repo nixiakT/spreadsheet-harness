@@ -1017,6 +1017,7 @@ def cmd_benchmark_v1_compare(args: argparse.Namespace) -> int:
         tasks = [by_id[task_id] for task_id in requested]
     config = _provider(args)
     summary = run_spreadsheetbench_v1_comparison(
+        execution_mode=getattr(args, "v1_execution_mode", "legacy"),
         config=config,
         vision_config=_vision_provider(args, config),
         dataset_root=args.dataset,
@@ -1700,6 +1701,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     v1_compare.add_argument("--composition", action="append", metavar="ARM=COMPOSITION")
+    v1_compare.add_argument(
+        "--v1-execution-mode", choices=("legacy", "repaired", "direct"), default="legacy",
+        help="V1-only candidate; legacy preserves existing runs, repaired fixes planning, direct skips planner writes",
+    )
     v1_compare.add_argument("--skills", action="append", default=[])
     v1_compare.add_argument("--max-model-calls", type=int, default=20)
     v1_compare.add_argument("--max-turns-per-arm", type=int, default=20)

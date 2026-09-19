@@ -89,9 +89,9 @@ def task_dict(task: SpreadsheetBenchV1Instruction) -> dict[str, Any]:
 
 
 def generation_prompt(
-    task: dict[str, Any], workspace: Path, *, harness: str, skill_name: str
+    task: dict[str, Any], workspace: Path, *, harness: str, skill_name: str | None
 ) -> str:
-    skill_loading = {
+    skill_loading = ({
         "codex": (
             "The spreadsheet-core skill is already loaded through AGENTS.md and the "
             "isolated Codex skill registry. Follow it throughout."
@@ -104,7 +104,14 @@ def generation_prompt(
             f"Before spreadsheet work, call the skill tool to load `{skill_name}`. "
             "It is the only benchmark skill in this DSH registry."
         ),
-    }[harness]
+    }[harness] if skill_name is not None else
+        "No benchmark skill is installed or loaded for this run. Use only the harness's native capabilities."
+    )
+    final_instruction = (
+        "In the final response state that spreadsheet-core was loaded and both artifacts were verified."
+        if skill_name is not None
+        else "In the final response state that both artifacts were verified."
+    )
     return f"""You are solving one SpreadsheetBench-v1 instruction with its official sibling-replay protocol.
 
 {skill_loading}
@@ -128,22 +135,22 @@ Required artifacts and replay contract:
 - Reopen output.xlsx and verify the requested result. Keep inspection output bounded.
 
 Do the work now; do not stop at a plan. Finish only when both solution.py and output.xlsx exist.
-In the final response state that spreadsheet-core was loaded and both artifacts were verified.
+{final_instruction}
 """
 
 
-def install_prompts(harness: str, skill_name: str) -> None:
+def install_prompts(harness: str, skill_name: str | None) -> None:
     if harness == "codex":
-        codex_runner.prompt_for = lambda task, workspace: generation_prompt(
+        codex_runner.prompt_for = lambda task, workspace, **_kwargs: generation_prompt(
             task, workspace, harness="codex", skill_name=skill_name
         )
     elif harness == "claude":
-        claude_runner.claude_prompt = lambda task, workspace: generation_prompt(
+        claude_runner.claude_prompt = lambda task, workspace, **_kwargs: generation_prompt(
             task, workspace, harness="claude", skill_name=skill_name
         )
     else:
         dsh_runner.dsh_prompt = lambda task, workspace, requested_skill: generation_prompt(
-            task, workspace, harness="dsh", skill_name=requested_skill
+            task, workspace, harness="dsh", skill_name=skill_name
         )
 
 
@@ -206,7 +213,10 @@ def run_harness_generation(
     # Point that expected path at this experiment's single proxy audit so the
     # recorded turns and resume ceiling remain correct without duplicating it.
     generation_audit = generation_root / "proxy-requests.jsonl"
-    if not generation_audit.exists():
+    # ``Path.exists`` is false for a dangling symlink.  Before the first proxy
+    # request the shared audit target may not exist yet, but the link itself
+    # already does and must not be recreated on resume.
+    if not os.path.lexists(generation_audit):
         generation_audit.symlink_to(
             os.path.relpath(args.run_root / "proxy-requests.jsonl", generation_root)
         )
@@ -385,7 +395,11 @@ def run_one(
         if not script.is_file():
             raise RuntimeError("real harness did not create solution.py")
         record["solution_sha256"] = sha256(script)
-        if args.harness == "dsh" and generation.get("skill_loaded_in_session") is not True:
+        if (
+            args.harness == "dsh"
+            and args.skill is not None
+            and generation.get("skill_loaded_in_session") is not True
+        ):
             raise RuntimeError("DSH session did not record loading spreadsheet-core")
         outputs, replay_rows = replay_solution(
             task,
@@ -445,11 +459,16 @@ def make_manifest(args: argparse.Namespace, tasks: list[SpreadsheetBenchV1Instru
             "replay_timeout_seconds": args.replay_timeout,
             "parallelism": args.parallelism,
         },
-        "skill": {
-            "name": args.skill.parent.name,
-            "path": str(args.skill),
-            "sha256": sha256(args.skill),
-        },
+        "skill": (
+            {
+                "enabled": True,
+                "name": args.skill.parent.name,
+                "path": str(args.skill),
+                "sha256": sha256(args.skill),
+            }
+            if args.skill is not None
+            else {"enabled": False, "name": None, "path": None, "sha256": None}
+        ),
         "task_ids": [task.task_id for task in tasks],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -494,6 +513,7 @@ def main() -> int:
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--skill", type=Path, default=DEFAULT_SKILL)
+    parser.add_argument("--no-skill", action="store_true")
     parser.add_argument("--task-id", action="append", default=[])
     parser.add_argument("--parallelism", type=int, default=6)
     parser.add_argument("--max-turns", type=int, default=50)
@@ -504,12 +524,15 @@ def main() -> int:
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--dsh-bin", type=Path, default=dsh_runner.DEFAULT_DSH_BIN)
     args = parser.parse_args()
-    for name in ("dataset", "skill", "api_key_file", "dsh_bin"):
+    for name in ("dataset", "api_key_file", "dsh_bin"):
         setattr(args, name, getattr(args, name).expanduser().resolve())
+    args.skill = None if args.no_skill else args.skill.expanduser().resolve()
     args.run_root = args.run_root.expanduser().resolve()
     if args.parallelism < 1 or args.max_turns < 1 or args.task_timeout <= 0:
         parser.error("parallelism, max-turns, and timeouts must be positive")
-    if not args.skill.is_file() or args.skill.parent.name != "spreadsheet-core":
+    if args.skill is not None and (
+        not args.skill.is_file() or args.skill.parent.name != "spreadsheet-core"
+    ):
         parser.error("--skill must be spreadsheet-core/SKILL.md")
     if not args.api_key_file.is_file():
         parser.error("API key file is missing")
@@ -531,7 +554,9 @@ def main() -> int:
             parser.error("existing run manifest differs from requested configuration")
     else:
         atomic_json(manifest_path, manifest)
-    install_prompts(args.harness, args.skill.parent.name)
+    install_prompts(
+        args.harness, args.skill.parent.name if args.skill is not None else None
+    )
     port = free_port()
     proxy, proxy_log = start_proxy(args, port)
     runtime_parent = ROOT / "tmp"

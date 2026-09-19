@@ -1,0 +1,129 @@
+{
+  "reference_commit": "e0c3e0011d7ab5da938d18aa09e454c282293a02",
+  "reference_arms_sha256": "31a9493150a6bf49d1e5efbfe5b18026f880363783fcf4d03999ae3e56890e29",
+  "current_arms_sha256": "1f85a28c1e5680ac623c4e918442555f99135b07eb428ea518a3a77eca674f40",
+  "all_equal": true,
+  "checks": [
+    {
+      "arm": "bare",
+      "category": "Template",
+      "equal": true,
+      "stages": [
+        "solve"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "bare",
+      "category": "Financial_Model",
+      "equal": true,
+      "stages": [
+        "solve"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "bare",
+      "category": "Debugging",
+      "equal": true,
+      "stages": [
+        "solve"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "bare",
+      "category": "Visualization",
+      "equal": true,
+      "stages": [
+        "solve"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-basic",
+      "category": "Template",
+      "equal": true,
+      "stages": [
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-basic",
+      "category": "Financial_Model",
+      "equal": true,
+      "stages": [
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-basic",
+      "category": "Debugging",
+      "equal": true,
+      "stages": [
+        "plan",
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-basic",
+      "category": "Visualization",
+      "equal": true,
+      "stages": [
+        "plan",
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-financial",
+      "category": "Template",
+      "equal": true,
+      "stages": [
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-financial",
+      "category": "Financial_Model",
+      "equal": true,
+      "stages": [
+        "plan",
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-financial",
+      "category": "Debugging",
+      "equal": true,
+      "stages": [
+        "plan",
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "spreadsheet-harness-financial",
+      "category": "Visualization",
+      "equal": true,
+      "stages": [
+        "plan",
+        "execute"
+      ],
+      "changed_fields": []
+    },
+    {
+      "arm": "bare",
+      "category": "V1 direct mode baseline control",
+      "equal": true,
+      "stages": ["solve"],
+      "changed_fields": []
+    }
+  ],
+  "scope": "Synthetic workbook + mocked model; exact request and cell-state comparison, not benchmark accuracy."
+}

@@ -47,11 +47,18 @@ def free_local_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def dsh_prompt(task: dict[str, Any], workspace: Path, skill_name: str) -> str:
+def dsh_prompt(
+    task: dict[str, Any], workspace: Path, skill_name: str | None
+) -> str:
+    skill_note = (
+        f"Before doing spreadsheet work, call the `skill` tool to load `{skill_name}` and follow it.\n"
+        "This is the only benchmark skill available in the DeepSeek Harness skill registry."
+        if skill_name is not None
+        else "No benchmark skill is installed or loaded for this run. Use the DeepSeek Harness's native capabilities."
+    )
     return f"""Complete one isolated SpreadsheetBench-v2 spreadsheet editing task.
 
-Before doing spreadsheet work, call the `skill` tool to load `{skill_name}` and follow it.
-This is the only benchmark skill available in the DeepSeek Harness skill registry.
+{skill_note}
 
 Category: {task['_category']}
 Task id: {task['_task_id']}
@@ -77,8 +84,7 @@ Workspace contract:
 - Reopen output.xlsx and verify the requested result before finishing.
 - Keep all inspection output bounded; do not dump whole workbooks.
 
-Finish only after a valid output.xlsx exists. In the final response state that `{skill_name}`
-was loaded and report the output path and verification result.
+Finish only after a valid output.xlsx exists. Report the output path and verification result.
 """
 
 
@@ -153,14 +159,18 @@ def prepare_dsh_home(
     *,
     proxy_port: int,
     slug: str,
-    skill: Path,
+    skill: Path | None,
     model: str,
 ) -> None:
     profile = dsh_home / "profiles/headless"
-    skill_dir = dsh_home / "skills" / skill.parent.name
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    skill_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    shutil.copy2(skill, skill_dir / "SKILL.md")
+    if skill is not None:
+        skill_dir = dsh_home / "skills" / skill.parent.name
+        skill_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copy2(skill, skill_dir / "SKILL.md")
+    else:
+        # Prevent a reused workspace from inheriting a previously installed skill.
+        shutil.rmtree(dsh_home / "skills", ignore_errors=True)
     (profile / "package.json").write_text(
         json.dumps(
             {
@@ -228,12 +238,13 @@ def prepare_dsh_home(
               off:
               medium: medium
 
-- id: skill-filesystem
+{f'''- id: skill-filesystem
   config:
     includeDefaultRoots: false
     customSkillDirs:
       - {dsh_home / 'skills'}
-    watch: false
+    watch: false''' if skill is not None else '''- id: skill-filesystem
+  disabled: true'''}
 """
     (profile / "cordis.patch.yml").write_text(patch, encoding="utf-8")
     (dsh_home / "settings.yaml").write_text(
@@ -268,7 +279,7 @@ def run_one(
     run_root: Path,
     dsh_bin: Path,
     proxy_port: int,
-    skill: Path,
+    skill: Path | None,
     model: str,
     max_turns: int,
     task_timeout: float,
@@ -334,7 +345,9 @@ def run_one(
             str(dsh_bin),
             "--profile",
             "headless",
-            dsh_prompt(task, task_root, skill.parent.name),
+            dsh_prompt(
+                task, task_root, skill.parent.name if skill is not None else None
+            ),
         ]
         try:
             with final_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
@@ -398,11 +411,20 @@ def run_one(
         "turns": model_requests,
         "started_at": started,
         "elapsed_seconds": round(time.time() - started, 3),
-        "skill_name": skill.parent.name,
-        "skill_path": str(skill),
-        "skill_sha256": sha256(skill),
-        "skill_load_mode": "official-dsh-skill-filesystem-and-skill-tool",
-        "skill_loaded_in_session": session_skill_loaded(dsh_home, skill.parent.name),
+        "skill_enabled": skill is not None,
+        "skill_name": skill.parent.name if skill is not None else None,
+        "skill_path": str(skill) if skill is not None else None,
+        "skill_sha256": sha256(skill) if skill is not None else None,
+        "skill_load_mode": (
+            "official-dsh-skill-filesystem-and-skill-tool"
+            if skill is not None
+            else "none"
+        ),
+        "skill_loaded_in_session": (
+            session_skill_loaded(dsh_home, skill.parent.name)
+            if skill is not None
+            else False
+        ),
         "dsh_home": str(dsh_home),
         "dsh_sessions": str(dsh_home / "sessions"),
         "output": str(output_path),
@@ -457,19 +479,20 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://10.130.138.46:8010/v1")
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--skill", type=Path, default=DEFAULT_SKILL)
+    parser.add_argument("--no-skill", action="store_true")
     parser.add_argument("--dsh-bin", type=Path, default=DEFAULT_DSH_BIN)
     parser.add_argument("--recalculate-before-evaluation", action="store_true")
     args = parser.parse_args()
     args.dataset = args.dataset.resolve()
     args.run_root = args.run_root.resolve()
     args.api_key_file = args.api_key_file.resolve()
-    args.skill = args.skill.resolve()
+    args.skill = None if args.no_skill else args.skill.resolve()
     args.dsh_bin = args.dsh_bin.resolve()
     if args.parallelism < 1 or args.max_turns < 1 or args.task_timeout <= 0:
         parser.error("parallelism, max-turns, and task-timeout must be positive")
     if not args.dsh_bin.is_file() or not os.access(args.dsh_bin, os.X_OK):
         parser.error(f"official dsh binary is not executable: {args.dsh_bin}")
-    if not args.skill.is_file():
+    if args.skill is not None and not args.skill.is_file():
         parser.error(f"skill not found: {args.skill}")
     if not args.api_key_file.is_file() or not args.api_key_file.read_text(
         encoding="utf-8"
@@ -500,8 +523,9 @@ def main() -> int:
             "max_turns": args.max_turns,
             "turn_limit_unit": "model_requests",
             "parallelism": args.parallelism,
-            "skill": str(args.skill),
-            "skill_sha256": sha256(args.skill),
+            "skill_enabled": args.skill is not None,
+            "skill": str(args.skill) if args.skill is not None else None,
+            "skill_sha256": sha256(args.skill) if args.skill is not None else None,
             "base_url": args.base_url,
             "task_plan": [task["_task_id"] for task in tasks],
         },

@@ -5807,6 +5807,7 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
                 ],
                 "tool_choice": {"type": "function", "name": "list_sheets"},
                 "parallel_tool_calls": False,
+                "reasoning": {"effort": config.reasoning_effort},
                 "max_output_tokens": 128,
             }
         )
@@ -5896,6 +5897,7 @@ def test_chat_completions_client_maps_tools_and_replays_outputs() -> None:
         "function": {"name": "list_sheets"},
     }
     assert first_wire["max_tokens"] == 128
+    assert first_wire["reasoning_effort"] == "high"
     assert first_wire["temperature"] == 1.0
     assert first_wire["top_p"] == 0.95
     assert first_wire["presence_penalty"] == 1.5

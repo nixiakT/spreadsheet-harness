@@ -146,7 +146,7 @@ def make_codex_home(
     base_dir: Path,
     port: int,
     api_key: str,
-    skill: Path,
+    skill: Path | None,
     task_key: str,
     model: str = "DeepSeek-V4-Flash",
 ) -> Path:
@@ -180,10 +180,11 @@ def make_codex_home(
         encoding="utf-8",
     )
     (home / "config.toml").chmod(0o600)
-    # Keep a Codex-discoverable copy as well as the explicit prompt reference.
-    skill_target = home / "skills" / skill.parent.name
-    skill_target.mkdir(parents=True)
-    shutil.copy2(skill, skill_target / skill.name)
+    if skill is not None:
+        # Keep a Codex-discoverable copy as well as the explicit prompt reference.
+        skill_target = home / "skills" / skill.parent.name
+        skill_target.mkdir(parents=True)
+        shutil.copy2(skill, skill_target / skill.name)
     return home
 
 
@@ -194,13 +195,20 @@ def make_claude_home(base_dir: Path) -> Path:
     return home
 
 
-def prompt_for(task: dict[str, Any], workspace: Path) -> str:
+def prompt_for(
+    task: dict[str, Any], workspace: Path, *, skill_enabled: bool = True
+) -> str:
     category = task["_category"]
+    skill_note = (
+        "The required spreadsheet-manipulation skill is already loaded through this workspace's AGENTS.md\n"
+        "and the Codex skill registry. Follow it throughout the task. Do not read SKILL.md again; begin by\n"
+        "inspecting the workbook. In your final response explicitly state that the skill was loaded."
+        if skill_enabled
+        else "No benchmark skill is installed or loaded for this run. Use the Codex harness's native capabilities."
+    )
     return f"""You are the spreadsheet editing agent for one isolated SpreadsheetBench-v2 task.
 
-The required spreadsheet-manipulation skill is already loaded through this workspace's AGENTS.md
-and the Codex skill registry. Follow it throughout the task. Do not read SKILL.md again; begin by
-inspecting the workbook. In your final response explicitly state that the skill was loaded.
+{skill_note}
 
 Category: {category}
 Task id: {task['_task_id']}
@@ -227,6 +235,16 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     temp.replace(path)
 
 
+def write_or_validate_manifest(path: Path, payload: dict[str, Any]) -> None:
+    """Freeze a run configuration and reject accidental in-place reuse."""
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise ValueError(f"existing run manifest differs: {path}")
+        return
+    write_json(path, payload)
+
+
 def run_one(
     task: dict[str, Any],
     *,
@@ -235,7 +253,7 @@ def run_one(
     runtime_root: Path,
     proxy_port: int,
     api_key: str,
-    skill: Path,
+    skill: Path | None,
     model: str,
     max_turns: int,
     max_output_tokens: int,
@@ -260,13 +278,18 @@ def run_one(
             pass
     reuse_output = workbook_is_valid(output_path)
     task_root.mkdir(parents=True, exist_ok=True)
-    skill_text = skill.read_text(encoding="utf-8")
-    (task_root / "AGENTS.md").write_text(
-        "# Loaded spreadsheet-manipulation skill\n\n"
-        "The following skill is binding. It is already loaded; do not spend a tool call reading it.\n\n"
-        + skill_text,
-        encoding="utf-8",
-    )
+    agents_path = task_root / "AGENTS.md"
+    if skill is not None:
+        skill_text = skill.read_text(encoding="utf-8")
+        agents_path.write_text(
+            "# Loaded spreadsheet-manipulation skill\n\n"
+            "The following skill is binding. It is already loaded; do not spend a tool call reading it.\n\n"
+            + skill_text,
+            encoding="utf-8",
+        )
+    else:
+        # A reused workspace must not retain instructions from a prior skill run.
+        agents_path.unlink(missing_ok=True)
     codex_home = make_codex_home(
         runtime_root / slug,
         proxy_port,
@@ -421,7 +444,9 @@ def run_one(
         with trajectory_path.open("w", encoding="utf-8") as trajectory, stderr_path.open(
             "w", encoding="utf-8"
         ) as stderr:
-            return_code = invoke(command, prompt_for(task, task_root))
+            return_code = invoke(
+                command, prompt_for(task, task_root, skill_enabled=skill is not None)
+            )
             for _ in range(max_turns):
                 if artifact_ready():
                     break
@@ -491,8 +516,9 @@ def run_one(
         "model": model,
         "started_at": started,
         "elapsed_seconds": round(time.time() - started, 3),
-        "skill_path": str(skill),
-        "skill_sha256": sha256(skill),
+        "skill_enabled": skill is not None,
+        "skill_path": str(skill) if skill is not None else None,
+        "skill_sha256": sha256(skill) if skill is not None else None,
         "temperature": 0.0,
         "top_p": 1.0,
         "enable_thinking": True,
@@ -504,7 +530,9 @@ def run_one(
         "output_changed_from_input": (
             sha256(output_path) != sha256(input_path) if output_path.is_file() else False
         ),
-        "skill_load_mode": "codex-agents-and-skill-registry",
+        "skill_load_mode": (
+            "codex-agents-and-skill-registry" if skill is not None else "none"
+        ),
         "reused_existing_output": reuse_output,
         "evaluation_deferred": bool(ready and defer_evaluation),
         "recalculated_before_evaluation": recalculated,
@@ -551,6 +579,11 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://10.130.138.46:8010/v1")
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--skill", type=Path, default=DEFAULT_SKILL)
+    parser.add_argument(
+        "--no-skill",
+        action="store_true",
+        help="run the harness without AGENTS.md or an installed benchmark skill",
+    )
     parser.add_argument("--codex-bin", type=Path, default=CODEX_BIN)
     parser.add_argument("--defer-evaluation", action="store_true")
     parser.add_argument(
@@ -562,13 +595,13 @@ def main() -> int:
     CODEX_BIN = args.codex_bin
     args.dataset = args.dataset.resolve()
     args.run_root = args.run_root.resolve()
-    args.skill = args.skill.resolve()
+    args.skill = None if args.no_skill else args.skill.resolve()
     args.api_key_file = args.api_key_file.resolve()
     if args.parallelism < 1 or args.max_turns < 1 or args.max_output_tokens < 1:
         parser.error("parallelism, max-turns, and max-output-tokens must be positive")
     if not CODEX_BIN.is_file() or not os.access(CODEX_BIN, os.X_OK):
         parser.error(f"Codex binary is not executable: {CODEX_BIN}")
-    if not args.skill.is_file():
+    if args.skill is not None and not args.skill.is_file():
         parser.error(f"skill not found: {args.skill}")
     api_key = args.api_key_file.read_text(encoding="utf-8").strip()
     if not api_key:
@@ -576,6 +609,30 @@ def main() -> int:
     evaluator = ROOT / "benchmarks/vendor/spreadsheetbench2-official-83d415c/evaluation/evaluation.py"
     tasks = load_tasks(args.dataset, args.category, set(args.task_id))
     args.run_root.mkdir(parents=True, exist_ok=True)
+    write_or_validate_manifest(
+        args.run_root / "manifest.json",
+        {
+            "schema_version": 1,
+            "benchmark": "SpreadsheetBench-v2",
+            "harness": "openai/codex",
+            "model": args.model,
+            "provider": "internal-litellm",
+            "base_url": args.base_url,
+            "reasoning_effort": "medium",
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "enable_thinking": True,
+            "max_turns": args.max_turns,
+            "max_output_tokens": args.max_output_tokens,
+            "task_timeout_seconds": args.task_timeout,
+            "parallelism": args.parallelism,
+            "skill_enabled": args.skill is not None,
+            "skill_path": str(args.skill) if args.skill is not None else None,
+            "skill_sha256": sha256(args.skill) if args.skill is not None else None,
+            "dataset": str(args.dataset),
+            "task_ids": [item["_task_id"] for item in tasks],
+        },
+    )
     plan_path = args.run_root / "task-plan.json"
     plan_path.write_text(json.dumps([item["_task_id"] for item in tasks], indent=2), encoding="utf-8")
 

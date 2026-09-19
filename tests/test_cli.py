@@ -15,6 +15,19 @@ from spreadsheet_harness.config import ProviderConfig
 from spreadsheet_harness.errors import HarnessError
 
 
+def test_v1_execution_candidate_is_opt_in_and_unavailable_to_v2() -> None:
+    parser = cli.build_parser()
+    base = ["benchmark", "v1-compare", "--dataset", "dataset", "--output", "output"]
+    assert parser.parse_args(base).v1_execution_mode == "legacy"
+    for mode in ("repaired", "direct"):
+        assert parser.parse_args([*base, "--v1-execution-mode", mode]).v1_execution_mode == mode
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "benchmark", "v2-compare", "--dataset", "dataset", "--category", "Template",
+            "--v1-execution-mode", "direct",
+        ])
+
+
 def test_v2_compare_accepts_unlimited_token_budgets_without_sending_max_tokens() -> None:
     args = cli.build_parser().parse_args(
         [

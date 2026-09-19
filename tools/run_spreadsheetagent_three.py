@@ -58,7 +58,7 @@ V2_EVALUATOR = (
     ROOT / "benchmarks/vendor/spreadsheetbench2-official-83d415c/evaluation/evaluation.py"
 )
 MODELS = {
-    "deepseek": "DeepSeek-V4-Flash",
+    "deepseek": "dashscope/deepseek-v4-flash",
     "qwen480": "dashscope/qwen3-coder-480b-a35b-instruct",
 }
 GROUPS = (

@@ -348,6 +348,7 @@ def replay_v1_calls(
     planner_plan: str | None = None,
     repair_date_text: bool = False,
     require_code_isolation: bool = True,
+    preserve_plan_strings: bool = False,
 ) -> dict[str, Any]:
     """Replay one frozen case-1 harness solution on a sibling workbook."""
 
@@ -362,6 +363,7 @@ def replay_v1_calls(
             normalized_plan=planner_plan,
             deterministic_evidence="{}",
             task_category=None,
+            preserve_plan_strings=preserve_plan_strings,
         )
     registry = SpreadsheetToolRegistry(
         session,
@@ -510,10 +512,13 @@ def run_spreadsheetbench_v1_comparison(
     arm_order_seed: int = 20_260_829,
     resume: bool = False,
     seal_interrupted_current: bool = False,
+    execution_mode: str = "legacy",
 ) -> dict[str, Any]:
     """Run a resumable full v1 study with one generated solution per instruction."""
 
     selected_tasks = list(tasks or load_spreadsheetbench_v1(dataset_root))
+    if execution_mode not in {"legacy", "repaired", "direct"}:
+        raise HarnessError("Unsupported V1 execution mode")
     selected_arms = tuple(str(arm) for arm in arms)
     known_arms = {
         "bare",
@@ -616,6 +621,12 @@ def run_spreadsheetbench_v1_comparison(
             for task in selected_tasks
         ],
     }
+    if execution_mode != "legacy":
+        manifest["v1_execution_mode"] = execution_mode
+        manifest["runtime_source_sha256"] = {
+            name: _sha256(Path(__file__).with_name(name))
+            for name in ("arms.py", "spreadsheetbench_v1.py")
+        }
     manifest["manifest_sha256"] = _manifest_sha256(manifest)
     manifest_path = output / "manifest.json"
     results_path = output / "results.json"
@@ -715,6 +726,7 @@ def run_spreadsheetbench_v1_comparison(
                     composition=specs[arm],
                     task_category=None,
                     vision_config=vision_config,
+                    v1_execution_mode=execution_mode,
                 )
             except AgentExecutionFailure as exc:
                 if exc.agent_result is None:
@@ -746,7 +758,8 @@ def run_spreadsheetbench_v1_comparison(
                     calls,
                     instruction=task.instruction,
                     planner_plan=planner_plan,
-                    repair_date_text=plan.repair_date_text,
+                    repair_date_text=plan.repair_date_text and execution_mode != "direct",
+                    preserve_plan_strings=execution_mode != "legacy",
                 )
                 replay_output = Path(replay["output_workbook"])
                 replay["recalculation"] = recalculate_workbook(

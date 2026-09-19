@@ -364,6 +364,12 @@ def _chat_wire_payload(payload: dict[str, Any]) -> dict[str, Any]:
             message.setdefault("reasoning_content", " ")
     if "max_output_tokens" in payload:
         result["max_tokens"] = payload["max_output_tokens"]
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("effort") is not None:
+        # The harness uses the Responses-style ``reasoning.effort`` internally,
+        # while OpenAI-compatible Chat Completions routes (including LiteLLM)
+        # expect the equivalent control as a top-level ``reasoning_effort``.
+        result["reasoning_effort"] = reasoning["effort"]
     for name in ("temperature", "top_p", "presence_penalty"):
         if name in payload:
             result[name] = payload[name]

@@ -15,28 +15,50 @@ from spreadsheet_harness.continuous_evolution import SpreadsheetBenchV2Evaluatio
 def main() -> int:
     request_path, response_path = Path(sys.argv[1]), Path(sys.argv[2])
     request = json.loads(request_path.read_text(encoding="utf-8"))
+    binding = request.get("evaluation_binding") or {}
     provider = ProviderConfig(
-        base_url=os.environ.get("SPREADSHEET_EVOLUTION_BASE_URL", "http://10.130.138.46:8010/v1"),
+        base_url=str(
+            binding.get("provider")
+            or os.environ.get("SPREADSHEET_EVOLUTION_BASE_URL", "http://10.130.138.46:8010/v1")
+        ),
         api_key=Path(os.environ.get("SPREADSHEET_EVOLUTION_API_KEY_FILE", "/tmp/spreadsheet-harness-litellm.key")).read_text(encoding="utf-8").strip(),
-        model=os.environ.get("SPREADSHEET_EVOLUTION_MODEL", "qwen3.6-plus"),
+        model=str(
+            binding.get("solver_model")
+            or os.environ.get("SPREADSHEET_EVOLUTION_MODEL", "qwen3.6-plus")
+        ),
         api_protocol="chat-completions",
         reasoning_effort="medium",
         requested_reasoning_effort="medium",
-        timeout_seconds=1800.0,
+        timeout_seconds=float(binding.get("request_timeout_seconds", 1800.0)),
         max_retries=5,
         request_interval_seconds=0.8,
         temperature=0.0,
         top_p=1.0,
         seed=41,
         enable_thinking=True,
+        litellm_timeout_seconds=(
+            float(binding["litellm_timeout_seconds"])
+            if binding.get("litellm_timeout_seconds") is not None
+            else None
+        ),
     )
-    binding = request.get("evaluation_binding") or {}
     repo_root = Path(__file__).resolve().parents[1]
     workspace_root = Path(str(request.get("candidate_directory", ""))).resolve().parents[1]
     adapter = SpreadsheetBenchV2EvaluationAdapter(
         provider_config=provider,
-        dataset_root=repo_root / "benchmarks/data/normalized-harbor/v06-financial-269",
-        evaluator_path=repo_root / "benchmarks/vendor/spreadsheetbench2-official-83d415c/evaluation/evaluation.py",
+        dataset_root=Path(
+            str(
+                binding.get("default_dataset_root")
+                or repo_root / "benchmarks/data/normalized-harbor/v06-financial-269"
+            )
+        ),
+        evaluator_path=Path(
+            str(
+                binding.get("evaluator_path")
+                or repo_root
+                / "benchmarks/vendor/spreadsheetbench2-official-83d415c/evaluation/evaluation.py"
+            )
+        ),
         output_root=repo_root / "benchmarks/results/continuous-financial-plugin-evaluations" / workspace_root.name,
         max_model_calls=int(binding.get("max_model_calls", 8)),
         max_turns_per_arm=int(binding.get("max_turns", binding.get("max_model_calls", 50))),

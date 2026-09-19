@@ -1422,10 +1422,12 @@ def test_financial_sheet_coverage_is_not_proof_of_task_completion(
     assert not bypassed
 
 
+@pytest.mark.parametrize("task_category", [None, "Financial_Model"])
 def test_financial_verified_planner_writes_still_require_executor(
     sample_workbook: Path,
     tmp_path: Path,
     monkeypatch: Any,
+    task_category: str | None,
 ) -> None:
     _patch_agents(monkeypatch)
     session = WorkbookSession.create(sample_workbook, tmp_path / "financial-partial-plan")
@@ -1440,10 +1442,57 @@ def test_financial_verified_planner_writes_still_require_executor(
         "ours", _config(), session, None,
         "Complete the financial model and check its dependencies.",
         2_000, 300, object(), max_turns_per_arm=8,
-        task_category="Financial_Model",
+        task_category=task_category,
+        v1_execution_mode="repaired" if task_category is None else "legacy",
     )
     assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
     assert FakeAgent.calls[-1]["max_turns"] == 7
+
+
+@pytest.mark.parametrize("arm", ["spreadsheet-harness-basic", "spreadsheet-harness-financial"])
+def test_v1_direct_keeps_full_executor_budget_without_planner_or_repairs(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any, arm: str,
+) -> None:
+    _patch_agents(monkeypatch)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("V1 direct must not invoke speculative planner/debugging mutations")
+
+    for name in (
+        "_apply_safe_planner_actions", "_debugging_detector_hint",
+        "_prepare_financial_analysis_workbook", "_repair_date_text_in_date_formatted_cells",
+        "_restore_double_counting_scope_content", "_restore_protected_debugging_repairs",
+    ):
+        monkeypatch.setattr(arms, name, forbidden)
+    session = WorkbookSession.create(sample_workbook, tmp_path / arm)
+    result = arms.run_arm(
+        arm, _config(), session, None, "Calculate all totals.", 2_000, 300, object(),
+        max_turns_per_arm=50, v1_execution_mode="direct",
+    )
+    assert [s["name"] for s in result.stages] == ["execute"]
+    call = FakeAgent.calls[0]
+    assert call["max_turns"] == 50
+    assert call["require_formula_runtime_validation"] is True
+    assert "replayed unchanged" in call["base_instructions"]
+    assert "partial samples" in call["prompt"]
+    assert call["allow_unchanged_terminal"] is True
+
+
+@pytest.mark.parametrize("category", ["Template", "Financial_Model", "Debugging", "Visualization"])
+def test_v1_mode_cannot_change_v2_path(sample_workbook: Path, tmp_path: Path, category: str) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / category)
+    with pytest.raises(ValueError, match="cannot be used"):
+        arms.run_arm(
+            "ours", _config(), session, None, "Complete this workbook.",
+            2_000, 300, object(), task_category=category, v1_execution_mode="direct",
+        )
+
+
+def test_legacy_yaml_transport_stays_pinned_for_v2() -> None:
+    raw = 'actions:\n- target: Sales!C2\n  value: =IF(B2>0,1,0)\nprovenance:\n- sheet: Sales\n  range: B2:C2\n'
+    expected = arms._safe_evidence(yaml.safe_dump(yaml.safe_load(raw), allow_unicode=True, sort_keys=False))
+    assert arms._yaml_evidence(raw, stage="plan") == expected
+    assert yaml.safe_load(arms._yaml_evidence(raw, stage="plan", preserve_strings=True)) == yaml.safe_load(raw)
 
 
 def test_invalid_ours_plan_falls_back_to_executor(
@@ -4401,6 +4450,67 @@ def test_spreadsheet_agent_dual_pass_stops_refinement_and_runs_solver(
     ]
     assert sum(call["max_turns"] for call in calls) == 23
     assert "verification_passed: true" in str(calls[-1]["prompt"])
+
+
+@pytest.mark.parametrize("value", [
+    '=IF(B2>0,"<ok>","")',
+    '=IF(B2<>0,"yes","no")',
+    '=COUNTIF(B2:B5,">=0")',
+    '=TEXTBEFORE(B2,"</tag>")',
+    r'=IF(B2>0,"\u003c","C:\temp")',
+    'literal </edit_plan_yaml> & 中文\nnext line',
+])
+@pytest.mark.parametrize("quote_style", [None, "'", '"'])
+def test_yaml_evidence_preserves_executable_strings(value: str, quote_style: str | None) -> None:
+    document = {
+        "actions": [{"action": "write_formula", "target": "Sales!C2", "value": value}],
+        "provenance": [{"sheet": "Sales", "range": "B2:C2"}],
+    }
+    raw = yaml.safe_dump(document, allow_unicode=True, default_style=quote_style)
+    normalized = arms._yaml_evidence(raw, stage="plan", preserve_strings=True)
+    assert "<" not in normalized and ">" not in normalized
+    assert arms._parse_planner_yaml(normalized) == document
+    assert yaml.safe_load(arms._yaml_evidence(normalized, stage="plan", preserve_strings=True)) == document
+
+
+def test_normalized_formula_is_persisted_without_transport_corruption(
+    sample_workbook: Path, tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "formula-transport")
+    formula = '=IF(B2>0,"<ok>","\\u003c")'
+    raw = yaml.safe_dump({
+        "actions": [{"action": "write_formula", "target": "Sales!C2", "value": formula}],
+        "provenance": [{"sheet": "Sales", "range": "B2:C2"}],
+    })
+    result = arms._apply_safe_planner_actions(
+        session, instruction="Write the requested formula in C2.",
+        normalized_plan=arms._yaml_evidence(raw, stage="plan", preserve_strings=True),
+        preserve_plan_strings=True,
+        deterministic_evidence="{}",
+    )
+    assert result == 1
+    workbook = load_workbook(session.workbook_path)
+    try:
+        assert workbook["Sales"]["C2"].value == formula
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("value", ["=<source>*2", "=SUM({range})", "=TBD"])
+def test_planner_still_defers_placeholder_formulas(
+    sample_workbook: Path, tmp_path: Path, value: str,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "placeholder-plan")
+    raw = yaml.safe_dump({
+        "actions": [{"action": "write_formula", "target": "Sales!C2", "value": value}],
+        "provenance": [{"sheet": "Sales", "range": "B2:C2"}],
+    })
+    assert arms._apply_safe_planner_actions(
+        session, instruction="Complete the formula.",
+        normalized_plan=arms._yaml_evidence(raw, stage="plan", preserve_strings=True),
+        preserve_plan_strings=True,
+        deterministic_evidence="{}",
+    ) == 0
 
 
 def test_yaml_evidence_uses_last_complete_fenced_revision() -> None:

@@ -276,6 +276,61 @@ def test_validation_aggregates_by_family_and_uses_conjunctive_context_gates(tmp_
     assert not decision.promoted
 
 
+def test_validation_aggregate_mean_mode_allows_partial_positive_v2_gate(tmp_path):
+    evidence = tmp_path / "trajectory.jsonl"
+    evidence.write_text(
+        '{"event":"evaluation.completed","payload":{"passed":false}}\n',
+        encoding="utf-8",
+    )
+    document = _config(evidence).to_dict()
+    document["promotion"].update(
+        {
+            "gate_mode": "aggregate-mean",
+            "delta": 0.01,
+            "min_total_pairs": 3,
+            "min_pair_coverage": 0.6,
+        }
+    )
+    config = ContinuousEvolutionConfig.from_document(document)
+    heldout_hash = hashlib.sha256(
+        json.dumps(
+            list(config.heldout_task_ids),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+    request = {
+        "incumbent_revision_sha256": "0" * 64,
+        "candidate_revision_sha256": "1" * 64,
+        "evaluation_binding_sha256": config.binding_sha256,
+        "contexts_sha256": config.contexts_sha256,
+        "heldout_task_ids_sha256": heldout_hash,
+        "contexts": [context.to_dict() for context in config.contexts],
+    }
+    report = dict(_Evaluation(evidence).evaluate(request, tmp_path))
+    replay = next(item for item in report["contexts"] if item["name"] == "replay")
+    replay["pairs"][0].update(
+        {
+            "baseline": None,
+            "baseline_status": "unscored",
+        }
+    )
+    replay["hard_failures"] = ["replay/1"]
+    report["hard_failures"] = True
+
+    decision = evaluate_validation_report(
+        report,
+        config=config,
+        incumbent_revision="0" * 64,
+        candidate_revision="1" * 64,
+    )
+
+    assert decision.promoted
+    assert decision.aggregate_mean_delta == pytest.approx(1.0)
+    assert not any("unscored-pair" in item for item in decision.blockers)
+
+
 def _trajectory(path: Path, *, passed: bool, marker: str) -> None:
     path.write_text(
         "\n".join(
@@ -658,6 +713,98 @@ def test_router_emits_joint_route_for_interface_and_domain_failures(tmp_path):
     }
     assert route.to_dict()["scope"] == "joint"
     assert len(route.to_dict()["mutations"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("allowed_scopes", "expected_scope"),
+    [
+        (("harness",), "harness"),
+        (("domain",), "domain"),
+    ],
+)
+def test_router_respects_single_coordinate_ablation(
+    tmp_path, allowed_scopes, expected_scope
+):
+    interface = tmp_path / "interface.jsonl"
+    interface.write_text(
+        json.dumps(
+            {
+                "event": "evaluation.completed",
+                "payload": {
+                    "passed": False,
+                    "error_category": "missing-evidence",
+                    "required_capability": "composition",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    route = DeterministicEvidenceRouter().route(
+        [EvidenceRef(interface, "replay/interface", "formula", "family-interface")],
+        registry=default_plugin_registry(),
+        composition=BUILTIN_COMPOSITIONS["spreadsheet-harness-financial"],
+        groups={
+            "harness": ("skill-spreadsheet-coordination", "policy-ours"),
+            "domain": ("skill-spreadsheet-financial-model", "skill-spreadsheet-formula"),
+        },
+        allowed_update_scopes=allowed_scopes,
+    )
+
+    assert route is not None
+    assert route.scope == expected_scope
+    assert {item.group for item in route.mutation_items()} == {expected_scope}
+
+
+def test_config_accepts_family_disjoint_attribution_evidence_pool(tmp_path):
+    evidence = tmp_path / "attribution.jsonl"
+    _trajectory(evidence, passed=False, marker="POOL-")
+    document = _config(evidence).to_dict()
+    document["initial_evidence"] = [
+        {
+            "path": str(evidence),
+            "task_id": "Financial_Model/pool-1",
+            "task_type": "Financial_Model",
+            "workbook_family": "pool-family-1",
+        }
+    ]
+    document["evidence_task_families"] = {
+        "Financial_Model/pool-1": "pool-family-1"
+    }
+    document["allowed_update_scopes"] = ["domain"]
+
+    config = ContinuousEvolutionConfig.from_document(document)
+
+    assert config.evidence_task_families == {
+        "Financial_Model/pool-1": "pool-family-1"
+    }
+    assert config.allowed_update_scopes == ("domain",)
+
+
+def test_config_rejects_attribution_pool_overlapping_gate_family(tmp_path):
+    evidence = tmp_path / "attribution.jsonl"
+    _trajectory(evidence, passed=False, marker="POOL-")
+    document = _config(evidence).to_dict()
+    document["initial_evidence"] = []
+    document["evidence_task_families"] = {
+        "Financial_Model/pool-1": "family-replay-a"
+    }
+
+    with pytest.raises(HarnessError, match="disjoint by workbook family"):
+        ContinuousEvolutionConfig.from_document(document)
+
+
+def test_config_rejects_attribution_pool_overlapping_gate_task(tmp_path):
+    evidence = tmp_path / "attribution.jsonl"
+    _trajectory(evidence, passed=False, marker="POOL-")
+    document = _config(evidence).to_dict()
+    document["initial_evidence"] = []
+    document["evidence_task_families"] = {
+        "replay/1": "different-family-name"
+    }
+
+    with pytest.raises(HarnessError, match="disjoint by task"):
+        ContinuousEvolutionConfig.from_document(document)
 
 
 def test_joint_evolution_route_roundtrips_without_losing_coordinates():

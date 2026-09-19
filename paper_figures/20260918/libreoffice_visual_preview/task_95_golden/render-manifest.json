@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "source": {
+    "name": "Task 95_golden.xlsx",
+    "format": "xlsx",
+    "sha256": "752442fa7d13c25168b7fcebf3d7b4a8275d2672a333d3817526d45530c0c59a"
+  },
+  "backend": "libreoffice-headless+pymupdf",
+  "version": {
+    "libreoffice": "LibreOffice 7.3.7.2 30(Build:2)",
+    "pymupdf": "1.28.2"
+  },
+  "hash": "752442fa7d13c25168b7fcebf3d7b4a8275d2672a333d3817526d45530c0c59a",
+  "mode": "per_sheet",
+  "dpi": 120,
+  "manifest_path": "/data/zju-160/tongzeyuan/spreadsheet-harness/paper_figures/20260918/libreoffice_visual_preview/task_95_golden/render-manifest.json",
+  "page_count": 3,
+  "pages": [
+    {
+      "index": 1,
+      "page": 1,
+      "path": "sheet-0001-page-0001.png",
+      "image_path": "/data/zju-160/tongzeyuan/spreadsheet-harness/paper_figures/20260918/libreoffice_visual_preview/task_95_golden/sheet-0001-page-0001.png",
+      "sha256": "26e193e6a704829c9e0d358959ae1370b8c387511da694dc8a3c60214e10a2d6",
+      "width": 993,
+      "height": 1404,
+      "sheet": "Strategy",
+      "sheet_page": 1
+    },
+    {
+      "index": 2,
+      "page": 2,
+      "path": "sheet-0001-page-0002.png",
+      "image_path": "/data/zju-160/tongzeyuan/spreadsheet-harness/paper_figures/20260918/libreoffice_visual_preview/task_95_golden/sheet-0001-page-0002.png",
+      "sha256": "a6fb52808e8afbfa6ea1c9986b43470f1a85b3b38f8fb85da2dfbf8b335a8353",
+      "width": 993,
+      "height": 1404,
+      "sheet": "Strategy",
+      "sheet_page": 2
+    },
+    {
+      "index": 3,
+      "page": 3,
+      "path": "sheet-0001-page-0003.png",
+      "image_path": "/data/zju-160/tongzeyuan/spreadsheet-harness/paper_figures/20260918/libreoffice_visual_preview/task_95_golden/sheet-0001-page-0003.png",
+      "sha256": "5d37b47a1dd654746c05d9f83cdfd87b1d62feb0db08588b073694fc9c495268",
+      "width": 993,
+      "height": 1404,
+      "sheet": "Strategy",
+      "sheet_page": 3
+    }
+  ]
+}

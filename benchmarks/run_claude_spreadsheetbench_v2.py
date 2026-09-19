@@ -31,6 +31,7 @@ from run_codex_spreadsheetbench_v2 import (
     sha256,
     workbook_is_valid,
     write_json,
+    write_or_validate_manifest,
 )
 
 
@@ -39,8 +40,10 @@ CLAUDE_BIN = Path("/home/tongzeyuan/.nvm/versions/node/v24.19.0/bin/claude")
 CLAUDE_PROXY_SCRIPT = ROOT / "tools/claude_messages_proxy.py"
 
 
-def claude_prompt(task: dict[str, Any], workspace: Path) -> str:
-    return prompt_for(task, workspace).replace(
+def claude_prompt(
+    task: dict[str, Any], workspace: Path, *, skill_enabled: bool = True
+) -> str:
+    return prompt_for(task, workspace, skill_enabled=skill_enabled).replace(
         "Codex skill registry", "Claude Code skill instructions"
     ).replace(
         "The required spreadsheet-manipulation skill is already loaded through this workspace's AGENTS.md\n"
@@ -52,7 +55,7 @@ def claude_prompt(task: dict[str, Any], workspace: Path) -> str:
 
 def run_one(
     task: dict[str, Any], *, dataset: Path, run_root: Path, runtime_root: Path,
-    proxy_port: int, skill: Path, model: str, max_turns: int, max_output_tokens: int,
+    proxy_port: int, skill: Path | None, model: str, max_turns: int, max_output_tokens: int,
     task_timeout: float, evaluator: Path, recalculate_before_evaluation: bool,
     api_key_file: Path, defer_evaluation: bool = False,
 ) -> dict[str, Any]:
@@ -84,16 +87,21 @@ def run_one(
     input_path = task_root / "input.xlsx"
     if not input_path.exists():
         shutil.copy2(input_source, input_path)
-    skill_text = skill.read_text(encoding="utf-8")
-    (task_root / "CLAUDE.md").write_text(
-        "# Loaded spreadsheet-manipulation skill\n\n"
-        "The following skill is binding. It is already loaded; do not spend a tool call reading it.\n\n"
-        + skill_text,
-        encoding="utf-8",
-    )
-    # Keep AGENTS.md too, so the artifact has an identical skill provenance to
-    # the Codex run and other workspace-aware tools can discover it.
-    (task_root / "AGENTS.md").write_text((task_root / "CLAUDE.md").read_text(encoding="utf-8"), encoding="utf-8")
+    claude_md = task_root / "CLAUDE.md"
+    agents_md = task_root / "AGENTS.md"
+    if skill is not None:
+        skill_text = skill.read_text(encoding="utf-8")
+        claude_md.write_text(
+            "# Loaded spreadsheet-manipulation skill\n\n"
+            "The following skill is binding. It is already loaded; do not spend a tool call reading it.\n\n"
+            + skill_text,
+            encoding="utf-8",
+        )
+        # Keep AGENTS.md too, so the artifact has identical skill provenance.
+        agents_md.write_text(claude_md.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        claude_md.unlink(missing_ok=True)
+        agents_md.unlink(missing_ok=True)
     trajectory_path = task_root / "trajectory.jsonl"
     stderr_path = task_root / "claude.stderr.log"
     final_path = task_root / "claude.final.txt"
@@ -148,7 +156,11 @@ def run_one(
         command = [
             str(CLAUDE_BIN), "-p", "--output-format", "stream-json", "--verbose",
             "--dangerously-skip-permissions", "--model", model, "--effort", "medium",
-            "--tools", "Bash,Read,Write,Edit,Skill",
+            "--tools", (
+                "Bash,Read,Write,Edit,Skill"
+                if skill is not None
+                else "Bash,Read,Write,Edit"
+            ),
         ]
         if resume_id:
             command += ["--resume", resume_id]
@@ -188,7 +200,9 @@ def run_one(
     return_code = 0
     if not reuse_output:
         with stderr_path.open("w", encoding="utf-8") as stderr:
-            return_code = invoke(claude_prompt(task, task_root))
+            return_code = invoke(
+                claude_prompt(task, task_root, skill_enabled=skill is not None)
+            )
             for _ in range(max_turns):
                 ready = workbook_is_valid(output_path)
                 requests, exceeded = request_state()
@@ -229,12 +243,16 @@ def run_one(
         "status": status, "exit_code": return_code, "max_turns": max_turns,
         "max_output_tokens": max_output_tokens, "session_id": session_id, "model": model,
         "started_at": started, "elapsed_seconds": round(time.time() - started, 3),
-        "skill_path": str(skill), "skill_sha256": sha256(skill), "temperature": 0.0,
+        "skill_enabled": skill is not None,
+        "skill_path": str(skill) if skill is not None else None,
+        "skill_sha256": sha256(skill) if skill is not None else None,
+        "temperature": 0.0,
         "top_p": 1.0, "enable_thinking": True, "thinking_budget_tokens": 50,
         "output": str(output_path), "trajectory": str(trajectory_path),
         "final_message": str(final_path), "output_exists": output_path.is_file(),
         "output_valid": ready, "output_changed_from_input": sha256(output_path) != sha256(input_path) if output_path.exists() else False,
-        "skill_load_mode": "claude-claude-md-and-agents", "reused_existing_output": reuse_output,
+        "skill_load_mode": "claude-claude-md-and-agents" if skill is not None else "none",
+        "reused_existing_output": reuse_output,
         "recalculated_before_evaluation": recalculated, "turns": requests, "model_requests": requests,
     }
     if recalculation_error and not recalculated:
@@ -279,13 +297,38 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://10.130.138.46:8010/v1")
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--skill", type=Path, default=DEFAULT_SKILL)
+    parser.add_argument("--no-skill", action="store_true")
     parser.add_argument("--recalculate-before-evaluation", action="store_true")
     args = parser.parse_args()
-    args.dataset = args.dataset.resolve(); args.run_root = args.run_root.resolve(); args.skill = args.skill.resolve(); args.api_key_file = args.api_key_file.resolve()
+    args.dataset = args.dataset.resolve(); args.run_root = args.run_root.resolve(); args.skill = None if args.no_skill else args.skill.resolve(); args.api_key_file = args.api_key_file.resolve()
+    if args.skill is not None and not args.skill.is_file():
+        parser.error(f"skill not found: {args.skill}")
     if not CLAUDE_BIN.is_file() or not os.access(CLAUDE_BIN, os.X_OK):
         parser.error(f"Claude binary is not executable: {CLAUDE_BIN}")
     tasks = load_tasks(args.dataset, args.category, set(args.task_id))
     args.run_root.mkdir(parents=True, exist_ok=True)
+    write_or_validate_manifest(args.run_root / "manifest.json", {
+        "schema_version": 1,
+        "benchmark": "SpreadsheetBench-v2",
+        "harness": "anthropic/claude-code",
+        "model": args.model,
+        "provider": "internal-litellm",
+        "base_url": args.base_url,
+        "reasoning_effort": "medium",
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "enable_thinking": True,
+        "thinking_budget_tokens": 50,
+        "max_turns": args.max_turns,
+        "max_output_tokens": args.max_output_tokens,
+        "task_timeout_seconds": args.task_timeout,
+        "parallelism": args.parallelism,
+        "skill_enabled": args.skill is not None,
+        "skill_path": str(args.skill) if args.skill is not None else None,
+        "skill_sha256": sha256(args.skill) if args.skill is not None else None,
+        "dataset": str(args.dataset),
+        "task_ids": [item["_task_id"] for item in tasks],
+    })
     (args.run_root / "task-plan.json").write_text(json.dumps([t["_task_id"] for t in tasks], indent=2), encoding="utf-8")
     port = free_local_port()
     audit = args.run_root / "proxy-requests.jsonl"

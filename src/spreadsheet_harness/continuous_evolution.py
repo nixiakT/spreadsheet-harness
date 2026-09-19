@@ -24,7 +24,7 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from statistics import fmean, pvariance
 from typing import Any, Literal, Protocol
@@ -274,6 +274,14 @@ class PromotionPolicy:
     confidence: float = 0.95
     bootstrap_samples: int = 4_000
     min_pairs_per_context: int = 3
+    # The original paper protocol uses conjunctive replay/transfer/regression
+    # confidence gates.  Fast development runs may instead select on the mean
+    # paired family gain across a single target suite.  This mode is explicit
+    # and opt-in so loading an older frozen protocol preserves its semantics
+    # and canonical hash.
+    gate_mode: str = "conjunctive"
+    min_total_pairs: int = 3
+    min_pair_coverage: float = 0.6
 
     @classmethod
     def from_document(cls, raw: Mapping[str, Any]) -> PromotionPolicy:
@@ -291,6 +299,9 @@ class PromotionPolicy:
             confidence=float(raw.get("confidence", 0.95)),
             bootstrap_samples=int(raw.get("bootstrap_samples", 4_000)),
             min_pairs_per_context=int(raw.get("min_pairs_per_context", 3)),
+            gate_mode=str(raw.get("gate_mode", "conjunctive")),
+            min_total_pairs=int(raw.get("min_total_pairs", 3)),
+            min_pair_coverage=float(raw.get("min_pair_coverage", 0.6)),
         )
         if (
             not math.isfinite(policy.delta)
@@ -308,12 +319,16 @@ class PromotionPolicy:
             or not 0.5 < policy.confidence < 1
             or policy.bootstrap_samples < 200
             or policy.min_pairs_per_context < 2
+            or policy.gate_mode not in {"conjunctive", "aggregate-mean"}
+            or policy.min_total_pairs < 1
+            or not math.isfinite(policy.min_pair_coverage)
+            or not 0 < policy.min_pair_coverage <= 1
         ):
             raise HarnessError("Invalid continuous evolution promotion policy")
         return policy
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document = {
             "delta": self.delta,
             "replay_delta": self.replay_delta if self.replay_delta is not None else self.delta,
             "transfer_delta": (
@@ -324,6 +339,17 @@ class PromotionPolicy:
             "bootstrap_samples": self.bootstrap_samples,
             "min_pairs_per_context": self.min_pairs_per_context,
         }
+        # Do not add default-only fields to legacy protocol documents: their
+        # frozen config hashes must remain byte-for-byte reproducible.
+        if self.gate_mode != "conjunctive":
+            document.update(
+                {
+                    "gate_mode": self.gate_mode,
+                    "min_total_pairs": self.min_total_pairs,
+                    "min_pair_coverage": self.min_pair_coverage,
+                }
+            )
+        return document
 
 
 @dataclass(frozen=True)
@@ -348,6 +374,14 @@ class ContinuousEvolutionConfig:
     # It is optional to preserve compatibility with the already-frozen v3
     # workspaces and their protocol hashes.
     kernel_manifest_sha256: str | None = None
+    # Explicitly constrain which coordinate(s) a frozen experimental arm may
+    # update.  The default reproduces the adaptive router used by existing
+    # protocols; ablations can select only ``harness`` (general) or ``domain``.
+    allowed_update_scopes: tuple[UpdateScope, ...] = ("harness", "domain", "joint")
+    # A large attribution pool is deliberately separate from the small,
+    # family-disjoint replay/transfer/regression promotion gate.  Values bind
+    # every admissible evidence task to its source-workbook family.
+    evidence_task_families: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_document(cls, raw: Mapping[str, Any]) -> ContinuousEvolutionConfig:
@@ -418,15 +452,11 @@ class ContinuousEvolutionConfig:
         ):
             raise HarnessError("initial_evidence must be a list")
         evidence = tuple(EvidenceRef.from_document(item) for item in raw_evidence)
-        if any(item.task_id not in dev_ids for item in evidence):
-            raise HarnessError("Initial evidence must come from declared development contexts")
         family_by_task = {
             task_id: family
             for context in contexts
             for task_id, family in zip(context.task_ids, context.workbook_families, strict=True)
         }
-        if any(family_by_task.get(item.task_id) != item.workbook_family for item in evidence):
-            raise HarnessError("Initial evidence workbook family does not match its context")
         binding = raw.get("evaluation_binding") or {}
         if not isinstance(binding, Mapping) or not binding:
             raise HarnessError("evaluation_binding must be a non-empty frozen object")
@@ -445,6 +475,19 @@ class ContinuousEvolutionConfig:
         operators = tuple(str(value).strip() for value in raw_operators)
         raw_kernel_hash = raw.get("kernel_manifest_sha256")
         kernel_hash = str(raw_kernel_hash).strip() if raw_kernel_hash is not None else None
+        raw_scopes = raw.get("allowed_update_scopes", ("harness", "domain", "joint"))
+        if isinstance(raw_scopes, (str, bytes, bytearray)) or not isinstance(
+            raw_scopes, Sequence
+        ):
+            raise HarnessError("allowed_update_scopes must be a list")
+        allowed_update_scopes = tuple(str(value).strip() for value in raw_scopes)
+        raw_evidence_families = raw.get("evidence_task_families") or {}
+        if not isinstance(raw_evidence_families, Mapping):
+            raise HarnessError("evidence_task_families must be an object")
+        evidence_task_families = {
+            str(task_id).strip(): str(family).strip()
+            for task_id, family in raw_evidence_families.items()
+        }
         if first_group not in {"harness", "domain"}:
             raise HarnessError("first_group must be harness or domain")
         if max_rounds < 1 or max_candidates < 1 or not math.isfinite(timeout) or timeout <= 0:
@@ -459,6 +502,40 @@ class ContinuousEvolutionConfig:
             )
         if kernel_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", kernel_hash):
             raise HarnessError("kernel_manifest_sha256 must be a lowercase SHA-256 value")
+        if (
+            not allowed_update_scopes
+            or any(value not in {"harness", "domain", "joint"} for value in allowed_update_scopes)
+            or len(allowed_update_scopes) != len(set(allowed_update_scopes))
+        ):
+            raise HarnessError(
+                "allowed_update_scopes must contain unique harness/domain/joint values"
+            )
+        if any(not task_id or not family for task_id, family in evidence_task_families.items()):
+            raise HarnessError("Evidence-pool task IDs and workbook families must be non-empty")
+        if set(evidence_task_families) & set(heldout):
+            raise HarnessError("Held-out tasks may not appear in the attribution evidence pool")
+        if set(evidence_task_families) & dev_ids:
+            raise HarnessError(
+                "Attribution evidence and promotion contexts must be disjoint by task"
+            )
+        context_families = {
+            family for context in contexts for family in context.workbook_families
+        }
+        if context_families & set(evidence_task_families.values()):
+            raise HarnessError(
+                "Attribution evidence and promotion contexts must be disjoint by workbook family"
+            )
+        admissible_evidence_families = {
+            **family_by_task,
+            **evidence_task_families,
+        }
+        if any(
+            admissible_evidence_families.get(item.task_id) != item.workbook_family
+            for item in evidence
+        ):
+            raise HarnessError(
+                "Initial evidence workbook family does not match its frozen evidence binding"
+            )
         if (
             not proposer
             or not evaluator
@@ -485,6 +562,8 @@ class ContinuousEvolutionConfig:
             checks,
             operators,  # type: ignore[arg-type]
             kernel_hash,
+            allowed_update_scopes,  # type: ignore[arg-type]
+            evidence_task_families,
         )
         result.validate(default_plugin_registry())
         return result
@@ -544,6 +623,10 @@ class ContinuousEvolutionConfig:
         }
         if self.kernel_manifest_sha256 is not None:
             document["kernel_manifest_sha256"] = self.kernel_manifest_sha256
+        if self.allowed_update_scopes != ("harness", "domain", "joint"):
+            document["allowed_update_scopes"] = list(self.allowed_update_scopes)
+        if self.evidence_task_families:
+            document["evidence_task_families"] = dict(self.evidence_task_families)
         return document
 
     @property
@@ -838,6 +921,11 @@ class DeterministicEvidenceRouter:
             "recomposition",
             "synthesis",
         ),
+        allowed_update_scopes: Sequence[UpdateScope] = (
+            "harness",
+            "domain",
+            "joint",
+        ),
     ) -> EvolutionRoute | None:
         resolved = registry.resolve(composition)
         candidates: Counter[tuple[ProposalOperation, str]] = Counter()
@@ -991,7 +1079,15 @@ class DeterministicEvidenceRouter:
         )
         if not candidates:
             return None
-        eligible = [key for key in candidates if key[1] in plugin_group]
+        scopes = set(allowed_update_scopes)
+        permitted_groups = scopes & {"harness", "domain"}
+        if "joint" in scopes:
+            permitted_groups.update(("harness", "domain"))
+        eligible = [
+            key
+            for key in candidates
+            if key[1] in plugin_group and plugin_group[key[1]] in permitted_groups
+        ]
         active = set(composition.plugins)
 
         # Interface traces often name an inactive coordination candidate but
@@ -1045,7 +1141,11 @@ class DeterministicEvidenceRouter:
                     hashes.setdefault(key, set()).update(joint_hashes)
                     reasons.setdefault(key, set()).update(joint_reasons or {"cross-group-interface"})
                     signals.setdefault(key, []).append("cross-group interface fallback")
-            eligible = [key for key in candidates if key[1] in plugin_group]
+            eligible = [
+                key
+                for key in candidates
+                if key[1] in plugin_group and plugin_group[key[1]] in permitted_groups
+            ]
         if not eligible:
             return None
 
@@ -1089,6 +1189,8 @@ class DeterministicEvidenceRouter:
         # Joint updates are sparse: they require an explicit interface or
         # cross-group attribution signal and one valid target per side.
         if (
+            "joint" in scopes
+            and
             len(best_by_group) == 2
             and (joint_signal_count > 0 or cross_group_evidence > 0)
         ):
@@ -1112,20 +1214,23 @@ class DeterministicEvidenceRouter:
                     mutations,
                 )
 
-        if not best_by_group:
+        single_groups = {
+            group: key for group, key in best_by_group.items() if group in scopes
+        }
+        if not single_groups:
             return None
-        if len(best_by_group) == 1:
-            selected_group = next(iter(best_by_group))
+        if len(single_groups) == 1:
+            selected_group = next(iter(single_groups))
         else:
             selected_group = min(
-                best_by_group,
+                single_groups,
                 key=lambda group: (
-                    -candidates[best_by_group[group]],
+                    -candidates[single_groups[group]],
                     0 if preferred_group == group else 1,
                     group,
                 ),
             )
-        mutation = make_mutation(best_by_group[selected_group])
+        mutation = make_mutation(single_groups[selected_group])
         if mutation is None:
             return None
         return EvolutionRoute(
@@ -2287,6 +2392,7 @@ def evaluate_validation_report(
     candidate_revision: str,
 ) -> ValidationDecision:
     blockers: list[str] = []
+    aggregate_mean_mode = config.policy.gate_mode == "aggregate-mean"
     if report.get("schema_version") != "continuous-plugin-validation-report-v1":
         blockers.append("validation-schema-mismatch")
     if report.get("incumbent_revision_sha256") != incumbent_revision:
@@ -2329,7 +2435,11 @@ def evaluate_validation_report(
             blockers.append(f"context-kind-mismatch:{context.name}")
         if raw.get("task_set_sha256") != context.task_set_sha256:
             blockers.append(f"task-set-mismatch:{context.name}")
-        if raw.get("hard_failures"):
+        # In aggregate-mean development mode an unscored task is missing
+        # paired evidence, not proof that the candidate regressed.  Coverage
+        # and minimum-pair checks below still prevent promotion from one lucky
+        # case.  The strict paper gate keeps the historical hard-failure rule.
+        if raw.get("hard_failures") and not aggregate_mean_mode:
             blockers.append(f"hard-failure:{context.name}")
         pairs = raw.get("pairs")
         if not isinstance(pairs, list):
@@ -2353,7 +2463,8 @@ def evaluate_validation_report(
                 blockers.append(f"missing-pair-status:{context.name}:{pair_id}")
                 continue
             if pair.get("baseline_status") != "scored" or pair.get("candidate_status") != "scored":
-                blockers.append(f"unscored-pair:{context.name}:{pair_id}")
+                if not aggregate_mean_mode:
+                    blockers.append(f"unscored-pair:{context.name}:{pair_id}")
                 continue
             try:
                 baseline = float(pair.get("baseline"))
@@ -2383,7 +2494,10 @@ def evaluate_validation_report(
                 f"missing-pair:{context.name}:{pair_id}" for pair_id in sorted(missing)
             )
         deltas = [fmean(values) for _family, values in sorted(family_deltas.items())]
-        if len(deltas) < config.policy.min_pairs_per_context:
+        minimum_pairs = (
+            1 if aggregate_mean_mode else config.policy.min_pairs_per_context
+        )
+        if len(deltas) < minimum_pairs:
             blockers.append(f"insufficient-pairs:{context.name}")
             continue
         mean_delta = fmean(deltas)
@@ -2393,7 +2507,11 @@ def evaluate_validation_report(
             samples=config.policy.bootstrap_samples,
             seed=f"{candidate_revision}:{context.name}",
         )
-        if context.kind == "replay":
+        if aggregate_mean_mode:
+            # Per-context LCBs remain in the report as uncertainty
+            # diagnostics, but do not veto a positive multi-case mean.
+            pass
+        elif context.kind == "replay":
             threshold = (
                 config.policy.replay_delta
                 if config.policy.replay_delta is not None
@@ -2426,32 +2544,52 @@ def evaluate_validation_report(
     aggregate_lcb: float | None = None
     variance: float | None = None
     if len(context_deltas) == len(config.contexts):
-        weight_total = sum(context.weight for context in config.contexts)
-        normalized_weights = {
-            context.name: context.weight / weight_total for context in config.contexts
-        }
-        aggregate_mean = sum(
-            normalized_weights[name] * fmean(values)
-            for name, values in context_deltas.items()
-        )
         generator = random.Random(
             int(hashlib.sha256(candidate_revision.encode("ascii")).hexdigest()[:16], 16)
         )
         bootstrapped: list[float] = []
-        for _ in range(config.policy.bootstrap_samples):
-            bootstrapped.append(
-                sum(
-                    normalized_weights[name]
-                    * fmean(generator.choice(values) for _ in values)
-                    for name, values in context_deltas.items()
-                )
-            )
-        aggregate_lcb = _quantile(bootstrapped, 1 - config.policy.confidence)
         all_deltas = [value for values in context_deltas.values() for value in values]
+        if aggregate_mean_mode:
+            # The relaxed Fin-1.5K gate is a literal macro-average over the
+            # available paired workbook families. Context labels retain their
+            # diagnostic meaning but cannot upweight a one-case partition.
+            aggregate_mean = fmean(all_deltas)
+            for _ in range(config.policy.bootstrap_samples):
+                bootstrapped.append(
+                    fmean(generator.choice(all_deltas) for _ in all_deltas)
+                )
+        else:
+            weight_total = sum(context.weight for context in config.contexts)
+            normalized_weights = {
+                context.name: context.weight / weight_total for context in config.contexts
+            }
+            aggregate_mean = sum(
+                normalized_weights[name] * fmean(values)
+                for name, values in context_deltas.items()
+            )
+            for _ in range(config.policy.bootstrap_samples):
+                bootstrapped.append(
+                    sum(
+                        normalized_weights[name]
+                        * fmean(generator.choice(values) for _ in values)
+                        for name, values in context_deltas.items()
+                    )
+                )
+        aggregate_lcb = _quantile(bootstrapped, 1 - config.policy.confidence)
         variance = pvariance(all_deltas) if len(all_deltas) > 1 else 0.0
-        # The Method gate is conjunctive by context.  Aggregate statistics are
-        # descriptive and must not rescue a replay/transfer/regression failure.
-    if report.get("hard_failures"):
+        if aggregate_mean_mode:
+            total_pairs = sum(len(values) for values in context_deltas.values())
+            total_declared = sum(len(context.task_ids) for context in config.contexts)
+            coverage = total_pairs / total_declared if total_declared else 0.0
+            if total_pairs < config.policy.min_total_pairs:
+                blockers.append("aggregate-insufficient-pairs")
+            if coverage < config.policy.min_pair_coverage:
+                blockers.append("aggregate-pair-coverage-below-minimum")
+            if aggregate_mean <= config.policy.delta:
+                blockers.append("aggregate-mean-below-delta")
+        # In conjunctive mode aggregate statistics are descriptive and must
+        # not rescue a replay/transfer/regression failure.
+    if report.get("hard_failures") and not aggregate_mean_mode:
         blockers.append("hard-validation-failure")
     raw_evidence = report.get("candidate_evidence") or []
     candidate_evidence: list[EvidenceRef] = []
@@ -2714,14 +2852,19 @@ class RevisionStore:
                     context.task_ids, context.workbook_families, strict=True
                 )
             }
-            declared = {task_id for context in config.contexts for task_id in context.task_ids}
+            declared = {
+                **family_by_task,
+                **dict(config.evidence_task_families),
+            }
             for item in evidence:
                 if (
                     item.task_id not in declared
                     or item.task_id in config.heldout_task_ids
-                    or family_by_task.get(item.task_id) != item.workbook_family
+                    or declared.get(item.task_id) != item.workbook_family
                 ):
-                    raise HarnessError("Evidence must belong to the frozen development split")
+                    raise HarnessError(
+                        "Evidence must belong to the frozen development or attribution split"
+                    )
             existing = {
                 str(item.get("sha256"))
                 for item in state.get("evidence", [])
@@ -3262,6 +3405,7 @@ class ContinuousEvolutionEngine:
                 groups=self.config.groups,
                 preferred_group=state["next_group"],
                 allowed_operators=self.config.allowed_operators,
+                allowed_update_scopes=self.config.allowed_update_scopes,
             )
             round_dir = self.store.rounds / f"{round_number:06d}"
             if route is None:

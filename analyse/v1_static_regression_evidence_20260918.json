@@ -1,0 +1,550 @@
+{
+  "deepseek": {
+    "roots": {
+      "bare": "spreadsheetbench-v1-bare-deepseek-v4-flash-representative-200-internal-seed41-20260915",
+      "basic": "ours-basic-deepseek-v1-20260917",
+      "financial": "ours-deepseek-v1-run2-20260916"
+    },
+    "all_recorded": {
+      "bare": {
+        "recorded": 200,
+        "scored": 188,
+        "soft_pct": 46.45390070921985,
+        "hard_pct": 38.297872340425535,
+        "case_pass_counts": [
+          98,
+          88,
+          76
+        ],
+        "not_scored_errors": {
+          "unknown": 8,
+          "RenderError": 2,
+          "JSONDecodeError": 1,
+          "RecalculationIntegrityError": 1
+        }
+      },
+      "basic": {
+        "recorded": 200,
+        "scored": 197,
+        "soft_pct": 26.73434856175973,
+        "hard_pct": 21.82741116751269,
+        "case_pass_counts": [
+          60,
+          49,
+          49
+        ],
+        "not_scored_errors": {
+          "AgentTurnLimitError": 2,
+          "AgentRoutingError": 1
+        }
+      },
+      "financial": {
+        "recorded": 200,
+        "scored": 190,
+        "soft_pct": 32.45614035087719,
+        "hard_pct": 26.31578947368421,
+        "case_pass_counts": [
+          69,
+          59,
+          57
+        ],
+        "not_scored_errors": {
+          "AgentRoutingError": 3,
+          "RecalculationIntegrityError": 1,
+          "unknown": 5,
+          "ValueError": 1
+        }
+      }
+    },
+    "common_scored_count": 184,
+    "common_scored": {
+      "bare": {
+        "recorded": 184,
+        "scored": 184,
+        "soft_pct": 46.92028985507246,
+        "hard_pct": 38.58695652173913,
+        "case_pass_counts": [
+          97,
+          87,
+          75
+        ],
+        "not_scored_errors": {}
+      },
+      "basic": {
+        "recorded": 184,
+        "scored": 184,
+        "soft_pct": 28.6231884057971,
+        "hard_pct": 23.369565217391305,
+        "case_pass_counts": [
+          60,
+          49,
+          49
+        ],
+        "not_scored_errors": {}
+      },
+      "financial": {
+        "recorded": 184,
+        "scored": 184,
+        "soft_pct": 32.97101449275362,
+        "hard_pct": 26.6304347826087,
+        "case_pass_counts": [
+          68,
+          58,
+          56
+        ],
+        "not_scored_errors": {}
+      }
+    },
+    "trajectories": {
+      "basic": {
+        "counts": {
+          "trajectories": 197,
+          "financial_skill_selected": 0,
+          "verified_without_executor": 86,
+          "verified_without_executor_case1_failed": 68,
+          "escaped_verified_actions": 31,
+          "escaped_verified_actions_case1_failed": 27
+        },
+        "example_task_ids": {
+          "verified_without_executor": [
+            "142-32",
+            "1845",
+            "211-13",
+            "279-23",
+            "3002",
+            "32895",
+            "37228",
+            "37764",
+            "399-14",
+            "435-36",
+            "44389",
+            "45300",
+            "47484",
+            "48588",
+            "494-13",
+            "496-34",
+            "50324",
+            "51741",
+            "115-31",
+            "14207",
+            "188-39",
+            "212-20",
+            "3048",
+            "40757",
+            "14625",
+            "188-46",
+            "227-40",
+            "31420",
+            "34-5",
+            "36236",
+            "409-45",
+            "41692",
+            "15827",
+            "21-16",
+            "34180",
+            "36842",
+            "40959",
+            "44278",
+            "444-14",
+            "45063",
+            "45896",
+            "47842",
+            "48354",
+            "48608",
+            "49196",
+            "49333",
+            "49467",
+            "496-15",
+            "49782",
+            "49857",
+            "50472",
+            "50573",
+            "51811",
+            "5192",
+            "52050",
+            "52541",
+            "52575",
+            "52763",
+            "531-48",
+            "53117",
+            "54085",
+            "54667",
+            "55572",
+            "55609",
+            "55794",
+            "56451",
+            "56599",
+            "57262",
+            "58138",
+            "58296",
+            "5835",
+            "585-41",
+            "58629",
+            "587-38",
+            "58994",
+            "592-34",
+            "59433",
+            "59791",
+            "599-9",
+            "85-38",
+            "91-34",
+            "9448",
+            "9726",
+            "CF_12196",
+            "CF_13984",
+            "CF_9945"
+          ],
+          "escaped_verified_actions": [
+            "3002",
+            "44389",
+            "50324",
+            "40757",
+            "34-5",
+            "48034",
+            "37615",
+            "39604",
+            "50232",
+            "51090",
+            "52050",
+            "52541",
+            "52575",
+            "53117",
+            "53367",
+            "54085",
+            "54274",
+            "55039",
+            "56599",
+            "57033",
+            "58138",
+            "58296",
+            "592-34",
+            "599-9",
+            "85-38",
+            "91-34",
+            "9448",
+            "9726",
+            "CF_12196",
+            "CF_13984",
+            "CF_9945"
+          ]
+        }
+      },
+      "financial": {
+        "counts": {
+          "trajectories": 190,
+          "financial_skill_selected": 0,
+          "verified_without_executor": 79,
+          "verified_without_executor_case1_failed": 57,
+          "escaped_verified_actions": 26,
+          "escaped_verified_actions_case1_failed": 22
+        },
+        "example_task_ids": {
+          "verified_without_executor": [
+            "10452",
+            "115-31",
+            "14207",
+            "14625",
+            "156-8",
+            "15827",
+            "1845",
+            "188-46",
+            "21-16",
+            "211-13",
+            "212-20",
+            "2768",
+            "279-23",
+            "283-7",
+            "3002",
+            "31420",
+            "32023",
+            "34180",
+            "36097",
+            "36236",
+            "36842",
+            "37228",
+            "37229",
+            "374-18",
+            "37615",
+            "37764",
+            "399-14",
+            "39931",
+            "40959",
+            "41692",
+            "42902",
+            "435-36",
+            "435-38",
+            "44278",
+            "45025",
+            "45063",
+            "45300",
+            "47484",
+            "47842",
+            "48034",
+            "48588",
+            "49196",
+            "49333",
+            "494-13",
+            "49467",
+            "496-34",
+            "49782",
+            "49857",
+            "50324",
+            "50472",
+            "50573",
+            "5192",
+            "52050",
+            "52575",
+            "52763",
+            "531-48",
+            "53117",
+            "54085",
+            "54667",
+            "55609",
+            "55794",
+            "56451",
+            "565-19",
+            "57262",
+            "58138",
+            "585-41",
+            "58629",
+            "58656",
+            "58687",
+            "58942",
+            "59433",
+            "59791",
+            "599-9",
+            "82-38",
+            "85-38",
+            "94-28",
+            "9448",
+            "CF_12196",
+            "CF_18989"
+          ],
+          "escaped_verified_actions": [
+            "14207",
+            "3002",
+            "32023",
+            "35747",
+            "37229",
+            "374-18",
+            "37615",
+            "39604",
+            "399-14",
+            "42198",
+            "435-38",
+            "494-13",
+            "50324",
+            "50573",
+            "52050",
+            "52575",
+            "53117",
+            "53367",
+            "535-20",
+            "565-19",
+            "56599",
+            "58138",
+            "58656",
+            "58687",
+            "85-38",
+            "CF_12196"
+          ]
+        }
+      }
+    }
+  },
+  "qwen": {
+    "roots": {
+      "bare": "spreadsheetbench-v1-bare-qwen3-coder-480b-full-20260915-r3",
+      "basic": "ours-basic-qwen-v1-20260917",
+      "financial": "ours-qwen-v1-run2-20260916"
+    },
+    "all_recorded": {
+      "bare": {
+        "recorded": 912,
+        "scored": 868,
+        "soft_pct": 29.339477726574497,
+        "hard_pct": 24.53917050691244,
+        "case_pass_counts": [
+          274,
+          250,
+          240
+        ],
+        "not_scored_errors": {
+          "unknown": 35,
+          "ValueError": 3,
+          "RecalculationIntegrityError": 4,
+          "RenderError": 2
+        }
+      },
+      "basic": {
+        "recorded": 200,
+        "scored": 198,
+        "soft_pct": 26.599326599326602,
+        "hard_pct": 22.727272727272727,
+        "case_pass_counts": [
+          56,
+          52,
+          50
+        ],
+        "not_scored_errors": {
+          "RecalculationIntegrityError": 1,
+          "unknown": 1
+        }
+      },
+      "financial": {
+        "recorded": 200,
+        "scored": 192,
+        "soft_pct": 29.6875,
+        "hard_pct": 26.041666666666668,
+        "case_pass_counts": [
+          60,
+          56,
+          55
+        ],
+        "not_scored_errors": {
+          "ProviderError": 1,
+          "RecalculationIntegrityError": 1,
+          "unknown": 6
+        }
+      }
+    },
+    "common_scored_count": 190,
+    "common_scored": {
+      "bare": {
+        "recorded": 190,
+        "scored": 190,
+        "soft_pct": 28.421052631578945,
+        "hard_pct": 23.684210526315788,
+        "case_pass_counts": [
+          57,
+          55,
+          50
+        ],
+        "not_scored_errors": {}
+      },
+      "basic": {
+        "recorded": 190,
+        "scored": 190,
+        "soft_pct": 27.719298245614034,
+        "hard_pct": 23.684210526315788,
+        "case_pass_counts": [
+          56,
+          52,
+          50
+        ],
+        "not_scored_errors": {}
+      },
+      "financial": {
+        "recorded": 190,
+        "scored": 190,
+        "soft_pct": 30.0,
+        "hard_pct": 26.31578947368421,
+        "case_pass_counts": [
+          60,
+          56,
+          55
+        ],
+        "not_scored_errors": {}
+      }
+    },
+    "trajectories": {
+      "basic": {
+        "counts": {
+          "trajectories": 198,
+          "financial_skill_selected": 0,
+          "verified_without_executor": 26,
+          "verified_without_executor_case1_failed": 25,
+          "escaped_verified_actions": 10,
+          "escaped_verified_actions_case1_failed": 10
+        },
+        "example_task_ids": {
+          "verified_without_executor": [
+            "170-13",
+            "494-13",
+            "50324",
+            "54717",
+            "115-31",
+            "212-20",
+            "3048",
+            "48608",
+            "49782",
+            "56451",
+            "585-41",
+            "91-3",
+            "283-7",
+            "34-5",
+            "409-45",
+            "41692",
+            "55794",
+            "CF_8276",
+            "175-10",
+            "21-16",
+            "2768",
+            "36842",
+            "49333",
+            "496-15",
+            "52763",
+            "94-28"
+          ],
+          "escaped_verified_actions": [
+            "50324",
+            "212-20",
+            "444-14",
+            "51811",
+            "254-34",
+            "34-5",
+            "55085",
+            "CF_8276",
+            "175-10",
+            "82-38"
+          ]
+        }
+      },
+      "financial": {
+        "counts": {
+          "trajectories": 192,
+          "financial_skill_selected": 0,
+          "verified_without_executor": 21,
+          "verified_without_executor_case1_failed": 18,
+          "escaped_verified_actions": 8,
+          "escaped_verified_actions_case1_failed": 8
+        },
+        "example_task_ids": {
+          "verified_without_executor": [
+            "115-31",
+            "147-7",
+            "212-20",
+            "254-34",
+            "283-7",
+            "3048",
+            "31420",
+            "36842",
+            "41692",
+            "49333",
+            "494-13",
+            "49782",
+            "50324",
+            "52763",
+            "547-43",
+            "55794",
+            "56451",
+            "585-41",
+            "82-38",
+            "94-28",
+            "CF_12196"
+          ],
+          "escaped_verified_actions": [
+            "32895",
+            "49782",
+            "50324",
+            "51090",
+            "55085",
+            "57590",
+            "82-38",
+            "CF_12196"
+          ]
+        }
+      }
+    }
+  }
+}

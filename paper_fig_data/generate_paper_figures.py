@@ -428,7 +428,7 @@ def figure_cross_model_transfer() -> None:
 
 
 def write_manifest() -> None:
-    text = """# Paper figure manifest\n\nGenerated on 2026-09-18 from audited repository artifacts.\n\n| File | Intended use | Evidence type |\n|---|---|---|\n| `fig1_category_plugin_gain.*` | Main paper: Basic vs Financial category gain | V2 static comparison |\n| `fig2_pilot_task_success.*` | Supplement: pilot Table 2 visualization | 24-family held-out pilot |\n| `fig3_pilot_interaction.*` | Supplement: pilot Table 3 visualization | 24-family held-out pilot |\n| `fig4_plugin_routing_heatmap.*` | Main/supplement mechanism figure | Runtime activation heatmap |\n| `fig5_evolution_gate_trajectory.*` | Supplement: search dynamics | 7-family validation gate |\n| `fig6_accuracy_cost_tradeoff.*` | Main/supplement efficiency figure | V2 accuracy/cost snapshot |\n\nMissing cells were omitted, not imputed as zero. Pilot and validation figures are explicitly labeled in the plots and should not be presented as full formal held-out results.\n"""
+    text = """# Paper figure manifest\n\nGenerated on 2026-09-18 from audited repository artifacts.\n\n| File | Intended use | Evidence type |\n|---|---|---|\n| `fig1_category_plugin_gain.*` | Main paper: Basic vs Financial category gain | V2 static comparison |\n| `fig2_pilot_task_success.*` | Supplement: pilot Table 2 visualization | 24-family held-out pilot |\n| `fig3_pilot_interaction.*` | Supplement: pilot Table 3 visualization | 24-family held-out pilot |\n| `fig4_plugin_routing_heatmap.*` | Main/supplement mechanism figure | Runtime activation heatmap |\n| `fig5_evolution_gate_trajectory.*` | Supplement: search dynamics | 7-family validation gate |\n| `fig6_accuracy_cost_tradeoff.*` | Main/supplement efficiency figure | V2 accuracy/cost snapshot |\n| `fig7_target_sheet_harness_gain.*` | Main/supplement difficulty analysis | Paired target-sheet stratification |\n| `fig8_token_exact_curve.*` | Supplement: token scaling analysis | Token quartile association |\n| `fig9_cross_model_transfer_smoke.*` | Supplement: transfer diagnostic | Same composition, Qwen/GPT smoke |\n\nMissing cells were omitted, not imputed as zero. Pilot and validation figures are explicitly labeled in the plots and should not be presented as full formal held-out results.\n"""
     (OUT / "README.md").write_text(text, encoding="utf-8")
 
 
@@ -440,6 +440,9 @@ def main() -> None:
     figure_plugin_heatmap()
     figure_evolution()
     figure_cost_accuracy()
+    figure_target_sheet_gain()
+    figure_token_exact_curve()
+    figure_cross_model_transfer()
     write_manifest()
     print(f"wrote figures to {OUT}")
 
