@@ -645,7 +645,14 @@ def build_config(root: Path, size: int, scope_name: str) -> Path:
             "seed": 41,
             "default_dataset_root": str(FIN15K),
             "evaluator_path": str(OFFICIAL_EVALUATOR),
-            "incumbent_cache_root": str(root / "selection-incumbent-cache"),
+            # Each scaling cell has its own cache namespace.  Sharing one
+            # lock file across the concurrently running 50/200/500 cells
+            # serialized otherwise independent incumbent evaluations and, on
+            # a busy provider, looked like a hung evaluator.  The namespace
+            # remains reusable across retries of the same cell.
+            "incumbent_cache_root": str(
+                root / "selection-incumbent-cache" / f"fin15k-{size}-{scope_name}"
+            ),
             "score_weights": SCORE_WEIGHTS,
             "family_aggregation": "mean-tasks-then-uniform-families",
         },

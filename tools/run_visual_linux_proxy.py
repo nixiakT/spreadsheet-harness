@@ -21,7 +21,8 @@ import signal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, "/usr/lib/python3/dist-packages")
+if sys.prefix != "/usr":
+    sys.path.insert(0, "/usr/lib/python3/dist-packages")
 
 import uno
 from com.sun.star.beans import PropertyValue
@@ -40,7 +41,67 @@ def prop(name: str, value: object) -> PropertyValue:
 
 def export_charts(source: Path, output: Path) -> int:
     """Export all Calc OLE chart shapes from one workbook to one PNG."""
+    # The reliable Linux path is an isolated Calc PDF export followed by
+    # rasterization.  It avoids UNO's in-process DrawingML deadlocks and gives
+    # every workbook the same full-sheet visual context.
     output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="lo-visual-pdf-") as temp:
+        profile = Path(temp) / "profile"
+        pdf_dir = Path(temp) / "pdf"
+        pdf_dir.mkdir()
+        subprocess.run(
+            ["/usr/bin/libreoffice", "--headless", "--nologo", "--nodefault",
+             "--nofirststartwizard", f"-env:UserInstallation={uno.systemPathToFileUrl(str(profile))}",
+             "--convert-to", "pdf", "--outdir", str(pdf_dir), str(source)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45, check=True,
+        )
+        pdf = pdf_dir / (source.stem + ".pdf")
+        if not pdf.is_file():
+            return 0
+        import fitz
+        doc = fitz.open(pdf)
+        if not doc.page_count:
+            return 0
+        images = []
+        from PIL import Image
+        for page in doc:
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            images.append(Image.frombytes("RGB", [pix.width, pix.height], pix.samples))
+        canvas = Image.new("RGB", (max(i.width for i in images), sum(i.height for i in images)), "white")
+        y = 0
+        for image in images:
+            canvas.paste(image, (0, y)); y += image.height; image.close()
+        canvas.save(output, format="PNG")
+        doc.close()
+        return len(images)
+
+    # Kept below as a reference implementation for future chart-only export.
+    # UNO can deadlock inside a single long-lived Python process on malformed
+    # DrawingML.  Isolate every workbook in a fresh interpreter so the parent
+    # batch remains recoverable and can hard-kill the child on timeout.
+    if os.environ.get("VISUAL_PROXY_WORKER") != "1":
+        env = os.environ.copy(); env["VISUAL_PROXY_WORKER"] = "1"
+        # Do not leak the project's virtualenv import path into system Python;
+        # UNO's importer is incompatible with the venv XML modules.
+        env.pop("PYTHONPATH", None); env.pop("VIRTUAL_ENV", None)
+        env["PATH"] = "/usr/bin:/bin"
+        proc = subprocess.run(
+            ["/usr/bin/python3", str(Path(__file__).resolve()), "--worker-source", str(source),
+             "--worker-output", str(output)], env=env, timeout=45,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()[-500:]
+            raise RuntimeError(f"isolated LibreOffice export failed (rc={proc.returncode}): {detail}")
+        try:
+            return int(proc.stdout.strip().splitlines()[-1])
+        except (IndexError, ValueError) as exc:
+            raise RuntimeError(f"isolated exporter returned invalid output: {proc.stdout!r}") from exc
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    def _timeout(_signum, _frame):
+        raise TimeoutError(f"LibreOffice chart export timed out: {source.name}")
+    previous_alarm = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(90)
     with tempfile.TemporaryDirectory(prefix="lo-visual-proxy-") as profile:
         port = 24000 + os.getpid() % 10000
         accept = f"socket,host=127.0.0.1,port={port};urp;StarOffice.ComponentContext"
@@ -117,6 +178,8 @@ def export_charts(source: Path, output: Path) -> int:
             proc.terminate()
             try: proc.wait(timeout=10)
             except subprocess.TimeoutExpired: proc.kill()
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_alarm)
 
 
 def export_sheet_preview(source: Path, output: Path) -> int:
@@ -149,9 +212,27 @@ def discover_roots(results_root: Path) -> list[Path]:
     roots = []
     for root in sorted(results_root.iterdir()):
         if not root.is_dir(): continue
-        if list(root.glob("tasks/Visualization__*/output.xlsx")):
+        if (
+            list(root.glob("tasks/Visualization__*/output.xlsx"))
+            or list(root.glob("**/visual_outputs/*/1_Task *_output.xlsx"))
+            or list(root.glob("outputs/Visualization_Task */initial_output.xlsx"))
+        ):
             roots.append(root)
     return roots
+
+
+def visual_workbooks(method: Path) -> list[tuple[str, Path]]:
+    """Return unique task IDs and final outputs from all known result layouts."""
+    found: dict[str, Path] = {}
+    for workbook in sorted(method.glob("tasks/Visualization__*/output.xlsx")):
+        found.setdefault(workbook.parent.name.removeprefix("Visualization__"), workbook)
+    for workbook in sorted(method.glob("**/visual_outputs/*/1_Task *_output.xlsx")):
+        task_id = workbook.name.removeprefix("1_").removesuffix("_output.xlsx")
+        found.setdefault(task_id, workbook)
+    for workbook in sorted(method.glob("outputs/Visualization_Task */initial_output.xlsx")):
+        task_id = workbook.parent.name.removeprefix("Visualization_")
+        found.setdefault(task_id, workbook)
+    return sorted(found.items())
 
 
 def main() -> int:
@@ -163,26 +244,47 @@ def main() -> int:
     ap.add_argument("--base-url", default="http://10.130.138.46:8010/v1")
     ap.add_argument("--model", default="dashscope/qwen3-vl-235b-a22b-instruct")
     ap.add_argument("--sleep-seconds", type=float, default=0.2)
+    ap.add_argument("--worker-source", type=Path)
+    ap.add_argument("--worker-output", type=Path)
     args = ap.parse_args()
+    if args.worker_source and args.worker_output:
+        print(export_charts(args.worker_source.resolve(), args.worker_output.resolve()), flush=True)
+        return 0
     if not EVALUATOR.is_file(): raise SystemExit(f"missing evaluator: {EVALUATOR}")
-    methods = discover_roots(args.results_root)
     if args.method:
-        wanted = set(args.method); methods = [p for p in methods if p.name in wanted]
+        methods = [args.results_root / name for name in args.method]
+        missing = [str(path) for path in methods if not path.is_dir()]
+        if missing:
+            raise SystemExit("missing method directories: " + ", ".join(missing))
+    else:
+        methods = discover_roots(args.results_root)
     args.output_root.mkdir(parents=True, exist_ok=True)
-    manifest = {"proxy": True, "renderer": "LibreOffice UNO", "evaluator": str(EVALUATOR),
+    manifest = {"proxy": True, "renderer": "LibreOffice CLI PDF + PyMuPDF", "evaluator": str(EVALUATOR),
                 "model": args.model, "base_url": args.base_url, "methods": []}
     for method in methods:
         out = args.output_root / method.name
         out.mkdir(parents=True, exist_ok=True)
+        existing_report = out / "qwen3-vl_evaluation_report.json"
+        if existing_report.is_file():
+            try:
+                existing = json.loads(existing_report.read_text(encoding="utf-8"))
+                summary = existing.get("summary", {})
+                complete = summary.get("completed") == summary.get("total_tasks") == 24
+            except (OSError, ValueError, TypeError):
+                complete = False
+            if complete:
+                print(f"SKIP existing complete report: {method.name}")
+                manifest["methods"].append({"name": method.name, "output_dir": str(out),
+                                            "report": str(existing_report), "skipped_existing": True})
+                continue
         rows = []
-        for xlsx in sorted(method.glob("tasks/Visualization__*/output.xlsx")):
-            task_id = xlsx.parent.name.removeprefix("Visualization__")
+        for task_id, xlsx in visual_workbooks(method):
             png = out / f"1_Visualization/{task_id}_output.png"
             # evaluator expects 1_<task-id>_output.png directly in output-dir
             png = out / f"1_{task_id}_output.png"
             try:
                 count = export_charts(xlsx, png)
-                source_kind = "libreoffice_chart_export"
+                source_kind = "libreoffice_pdf_full_sheet"
                 if not count:
                     count = export_sheet_preview(xlsx, png)
                     source_kind = "libreoffice_sheet_preview" if count else "none"

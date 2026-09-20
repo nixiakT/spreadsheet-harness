@@ -1940,7 +1940,12 @@ class SpreadsheetBenchV2EvaluationAdapter:
                 "max_turns_per_arm": self.max_turns_per_arm,
                 "max_total_tokens": self.max_total_tokens,
                 "max_output_tokens": self.max_output_tokens,
-                "task_timeout_seconds": self.task_timeout_seconds,
+                # A provider request has its own 600-second deadline; keeping
+                # an interrupted singleton alive for the historical 7,200 s
+                # task budget stalls an entire evolution cell.  Bound the
+                # infrastructure watchdog to 15 minutes while leaving model
+                # turn/token limits unchanged and salvaging scored outputs.
+                "task_timeout_seconds": min(float(self.task_timeout_seconds), 900.0),
                 "arm_order_seed": self.arm_order_seed,
                 "summary_path": str(payload_dir / "summary.json"),
             }
@@ -2009,23 +2014,38 @@ class SpreadsheetBenchV2EvaluationAdapter:
             evaluator_grace_seconds = max(
                 30.0, min(300.0, self.task_timeout_seconds * 0.10)
             )
-            completed = subprocess.run(
-                [sys.executable, "-c", script, str(request_path)],
-                cwd=revision_dir / "artifact",
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=(
-                    self.task_timeout_seconds * max(1, len(tasks))
-                    + evaluator_grace_seconds
-                ),
-            )
-            (payload_dir / "stdout.log").write_text(completed.stdout, encoding="utf-8")
-            (payload_dir / "stderr.log").write_text(completed.stderr, encoding="utf-8")
+            # Do not use PIPE/capture_output here.  The benchmark runner may
+            # launch LibreOffice or another helper that inherits the child's
+            # descriptors; ``communicate()`` can then wait forever for EOF
+            # even though the direct child has already exited.  File-backed
+            # descriptors preserve diagnostics and let ``wait()`` observe the
+            # direct process exit deterministically.
+            stdout_path = payload_dir / "stdout.log"
+            stderr_path = payload_dir / "stderr.log"
+            with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
+                "w", encoding="utf-8"
+            ) as stderr_handle:
+                completed = subprocess.run(
+                    [sys.executable, "-c", script, str(request_path)],
+                    cwd=revision_dir / "artifact",
+                    env=environment,
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    text=True,
+                    check=False,
+                    timeout=(
+                        self.task_timeout_seconds * max(1, len(tasks))
+                        + evaluator_grace_seconds
+                    ),
+                )
+            stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+            stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
             if completed.returncode:
                 raise HarnessError(
-                    f"SpreadsheetBench-v2 revision evaluator exited with status {completed.returncode}"
+                    "SpreadsheetBench-v2 revision evaluator exited with "
+                    f"status {completed.returncode}; "
+                    f"stdout={stdout_text[-600:]!r}; "
+                    f"stderr={stderr_text[-1200:]!r}"
                 )
             return _read_json(payload_dir / "summary.json", label="paired benchmark summary")
 
@@ -2061,8 +2081,34 @@ class SpreadsheetBenchV2EvaluationAdapter:
                     {"index": index, "task_id": str(getattr(task, "task_id", task))}
                 )[:16]
                 task_output = output_dir / f"task-{index:03d}-{task_key}"
-                run_revision(revision_dir, task_output, [task], spec)
+
+                # A paired evaluation can be interrupted after the official
+                # runner has created a task directory but before it writes
+                # ``results.json`` (for example, when a provider request
+                # exceeds its deadline).  The official runner deliberately
+                # refuses to start in a non-empty directory, so blindly
+                # retrying the candidate used to turn a recoverable timeout
+                # into a permanent ``Fresh ... output already exists``
+                # failure.  Reuse a complete singleton result when present;
+                # otherwise remove only this task's stale, controller-owned
+                # output and rerun it.  Completed sibling tasks remain intact
+                # and are merged below, making retries genuinely resumable.
                 result_path = task_output / "results.json"
+                if result_path.is_file():
+                    try:
+                        raw = json.loads(result_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        raw = None
+                    if isinstance(raw, list) and any(
+                        isinstance(item, dict)
+                        and str(item.get("task_id", ""))
+                        == str(getattr(task, "task_id", ""))
+                        for item in raw
+                    ):
+                        return [item for item in raw if isinstance(item, dict)]
+                if task_output.exists():
+                    shutil.rmtree(task_output)
+                run_revision(revision_dir, task_output, [task], spec)
                 if not result_path.is_file():
                     raise HarnessError(f"Task evaluator did not create results.json: {task}")
                 raw = json.loads(result_path.read_text(encoding="utf-8"))
@@ -2071,17 +2117,39 @@ class SpreadsheetBenchV2EvaluationAdapter:
                 return [item for item in raw if isinstance(item, dict)]
 
             merged_by_task: dict[str, dict[str, Any]] = {}
-            worker_count = min(self.parallelism, len(task_list))
-            with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                futures = {
-                    pool.submit(one, pair): pair for pair in enumerate(task_list)
-                }
-                for future in as_completed(futures):
-                    for row in future.result():
+            # The pinned SpreadsheetBench-v2 official evaluator starts a
+            # process-global LibreOffice UNO service on fixed port 2002.
+            # Multiple singleton workers therefore race the same endpoint
+            # and can orphan soffice, leaving the outer evaluator blocked.
+            # Keep the frozen binding value for audit/cache identity, but
+            # serialize task subprocesses at the infrastructure boundary.
+            worker_count = 1
+            # Avoid creating a ThreadPoolExecutor when the effective worker
+            # count is one.  A failed subprocess can otherwise leave an
+            # executor worker blocked in a platform wait even after its
+            # direct child exited; serial execution keeps retry/exception
+            # handling in the controller thread and is fully cacheable.
+            if worker_count == 1:
+                batches = (one(pair) for pair in enumerate(task_list))
+                for batch in batches:
+                    for row in batch:
                         task_id = str(row.get("task_id", ""))
                         if task_id in merged_by_task:
-                            raise HarnessError(f"Duplicate task result from parallel evaluator: {task_id}")
+                            raise HarnessError(
+                                f"Duplicate task result from serial evaluator: {task_id}"
+                            )
                         merged_by_task[task_id] = row
+            else:
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    futures = {
+                        pool.submit(one, pair): pair for pair in enumerate(task_list)
+                    }
+                    for future in as_completed(futures):
+                        for row in future.result():
+                            task_id = str(row.get("task_id", ""))
+                            if task_id in merged_by_task:
+                                raise HarnessError(f"Duplicate task result from parallel evaluator: {task_id}")
+                            merged_by_task[task_id] = row
             merged = [
                 merged_by_task[str(getattr(task, "task_id", ""))]
                 for task in task_list
@@ -2972,6 +3040,31 @@ class RevisionStore:
             f"r{self.load_state()['attempted_rounds'] + 1:06d}-{proposal.candidate_id}"
         )
         if destination.exists():
+            # A paired evaluator can fail after materialization (provider,
+            # recalculation, or scoring infrastructure).  The next resumable
+            # controller invocation must reuse that contract-checked artifact
+            # instead of turning the same round into a false proposal reject.
+            # Only reuse a complete candidate whose parent is the current
+            # incumbent; an unrelated/stale directory remains a hard error.
+            proposal_path = destination / "proposal.json"
+            revision_path = destination / "revision.json"
+            composition_path = destination / "composition.json"
+            artifact_path = destination / "artifact"
+            if (
+                proposal_path.is_file()
+                and revision_path.is_file()
+                and composition_path.is_file()
+                and artifact_path.is_dir()
+            ):
+                stored_proposal = _read_json(proposal_path, label="materialized proposal")
+                stored_revision = _read_json(revision_path, label="materialized revision")
+                if (
+                    stored_proposal.get("candidate_id") == proposal.candidate_id
+                    and stored_proposal.get("base_revision_sha256") == incumbent_revision
+                    and stored_revision.get("parent_revision_sha256") == incumbent_revision
+                    and stored_revision.get("revision_sha256")
+                ):
+                    return destination, stored_revision
             raise HarnessError(f"Candidate already exists: {destination.name}")
         staging = Path(tempfile.mkdtemp(prefix=f".{proposal.candidate_id}-", dir=self.candidates))
         try:
@@ -3489,22 +3582,65 @@ class ContinuousEvolutionEngine:
                 "candidate_limit": self.config.max_candidates_per_round,
             }
             _atomic_json(round_dir / "evidence-packet.json", request["evidence_packet"])
-            proposals = list(self.proposer.propose(request, round_dir))[
-                : self.config.max_candidates_per_round
-            ]
+            # If a prior invocation reached materialization but its paired
+            # evaluator died, resume that exact candidate without spending
+            # another slow proposer call (and without allowing a stochastic
+            # retry to produce a different artifact for the same round).
+            pending_materialized: list[
+                tuple[CandidateProposal, Path, dict[str, Any]]
+            ] = []
+            for candidate_dir in sorted(
+                self.store.candidates.glob(f"r{round_number:06d}-*")
+            ):
+                revision_path = candidate_dir / "revision.json"
+                proposal_path = candidate_dir / "proposal.json"
+                if (
+                    not revision_path.is_file()
+                    or not proposal_path.is_file()
+                    or (candidate_dir / "validation-report.json").is_file()
+                ):
+                    continue
+                stored_revision = _read_json(revision_path, label="pending candidate revision")
+                if stored_revision.get("parent_revision_sha256") != incumbent:
+                    continue
+                stored_proposal = _read_json(proposal_path, label="pending candidate proposal")
+                pending_materialized.append(
+                    (
+                        CandidateProposal.from_document(stored_proposal),
+                        candidate_dir,
+                        stored_revision,
+                    )
+                )
+            if pending_materialized:
+                proposals = [item[0] for item in pending_materialized]
+            else:
+                proposals = list(self.proposer.propose(request, round_dir))[
+                    : self.config.max_candidates_per_round
+                ]
             evaluated: list[tuple[CandidateProposal, Path, dict[str, Any], ValidationDecision]] = []
             rejected: list[str] = []
             failures: list[dict[str, str]] = []
             for proposal in proposals:
                 try:
-                    candidate_dir, revision = self.store.materialize_candidate(
-                        proposal=proposal,
-                        route=route,
-                        incumbent_revision=incumbent,
-                        registry=self.registry,
-                        static_checks=self.config.static_checks,
-                        timeout=self.config.command_timeout_seconds,
+                    existing = next(
+                        (
+                            item
+                            for item in pending_materialized
+                            if item[0].candidate_id == proposal.candidate_id
+                        ),
+                        None,
                     )
+                    if existing is not None:
+                        candidate_dir, revision = existing[1], existing[2]
+                    else:
+                        candidate_dir, revision = self.store.materialize_candidate(
+                            proposal=proposal,
+                            route=route,
+                            incumbent_revision=incumbent,
+                            registry=self.registry,
+                            static_checks=self.config.static_checks,
+                            timeout=self.config.command_timeout_seconds,
+                        )
                 except (HarnessError, OSError, subprocess.SubprocessError, ValueError) as exc:
                     failures.append({"candidate_id": proposal.candidate_id, "error": str(exc)[:1000]})
                     continue
