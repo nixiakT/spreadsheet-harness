@@ -18,7 +18,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "paper_figures" / "20260918"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -97,7 +96,7 @@ def figure_category_gain() -> None:
     fig, axes = plt.subplots(1, 2, figsize=(7.1, 3.0), sharey=False)
     x = np.arange(len(categories))
     width = 0.36
-    for ax, metric in zip(axes, ("Exact", "Modification")):
+    for ax, metric in zip(axes, ("Exact", "Modification"), strict=True):
         basic = [data[metric][c]["SHEETHARNESS-BASIC"] for c in categories]
         financial = [data[metric][c]["SHEETHARNESS-FINANCIAL"] for c in categories]
         ax.bar(x - width / 2, basic, width, color=COLORS["basic"], label="Basic")
@@ -194,19 +193,32 @@ def figure_plugin_heatmap() -> None:
     im = ax.imshow(matrix, cmap="YlOrRd", vmin=0, vmax=100, aspect="auto")
     ax.set_xticks(range(len(cats)), ["Template", "Financial\nModeling", "Debugging", "Visualization"])
     short = {
-        "runtime-code-plus-formula-validation": "runtime-code + formula validation",
-        "profile-deterministic-compact": "deterministic profile",
-        "policy-ours": "policy",
-        "skill-spreadsheet-structure": "structure skill",
-        "skill-spreadsheet-formula": "formula skill",
-        "skill-spreadsheet-manipulation": "manipulation skill",
-        "skill-spreadsheet-analysis": "analysis skill",
-        "skill-spreadsheet-visualization": "visualization skill",
-        "skill-spreadsheet-verification": "verification skill",
-        "skill-spreadsheet-memory": "memory skill",
-        "verifier-formula-runtime": "runtime verifier",
+        "act-code-plus-formula-validation": "act: code + formula validation",
+        "observe-profile-compact": "observe: compact profile",
+        "control-ours": "control: ours policy",
+        "knowledge-structure": "knowledge: structure",
+        "knowledge-formula": "knowledge: formula",
+        "knowledge-manipulation": "knowledge: manipulation",
+        "knowledge-analysis": "knowledge: analysis",
+        "knowledge-visualization": "knowledge: visualization",
+        "knowledge-verification": "knowledge: verification",
+        "knowledge-memory": "knowledge: memory",
+        "verify-formula-runtime": "verify: formula runtime",
         "repair-date-text": "date-text repair",
-        "skill-spreadsheet-financial-model": "financial-model skill",
+        "knowledge-financial-model": "knowledge: financial model",
+        # Legacy CSV snapshots remain renderable during the naming migration.
+        "runtime-code-plus-formula-validation": "act: code + formula validation",
+        "profile-deterministic-compact": "observe: compact profile",
+        "policy-ours": "control: ours policy",
+        "skill-spreadsheet-structure": "knowledge: structure",
+        "skill-spreadsheet-formula": "knowledge: formula",
+        "skill-spreadsheet-manipulation": "knowledge: manipulation",
+        "skill-spreadsheet-analysis": "knowledge: analysis",
+        "skill-spreadsheet-visualization": "knowledge: visualization",
+        "skill-spreadsheet-verification": "knowledge: verification",
+        "skill-spreadsheet-memory": "knowledge: memory",
+        "verifier-formula-runtime": "verify: formula runtime",
+        "skill-spreadsheet-financial-model": "knowledge: financial model",
     }
     ax.set_yticks(range(len(plugins)), [short.get(p, p) for p in plugins])
     for i in range(len(plugins)):
@@ -232,7 +244,7 @@ def figure_evolution() -> None:
     ax.plot(xs, ys, color="#999999", linewidth=0.9, zorder=1)
     ax.scatter(xs[~accepted], ys[~accepted], s=48, color=COLORS["reject"], marker="x", label="Rejected", zorder=3)
     ax.scatter(xs[accepted], ys[accepted], s=50, color=COLORS["accept"], marker="o", label="Promoted", zorder=3)
-    for x, y, r in zip(xs, ys, rows):
+    for x, y, r in zip(xs, ys, rows, strict=True):
         ax.text(x, y + 1.8, r["target_group"], ha="center", fontsize=7)
     ax.set_xticks(xs, [r["candidate_id"] for r in rows], rotation=65, ha="right", fontsize=6)
     ax.set_ylabel("Weighted validation quality")

@@ -2,6 +2,8 @@
 
 审计日期：2026-09-17。主数据为 `paper_fig_data/task_plugin_composition.csv`。本次只读取已有 run、dataset metadata、`results.json` 和 trajectory；没有重新运行实验，也没有修改已有结果。空白表示 missing，不表示 0。
 
+说明：这里保留历史 run 的旧插件名和旧 composition hash；新运行会写入 `act-*`、`observe-*`、`control-*`、`knowledge-*`、`verify-*`、`repair-*` canonical 名称。旧名仍可通过兼容 alias 解析，但不会被写入新的 manifest。
+
 ## 结论
 
 这份 CSV 可直接用于论文主图，但主图应：

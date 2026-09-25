@@ -278,9 +278,9 @@ def test_comparison_manifest_hides_answer_metadata(tmp_path: Path) -> None:
     assert [
         plugin["name"] for plugin in ours_composition["composition"]["plugins"]
     ] == [
-        "runtime-code-interpreter",
-        "profile-deterministic-compact",
-        "policy-ours",
+            "act-code-interpreter",
+            "observe-profile-compact",
+            "control-ours",
         "repair-date-text",
     ]
     assert manifest["configuration"]["skills_for_ours_only"] == []

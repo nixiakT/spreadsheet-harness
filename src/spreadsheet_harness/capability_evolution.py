@@ -22,6 +22,7 @@ from .plugins import (
     PluginRegistry,
     ResolvedComposition,
     SpreadsheetCapability,
+    canonical_plugin_name,
 )
 from .trajectory import read_trajectory
 
@@ -473,7 +474,11 @@ def attribute_failure(
         )
 
     selected = {plugin.contract.name for plugin in composition.plugins}
-    activated = selected if activated_plugins is None else {str(name) for name in activated_plugins}
+    activated = (
+        selected
+        if activated_plugins is None
+        else {canonical_plugin_name(str(name)) for name in activated_plugins}
+    )
     unknown_activated = activated - selected
     if unknown_activated:
         raise ValueError(
@@ -521,7 +526,7 @@ def attribute_failure(
             (
                 contract
                 for contract in registry.contracts()
-                if contract.name == "skill-spreadsheet-financial-model"
+                if contract.name == "knowledge-financial-model"
                 and contract.name in activated
             ),
             None,
@@ -603,7 +608,7 @@ def attribute_failure(
                 (
                     contract
                     for contract in active_matches
-                    if contract.name == "skill-spreadsheet-financial-model"
+                    if contract.name == "knowledge-financial-model"
                 ),
                 None,
             )

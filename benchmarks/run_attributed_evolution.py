@@ -212,7 +212,7 @@ def build_arms(root, round_number, candidates):
         spec = seed
         if "c" in edits:
             spec = CompositionSpec.create(
-                arm, (*seed.plugins, "skill-spreadsheet-coordination"), dict(seed.overrides),
+                arm, (*seed.plugins, "knowledge-coordination"), dict(seed.overrides),
             )
         default_plugin_registry().resolve(spec)
         if not composition_path.exists():

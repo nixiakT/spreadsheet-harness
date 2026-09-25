@@ -31,6 +31,18 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def test_plugin_names_are_kind_prefixed_and_legacy_names_resolve() -> None:
+    registry = default_plugin_registry()
+    assert registry.get("policy-ours").name == "control-ours"
+    assert registry.get("skill-spreadsheet-formula").name == "knowledge-formula"
+    assert registry.get("verifier-formula-runtime").name == "verify-formula-runtime"
+    assert all(
+        plugin.contract.name.split("-", 1)[0]
+        in {"act", "observe", "control", "knowledge", "verify", "repair", "workflow"}
+        for plugin in registry.resolve(SPREADSHEET_HARNESS_BASIC_COMPOSITION).plugins
+    )
+
+
 def test_builtin_arm_compositions_preserve_current_runtime_contracts() -> None:
     registry = default_plugin_registry()
     plans = {
@@ -73,7 +85,7 @@ def test_financial_ablation_compositions_differ_by_one_domain_plugin() -> None:
 
     assert SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION.plugins == (
         *SPREADSHEET_HARNESS_BASIC_COMPOSITION.plugins,
-        "skill-spreadsheet-financial-model",
+        "knowledge-financial-model",
     )
     assert basic.tool_mode == financial.tool_mode == "code-plus-formula-validation"
     assert basic.profile_mode == financial.profile_mode == "compact"
@@ -191,7 +203,7 @@ def test_plugin_mutation_can_change_only_declared_surface_of_one_plugin() -> Non
 
     assert mutation.validate(registry) is contract
     assert "hooks" not in mutation.to_dict()
-    assert mutation.to_dict()["target_plugin"] == "policy-ours"
+    assert mutation.to_dict()["target_plugin"] == "control-ours"
 
     forbidden = PluginMutation.create(
         target_plugin="workflow-paper",
@@ -254,7 +266,7 @@ def test_code_controlled_search_emits_only_valid_single_slot_candidates() -> Non
     assert all(execution_plan(candidate.composition) for candidate in candidates)
     configured = [candidate for candidate in candidates if candidate.operation == "configure"]
     assert len(configured) == 2
-    assert all(candidate.target == "profile-deterministic-compact" for candidate in configured)
+    assert all(candidate.target == "observe-profile-compact" for candidate in configured)
 
 
 def test_selection_requires_cross_context_improvement_without_regression() -> None:

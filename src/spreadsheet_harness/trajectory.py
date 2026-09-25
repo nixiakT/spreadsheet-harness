@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import redact_sensitive_text
+from .plugin_trace import PluginTraceLedger
 
 _SECRET_KEY = re.compile(r"(?:api[_-]?key|authorization|auth[_-]?token|access[_-]?token)", re.I)
 _DATA_URL = re.compile(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)")
@@ -64,18 +65,22 @@ class TrajectoryRecorder:
         self._secrets = tuple(secret for secret in secrets if secret)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self.plugin_trace = PluginTraceLedger(self.path, run_id)
 
     def record(self, event: str, payload: dict[str, Any] | None = None) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        sanitized_payload = _sanitize(payload or {}, secrets=self._secrets)
         row = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": timestamp,
             "run_id": self.run_id,
             "event": event,
-            "payload": _sanitize(payload or {}, secrets=self._secrets),
+            "payload": sanitized_payload,
         }
         encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self.path.open("a", encoding="utf-8") as handle:
             handle.write(encoded + "\n")
             handle.flush()
+        self.plugin_trace.observe(event, sanitized_payload)
 
 
 def read_trajectory(path: Path) -> list[dict[str, Any]]:

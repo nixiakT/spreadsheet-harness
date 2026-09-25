@@ -91,6 +91,13 @@ sheet-harness benchmark v2-compare \
 `run.json` 和评测结果。`status=completed` 只表示执行完成，正确性应以
 `official_score` 为准。
 
+插件名称统一使用 `kind-responsibility` 形式，例如
+`act-code-plus-formula-validation`、`observe-profile-compact`、
+`control-ours`、`knowledge-formula`、`verify-formula-runtime` 和
+`repair-date-text`。历史 composition/trace 中的旧名称（如
+`runtime-code-plus-formula-validation`、`skill-spreadsheet-formula`）仍可读入，
+解析后会规范化为 canonical plugin name；新的 manifest 和 trace 只写 canonical 名称。
+
 Financial calibration bundles from the v0.6 generator and the enhanced v2
 release use Harbor's one-task-per-directory layout.  They can be passed to
 the same v2 runner directly; the harness safely materializes only the task

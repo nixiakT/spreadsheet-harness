@@ -29,6 +29,10 @@ from run_codex_spreadsheetbench_v2 import (
     prompt_for,
     recalculate_workbook,
     sha256,
+    skill_names,
+    skill_package_manifest,
+    skill_packages,
+    skill_sha256,
     workbook_is_valid,
     write_json,
     write_or_validate_manifest,
@@ -41,9 +45,12 @@ CLAUDE_PROXY_SCRIPT = ROOT / "tools/claude_messages_proxy.py"
 
 
 def claude_prompt(
-    task: dict[str, Any], workspace: Path, *, skill_enabled: bool = True
+    task: dict[str, Any], workspace: Path, *, skill_enabled: bool = True,
+    skill_name: str | None = None,
 ) -> str:
-    return prompt_for(task, workspace, skill_enabled=skill_enabled).replace(
+    return prompt_for(
+        task, workspace, skill_enabled=skill_enabled, skill_name=skill_name
+    ).replace(
         "Codex skill registry", "Claude Code skill instructions"
     ).replace(
         "The required spreadsheet-manipulation skill is already loaded through this workspace's AGENTS.md\n"
@@ -90,11 +97,22 @@ def run_one(
     claude_md = task_root / "CLAUDE.md"
     agents_md = task_root / "AGENTS.md"
     if skill is not None:
-        skill_text = skill.read_text(encoding="utf-8")
+        packages = skill_packages(skill)
+        names = [package.parent.name for package in packages]
+        sections: list[str] = []
+        for package in packages:
+            skill_resources = task_root / ".skills" / package.parent.name
+            shutil.copytree(package.parent, skill_resources, dirs_exist_ok=True)
+            sections.append(
+                f"# Skill package: {package.parent.name}\n\n"
+                + package.read_text(encoding="utf-8")
+                + f"\n\nSupporting resources are available at `{skill_resources}`.\n"
+            )
         claude_md.write_text(
-            "# Loaded spreadsheet-manipulation skill\n\n"
-            "The following skill is binding. It is already loaded; do not spend a tool call reading it.\n\n"
-            + skill_text,
+            f"# Loaded benchmark skills: {', '.join(names)}\n\n"
+            "Only the following benchmark skills are installed. Their instructions are binding; "
+            "do not spend a tool call reading SKILL.md again.\n\n"
+            + "\n\n".join(sections),
             encoding="utf-8",
         )
         # Keep AGENTS.md too, so the artifact has identical skill provenance.
@@ -201,7 +219,12 @@ def run_one(
     if not reuse_output:
         with stderr_path.open("w", encoding="utf-8") as stderr:
             return_code = invoke(
-                claude_prompt(task, task_root, skill_enabled=skill is not None)
+                claude_prompt(
+                    task,
+                    task_root,
+                    skill_enabled=skill is not None,
+                    skill_name=", ".join(skill_names(skill)) if skill is not None else None,
+                )
             )
             for _ in range(max_turns):
                 ready = workbook_is_valid(output_path)
@@ -245,7 +268,8 @@ def run_one(
         "started_at": started, "elapsed_seconds": round(time.time() - started, 3),
         "skill_enabled": skill is not None,
         "skill_path": str(skill) if skill is not None else None,
-        "skill_sha256": sha256(skill) if skill is not None else None,
+        "skill_sha256": skill_sha256(skill),
+        "skill_packages": skill_package_manifest(skill),
         "temperature": 0.0,
         "top_p": 1.0, "enable_thinking": True, "thinking_budget_tokens": 50,
         "output": str(output_path), "trajectory": str(trajectory_path),
@@ -301,13 +325,18 @@ def main() -> int:
     parser.add_argument("--recalculate-before-evaluation", action="store_true")
     args = parser.parse_args()
     args.dataset = args.dataset.resolve(); args.run_root = args.run_root.resolve(); args.skill = None if args.no_skill else args.skill.resolve(); args.api_key_file = args.api_key_file.resolve()
-    if args.skill is not None and not args.skill.is_file():
-        parser.error(f"skill not found: {args.skill}")
+    if args.skill is not None and not args.skill.exists():
+        parser.error(f"skill file/directory not found: {args.skill}")
+    if args.skill is not None:
+        try:
+            skill_packages(args.skill)
+        except ValueError as exc:
+            parser.error(str(exc))
     if not CLAUDE_BIN.is_file() or not os.access(CLAUDE_BIN, os.X_OK):
         parser.error(f"Claude binary is not executable: {CLAUDE_BIN}")
     tasks = load_tasks(args.dataset, args.category, set(args.task_id))
     args.run_root.mkdir(parents=True, exist_ok=True)
-    write_or_validate_manifest(args.run_root / "manifest.json", {
+    manifest = {
         "schema_version": 1,
         "benchmark": "SpreadsheetBench-v2",
         "harness": "anthropic/claude-code",
@@ -325,10 +354,13 @@ def main() -> int:
         "parallelism": args.parallelism,
         "skill_enabled": args.skill is not None,
         "skill_path": str(args.skill) if args.skill is not None else None,
-        "skill_sha256": sha256(args.skill) if args.skill is not None else None,
+        "skill_sha256": skill_sha256(args.skill),
         "dataset": str(args.dataset),
         "task_ids": [item["_task_id"] for item in tasks],
-    })
+    }
+    if args.skill is not None and args.skill.is_dir():
+        manifest["skill_packages"] = skill_package_manifest(args.skill)
+    write_or_validate_manifest(args.run_root / "manifest.json", manifest)
     (args.run_root / "task-plan.json").write_text(json.dumps([t["_task_id"] for t in tasks], indent=2), encoding="utf-8")
     port = free_local_port()
     audit = args.run_root / "proxy-requests.jsonl"

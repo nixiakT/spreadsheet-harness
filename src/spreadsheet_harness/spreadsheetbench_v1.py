@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -173,14 +174,15 @@ def _official_equal(expected: Any, actual: Any) -> bool:
     return type(expected) is type(actual) and expected == actual
 
 
-def _official_cells(cell_range: str) -> list[str]:
-    if ":" not in cell_range:
-        return [cell_range]
-    start, end = cell_range.split(":")
-    start_col = "".join(char for char in start if not char.isdigit())
-    start_row = int("".join(char for char in start if char.isdigit()))
-    end_col = "".join(char for char in end if not char.isdigit())
-    end_row = int("".join(char for char in end if char.isdigit()))
+def _official_cells(
+    cell_range: str,
+    *,
+    max_row: int | None = None,
+    max_column: int | None = None,
+) -> list[str]:
+    """Expand cell, rectangular, whole-column, and whole-row ranges."""
+
+    cell_range = str(cell_range).strip().replace("：", ":")
 
     def column_number(name: str) -> int:
         number = 0
@@ -188,11 +190,64 @@ def _official_cells(cell_range: str) -> list[str]:
             number = number * 26 + ord(char.upper()) - ord("A") + 1
         return number
 
+    if ":" not in cell_range:
+        if not re.fullmatch(r"[A-Za-z]+\d+", cell_range):
+            raise ValueError(f"{cell_range} is not a valid coordinate or range")
+        return [cell_range]
+    if cell_range.count(":") != 1:
+        raise ValueError(f"{cell_range} is not a valid coordinate or range")
+    start, end = (part.strip() for part in cell_range.split(":", 1))
+    if re.fullmatch(r"[A-Za-z]+", start) and re.fullmatch(r"[A-Za-z]+", end):
+        if max_row is None:
+            raise ValueError(f"whole-column range needs max_row: {cell_range}")
+        return [
+            f"{get_column_letter(column)}{row}"
+            for column in range(column_number(start), column_number(end) + 1)
+            for row in range(1, max_row + 1)
+        ]
+    if start.isdigit() and end.isdigit():
+        if max_column is None:
+            raise ValueError(f"whole-row range needs max_column: {cell_range}")
+        return [
+            f"{get_column_letter(column)}{row}"
+            for column in range(1, max_column + 1)
+            for row in range(int(start), int(end) + 1)
+        ]
+    start_match = re.fullmatch(r"([A-Za-z]+)(\d+)", start)
+    end_match = re.fullmatch(r"([A-Za-z]+)(\d+)", end)
+    if start_match is None or end_match is None:
+        raise ValueError(f"{cell_range} is not a valid coordinate or range")
     return [
         f"{get_column_letter(column)}{row}"
-        for column in range(column_number(start_col), column_number(end_col) + 1)
-        for row in range(start_row, end_row + 1)
+        for column in range(
+            column_number(start_match.group(1)), column_number(end_match.group(1)) + 1
+        )
+        for row in range(int(start_match.group(2)), int(end_match.group(2)) + 1)
     ]
+
+
+def _official_answer_segments(answer_position: str) -> list[tuple[str | None, str]]:
+    """Parse legacy V1 positions with redundant quotes/sheet prefixes."""
+
+    segments: list[tuple[str | None, str]] = []
+    for raw in str(answer_position).split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        if "!" not in token:
+            segments.append((None, token.strip("'").replace("：", ":")))
+            continue
+        sheet_name, cell_range = token.split("!", 1)
+        sheet_name = sheet_name.strip().strip("'")
+        cell_range = cell_range.strip().strip("'")
+        if "!" in cell_range:
+            prefix, remainder = cell_range.split("!", 1)
+            if prefix.strip().strip("'") == sheet_name:
+                cell_range = remainder.strip().strip("'")
+        segments.append((sheet_name, cell_range.replace("：", ":")))
+    if not segments:
+        raise ValueError("answer_position is empty")
+    return segments
 
 
 def official_compare_v1(
@@ -209,24 +264,22 @@ def official_compare_v1(
     candidate_book = load_workbook(candidate, data_only=True)
     try:
         results: list[bool] = []
-        for raw_range in answer_position.split(","):
-            if "!" in raw_range:
-                sheet_name, cell_range = raw_range.split("!")
-                sheet_name = sheet_name.lstrip("'").rstrip("'")
-            else:
-                sheet_name = golden_book.sheetnames[0]
-                cell_range = raw_range
-            sheet_name = sheet_name.lstrip("'").rstrip("'")
-            cell_range = cell_range.lstrip("'").rstrip("'")
+        for qualified_sheet, cell_range in _official_answer_segments(answer_position):
+            sheet_name = qualified_sheet or golden_book.sheetnames[0]
             if sheet_name not in candidate_book.sheetnames:
                 results.append(False)
                 continue
             expected_sheet = golden_book[sheet_name]
             actual_sheet = candidate_book[sheet_name]
+            cells = _official_cells(
+                cell_range,
+                max_row=max(expected_sheet.max_row, actual_sheet.max_row),
+                max_column=max(expected_sheet.max_column, actual_sheet.max_column),
+            )
             results.append(
                 all(
                     _official_equal(expected_sheet[cell].value, actual_sheet[cell].value)
-                    for cell in _official_cells(cell_range)
+                    for cell in cells
                 )
             )
         return all(results)

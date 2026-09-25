@@ -17,13 +17,15 @@ import os
 import random
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from statistics import fmean, pvariance
@@ -39,6 +41,7 @@ from .plugins import (
     PluginMutation,
     PluginRegistry,
     Scalar,
+    canonical_plugin_name,
     default_plugin_registry,
     execution_plan,
 )
@@ -67,6 +70,72 @@ _SAFE_SCORE_KEYS = (
     "regression_accuracy",
     "scored_accuracy",
 )
+
+
+@contextmanager
+def _global_evaluator_slot() -> Any:
+    """Limit singleton evaluator processes across all evolution workers.
+
+    Task-level pools are intentionally independent, but several evolution
+    cells (and the incumbent/candidate pair) may run in separate Python
+    processes.  A per-process ``ThreadPoolExecutor`` therefore does not cap
+    aggregate provider/LibreOffice pressure.  When the wrapper supplies a
+    shared slot directory, acquire one of its pre-created flock tokens.  The
+    lock is released automatically on timeout, exception, or process death;
+    no stale PID files need cleanup.  Unconfigured protocols retain the
+    historical behavior.
+    """
+
+    slot_root = os.environ.get("SPREADSHEET_EVOLUTION_GLOBAL_SLOTS_DIR", "").strip()
+    if not slot_root:
+        yield
+        return
+    try:
+        slot_count = max(
+            1, int(os.environ.get("SPREADSHEET_EVOLUTION_GLOBAL_SLOTS", "6"))
+        )
+    except ValueError:
+        slot_count = 6
+    root = Path(slot_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    handles: list[Any] = []
+    try:
+        for index in range(slot_count):
+            token = root / f"slot-{index:03d}.lock"
+            token.touch(exist_ok=True)
+            handle = token.open("r+")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                continue
+            handles.append(handle)
+            break
+        while not handles:
+            # Polling rather than sleeping for a fixed evaluator timeout lets
+            # a completed sibling task hand its token to the next task quickly.
+            for index in range(slot_count):
+                token = root / f"slot-{index:03d}.lock"
+                token.touch(exist_ok=True)
+                handle = token.open("r+")
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    handle.close()
+                    continue
+                handles.append(handle)
+                break
+            if not handles:
+                import time
+
+                time.sleep(0.2)
+        yield
+    finally:
+        for handle in handles:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
 
 
 def _canonical_json(value: Any) -> str:
@@ -382,6 +451,10 @@ class ContinuousEvolutionConfig:
     # family-disjoint replay/transfer/regression promotion gate.  Values bind
     # every admissible evidence task to its source-workbook family.
     evidence_task_families: Mapping[str, str] = field(default_factory=dict)
+    # Optional Fin-1.5K plugin profile supplied to the proposer.  The profile
+    # is development-only telemetry; held-out evaluator output is never placed
+    # here.  Leaving it unset preserves all legacy protocol hashes.
+    plugin_profile_path: Path | None = None
 
     @classmethod
     def from_document(cls, raw: Mapping[str, Any]) -> ContinuousEvolutionConfig:
@@ -406,7 +479,7 @@ class ContinuousEvolutionConfig:
                 raw_values, Sequence
             ):
                 raise HarnessError(f"Evolution group {name!r} must be a list")
-            values = tuple(str(item).strip() for item in raw_values)
+            values = tuple(canonical_plugin_name(str(item).strip()) for item in raw_values)
             if any(not item for item in values):
                 raise HarnessError(f"Evolution group {name!r} contains an empty plugin")
             if len(values) != len(set(values)):
@@ -488,6 +561,14 @@ class ContinuousEvolutionConfig:
             str(task_id).strip(): str(family).strip()
             for task_id, family in raw_evidence_families.items()
         }
+        raw_profile_path = raw.get("plugin_profile_path")
+        plugin_profile_path = (
+            Path(str(raw_profile_path)).expanduser().resolve()
+            if raw_profile_path is not None
+            else None
+        )
+        if plugin_profile_path is not None and not plugin_profile_path.is_file():
+            raise HarnessError(f"plugin_profile_path does not exist: {plugin_profile_path}")
         if first_group not in {"harness", "domain"}:
             raise HarnessError("first_group must be harness or domain")
         if max_rounds < 1 or max_candidates < 1 or not math.isfinite(timeout) or timeout <= 0:
@@ -564,6 +645,7 @@ class ContinuousEvolutionConfig:
             kernel_hash,
             allowed_update_scopes,  # type: ignore[arg-type]
             evidence_task_families,
+            plugin_profile_path,
         )
         result.validate(default_plugin_registry())
         return result
@@ -580,7 +662,11 @@ class ContinuousEvolutionConfig:
         resolved = registry.resolve(self.composition)
         execution_plan(resolved)
         known = {contract.name for contract in registry.contracts()}
-        grouped = set(self.groups["harness"]) | set(self.groups["domain"])
+        grouped = {
+            canonical_plugin_name(name)
+            for values in self.groups.values()
+            for name in values
+        }
         if not grouped <= known:
             raise HarnessError(f"Evolution groups contain unknown plugins: {sorted(grouped - known)}")
         active_evolvable = {
@@ -627,6 +713,8 @@ class ContinuousEvolutionConfig:
             document["allowed_update_scopes"] = list(self.allowed_update_scopes)
         if self.evidence_task_families:
             document["evidence_task_families"] = dict(self.evidence_task_families)
+        if self.plugin_profile_path is not None:
+            document["plugin_profile_path"] = str(self.plugin_profile_path)
         return document
 
     @property
@@ -652,6 +740,15 @@ class RouteMutation:
     support_count: int
     reasons: tuple[str, ...]
     replacement_plugin: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target_plugin", canonical_plugin_name(self.target_plugin))
+        if self.replacement_plugin is not None:
+            object.__setattr__(
+                self,
+                "replacement_plugin",
+                canonical_plugin_name(self.replacement_plugin),
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -679,6 +776,16 @@ class EvolutionRoute:
     replacement_plugin: str | None = None
     scope: UpdateScope | None = None
     mutations: tuple[RouteMutation, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target_plugin", canonical_plugin_name(self.target_plugin))
+        if self.replacement_plugin is not None:
+            object.__setattr__(
+                self,
+                "replacement_plugin",
+                canonical_plugin_name(self.replacement_plugin),
+            )
+        object.__setattr__(self, "mutations", tuple(self.mutations))
 
     def mutation_items(self) -> tuple[RouteMutation, ...]:
         """Return all route targets, normalizing legacy single-target routes."""
@@ -713,7 +820,7 @@ class EvolutionRoute:
             mutations = tuple(parsed)
         group = str(raw.get("group", ""))
         operation = str(raw.get("operation", ""))
-        target = str(raw.get("target_plugin", ""))
+        target = canonical_plugin_name(str(raw.get("target_plugin", "")))
         surface = raw.get("surface")
         if group not in {"harness", "domain"} or operation not in {
             "edit",
@@ -750,7 +857,7 @@ class EvolutionRoute:
             tuple(str(item) for item in raw.get("evidence_sha256") or ()),
             int(raw.get("support_count", 0)),
             tuple(str(item) for item in raw.get("reasons") or ()),
-            str(raw["replacement_plugin"])
+            canonical_plugin_name(str(raw["replacement_plugin"]))
             if raw.get("replacement_plugin") is not None
             else None,
             str(scope) if scope is not None else None,  # type: ignore[arg-type]
@@ -777,7 +884,7 @@ class EvolutionRoute:
 def _route_mutation_from_dict(raw: Mapping[str, Any]) -> RouteMutation:
     group = str(raw.get("group", ""))
     operation = str(raw.get("operation", ""))
-    target = str(raw.get("target_plugin", ""))
+    target = canonical_plugin_name(str(raw.get("target_plugin", "")))
     surface = raw.get("surface")
     if group not in {"harness", "domain"} or operation not in {
         "edit", "enable", "disable", "replace", "synthesize"
@@ -795,7 +902,7 @@ def _route_mutation_from_dict(raw: Mapping[str, Any]) -> RouteMutation:
         tuple(str(item) for item in raw.get("evidence_sha256") or ()),
         int(raw.get("support_count", 0)),
         tuple(str(item) for item in raw.get("reasons") or ()),
-        str(raw["replacement_plugin"])
+        canonical_plugin_name(str(raw["replacement_plugin"]))
         if raw.get("replacement_plugin") is not None
         else None,
     )
@@ -928,6 +1035,10 @@ class DeterministicEvidenceRouter:
         ),
     ) -> EvolutionRoute | None:
         resolved = registry.resolve(composition)
+        groups = {
+            group: tuple(canonical_plugin_name(name) for name in names)
+            for group, names in groups.items()
+        }
         candidates: Counter[tuple[ProposalOperation, str]] = Counter()
         hashes: dict[tuple[ProposalOperation, str], set[str]] = {}
         reasons: dict[tuple[ProposalOperation, str], set[str]] = {}
@@ -995,14 +1106,14 @@ class DeterministicEvidenceRouter:
             if (
                 profile_truncated
                 and _profile_truncation_is_actionable(rows, attribution)
-                and "profile-deterministic-compact" in composition.plugins
+                and "observe-profile-compact" in composition.plugins
             ):
-                key = ("replace", "profile-deterministic-compact")
+                key = ("replace", "observe-profile-compact")
                 candidates[key] += 1
                 hashes.setdefault(key, set()).update(attribution.evidence_sha256)
                 reasons.setdefault(key, set()).add("profile-truncated-before-failed-evaluation")
                 signals.setdefault(key, []).append("profile-truncation composition-interface")
-                replacements[key] = "profile-deterministic-full"
+                replacements[key] = "observe-profile-full"
 
             selected_skills = 0
             for row in rows:
@@ -1021,9 +1132,9 @@ class DeterministicEvidenceRouter:
                 selected_skills >= 2
                 and "workbook.mutation.committed" in event_names
                 and "agent.formula_runtime_validation_passed" in event_names
-                and "skill-spreadsheet-coordination" not in composition.plugins
+                and "knowledge-coordination" not in composition.plugins
             ):
-                key = ("synthesize", "skill-spreadsheet-coordination")
+                key = ("synthesize", "knowledge-coordination")
                 candidates[key] += 1
                 hashes.setdefault(key, set()).update(attribution.evidence_sha256)
                 reasons.setdefault(key, set()).add(
@@ -1601,13 +1712,13 @@ class ProposalMutation:
             raise HarnessError("Candidate mutation config_patch must be an object")
         return cls(
             operation,  # type: ignore[arg-type]
-            str(raw.get("target_plugin", "")),
+            canonical_plugin_name(str(raw.get("target_plugin", ""))),
             surface,  # type: ignore[arg-type]
             str(raw["operator"]) if raw.get("operator") is not None else None,
             tuple(files),
             str(raw["patch"]) if raw.get("patch") is not None else None,
             dict(config_patch),
-            str(raw["replacement_plugin"])
+            canonical_plugin_name(str(raw["replacement_plugin"]))
             if raw.get("replacement_plugin") is not None
             else None,
         )
@@ -1903,6 +2014,9 @@ class SpreadsheetBenchV2EvaluationAdapter:
             raise HarnessError("score_weights must be nonnegative supported metrics")
         context_reports: list[dict[str, Any]] = []
         candidate_evidence: list[dict[str, Any]] = []
+        infrastructure_retry_count = max(
+            0, int(binding.get("evaluator_task_retries", 0))
+        )
         # A revision may be screened repeatedly on different task subsets or
         # with different budgets.  Keying only by revision makes the official
         # runner (which correctly requires a fresh output directory) reject a
@@ -1919,8 +2033,22 @@ class SpreadsheetBenchV2EvaluationAdapter:
         output_root = self.output_root / output_key
         output_root.mkdir(parents=True, exist_ok=True)
 
+        def incumbent_cache_binding(raw_binding: Mapping[str, Any]) -> dict[str, Any]:
+            """Exclude routing-only fields from the shared incumbent cache key."""
+
+            normalized = dict(raw_binding)
+            normalized.pop("evolution_mechanism", None)
+            normalized.pop("incumbent_cache_root", None)
+            normalized.pop("candidate_screening", None)
+            return normalized
+
         def run_revision(
-            revision_dir: Path, output_dir: Path, tasks: Sequence[Any], spec: CompositionSpec
+            revision_dir: Path,
+            output_dir: Path,
+            tasks: Sequence[Any],
+            spec: CompositionSpec,
+            *,
+            uno_port: int | None = None,
         ) -> dict[str, Any]:
             """Run the benchmark in a clean interpreter rooted at that revision."""
 
@@ -1940,12 +2068,16 @@ class SpreadsheetBenchV2EvaluationAdapter:
                 "max_turns_per_arm": self.max_turns_per_arm,
                 "max_total_tokens": self.max_total_tokens,
                 "max_output_tokens": self.max_output_tokens,
-                # A provider request has its own 600-second deadline; keeping
-                # an interrupted singleton alive for the historical 7,200 s
-                # task budget stalls an entire evolution cell.  Bound the
-                # infrastructure watchdog to 15 minutes while leaving model
-                # turn/token limits unchanged and salvaging scored outputs.
-                "task_timeout_seconds": min(float(self.task_timeout_seconds), 900.0),
+                # A provider request has its own deadline.  New screening
+                # protocols may explicitly choose a singleton watchdog and a
+                # retry budget; legacy protocols retain the historical 900 s
+                # cap.  Keeping this binding explicit prevents a candidate
+                # from silently being evaluated under a different timeout
+                # than the protocol says.
+                "task_timeout_seconds": min(
+                    float(self.task_timeout_seconds),
+                    float(binding.get("evaluator_task_timeout_seconds", 900.0)),
+                ),
                 "arm_order_seed": self.arm_order_seed,
                 "summary_path": str(payload_dir / "summary.json"),
             }
@@ -2004,6 +2136,13 @@ class SpreadsheetBenchV2EvaluationAdapter:
                 getattr(self.provider_config, "api_key", "")
             )
             environment["PYTHONPATH"] = str(revision_dir / "artifact" / "src")
+            if uno_port is not None:
+                # The legacy vendor helper (used by some workbook
+                # materialization paths) still discovers its UNO endpoint
+                # from this variable.  Keep it isolated per singleton task;
+                # the normal render backend independently chooses a fresh
+                # port and profile for every recalculation.
+                environment["SPREADSHEETBENCH_LO_PORT"] = str(int(uno_port))
             # The benchmark runner owns the per-task deadline and needs a
             # little time after it fires to salvage/score the workbook and
             # write results.json. Giving the outer subprocess the identical
@@ -2094,36 +2233,92 @@ class SpreadsheetBenchV2EvaluationAdapter:
                 # output and rerun it.  Completed sibling tasks remain intact
                 # and are merged below, making retries genuinely resumable.
                 result_path = task_output / "results.json"
-                if result_path.is_file():
+                retry_count = infrastructure_retry_count
+                raw: list[dict[str, Any]] | None = None
+
+                def usable(rows: Any) -> bool:
+                    if not isinstance(rows, list):
+                        return False
+                    for item in rows:
+                        if not isinstance(item, dict):
+                            continue
+                        if str(item.get("task_id", "")) != str(getattr(task, "task_id", "")):
+                            continue
+                        # A result row with ``status=error`` is durable audit
+                        # data, but not usable paired evidence.  Earlier code
+                        # treated it as cache-complete and permanently turned
+                        # transient provider/UNO failures into gate coverage
+                        # failures.
+                        return bool(
+                            isinstance(item.get("official_score"), Mapping)
+                            and item.get("outcome_kind") == "scored"
+                            and item.get("status") == "completed"
+                        )
+                    return False
+
+                for attempt in range(retry_count + 1):
+                    if result_path.is_file():
+                        try:
+                            existing = json.loads(result_path.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError):
+                            existing = None
+                        if isinstance(existing, list):
+                            raw = [item for item in existing if isinstance(item, dict)]
+                            if usable(raw):
+                                return raw
+                    if task_output.exists():
+                        # This is a controller-owned singleton directory.  A
+                        # failed run is replaced only for this task; completed
+                        # siblings and the incumbent cache remain untouched.
+                        shutil.rmtree(task_output)
+                    # Reserve an endpoint before launching the child.  The
+                    # socket is closed immediately; the modern renderer owns
+                    # its own isolated endpoint while legacy helpers receive
+                    # this collision-resistant hint.
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                        listener.bind(("127.0.0.1", 0))
+                        uno_port = int(listener.getsockname()[1])
+                    try:
+                        with _global_evaluator_slot():
+                            run_revision(
+                                revision_dir,
+                                task_output,
+                                [task],
+                                spec,
+                                uno_port=uno_port,
+                            )
+                    except (HarnessError, OSError, subprocess.SubprocessError):
+                        if attempt >= retry_count:
+                            raise
+                        continue
                     try:
                         raw = json.loads(result_path.read_text(encoding="utf-8"))
                     except (OSError, json.JSONDecodeError):
                         raw = None
-                    if isinstance(raw, list) and any(
-                        isinstance(item, dict)
-                        and str(item.get("task_id", ""))
-                        == str(getattr(task, "task_id", ""))
-                        for item in raw
-                    ):
+                    if usable(raw):
                         return [item for item in raw if isinstance(item, dict)]
-                if task_output.exists():
-                    shutil.rmtree(task_output)
-                run_revision(revision_dir, task_output, [task], spec)
-                if not result_path.is_file():
-                    raise HarnessError(f"Task evaluator did not create results.json: {task}")
-                raw = json.loads(result_path.read_text(encoding="utf-8"))
-                if not isinstance(raw, list):
-                    raise HarnessError("Task evaluator results.json must be a list")
-                return [item for item in raw if isinstance(item, dict)]
+                    if attempt < retry_count:
+                        continue
+                    if isinstance(raw, list):
+                        # Preserve the final infrastructure row for the
+                        # coverage-aware promotion gate instead of aborting
+                        # the complete candidate evaluation.
+                        return [item for item in raw if isinstance(item, dict)]
+                if isinstance(raw, list):
+                    return raw
+                raise HarnessError(f"Task evaluator did not create results.json: {task}")
 
             merged_by_task: dict[str, dict[str, Any]] = {}
-            # The pinned SpreadsheetBench-v2 official evaluator starts a
-            # process-global LibreOffice UNO service on fixed port 2002.
-            # Multiple singleton workers therefore race the same endpoint
-            # and can orphan soffice, leaving the outer evaluator blocked.
-            # Keep the frozen binding value for audit/cache identity, but
-            # serialize task subprocesses at the infrastructure boundary.
-            worker_count = 1
+            # The task runner is deliberately launched once per task.  Each
+            # child uses ``recalculate_workbook`` with a fresh LibreOffice
+            # profile and an ephemeral loopback UNO port, so singleton
+            # workers do not share workbook/session state.  The old code
+            # forced this to one because an earlier evaluator version used a
+            # process-global port 2002; that made a 50/200-case screen wait
+            # for the slowest task in the set even when the binding requested
+            # parallelism.  Keep the configured limit, bounded by the amount
+            # of work actually available.
+            worker_count = min(max(1, int(self.parallelism)), len(task_list))
             # Avoid creating a ThreadPoolExecutor when the effective worker
             # count is one.  A failed subprocess can otherwise leave an
             # executor worker blocked in a platform wait even after its
@@ -2260,20 +2455,22 @@ class SpreadsheetBenchV2EvaluationAdapter:
                             "incumbent_revision_sha256": request.get(
                                 "incumbent_revision_sha256"
                             ),
-                            "evaluation_binding_sha256": request.get(
-                                "evaluation_binding_sha256"
-                            ),
                             # Screening requests may omit the optional
-                            # precomputed binding digest. Include the frozen
-                            # binding itself so a prior run with a different
-                            # token/timeout protocol can never masquerade as
-                            # the incumbent for this paired comparison.
-                            "evaluation_binding": binding,
+                            # precomputed binding digest. Use the normalized
+                            # semantic binding so mechanism/namespace routing
+                            # metadata does not split a shared incumbent cache.
+                            "incumbent_cache_binding": incumbent_cache_binding(binding),
                             "dataset_root": str(dataset_root),
                             "task_ids": list(dataset_task_ids),
                         }
                     )
-                    cache_entry = self.incumbent_cache_root / cache_key
+                    # Mechanism cells are siblings under one experiment root.
+                    # Collapsing their cache namespace here also benefits
+                    # already-generated configs whose binding still names a
+                    # per-mechanism directory; unrelated experiments retain
+                    # isolation because their parent directory differs.
+                    cache_root = self.incumbent_cache_root.parent / "shared"
+                    cache_entry = cache_root / cache_key
                     incumbent_output = cache_entry / "output"
                     cache_entry.mkdir(parents=True, exist_ok=True)
                     with (cache_entry / ".lock").open("a+") as cache_lock:
@@ -3570,9 +3767,11 @@ class ContinuousEvolutionEngine:
                     "replacement_plugin": route.replacement_plugin,
                     "routes": [item.to_dict() for item in route_items],
                     "instruction": (
-                        "Return exactly one candidate for the selected scope. "
-                        "For a joint scope return one mutation per route target; all "
-                        "mutations are applied atomically. "
+                        f"Return up to {self.config.max_candidates_per_round} distinct candidates "
+                        "for the selected scope; prefer materially different, contract-valid "
+                        "alternatives when the evidence supports them. "
+                        "For a joint scope every candidate must return one mutation per route "
+                        "target; all mutations within that candidate are applied atomically. "
                         "For revision edit only the active target surface. For recomposition "
                         "use the deterministic replacement_plugin and no file patch. For "
                         "synthesis replace only the approved inactive template file."
@@ -3581,6 +3780,23 @@ class ContinuousEvolutionEngine:
                 "rejected_candidate_sha256": state.get("rejected_candidates", []),
                 "candidate_limit": self.config.max_candidates_per_round,
             }
+            if self.config.plugin_profile_path is not None:
+                request["plugin_profile"] = _read_json(
+                    self.config.plugin_profile_path,
+                    label="plugin profile",
+                )
+                request["profile_guidance"] = {
+                    "mechanism": self.config.evaluation_binding.get(
+                        "evolution_mechanism", route.scope or route.group
+                    ),
+                    "source": "Fin-1.5K development trajectories only",
+                    "heldout_feedback_allowed": False,
+                    "instruction": (
+                        "Use plugin profile and normalized plugin trace to choose among edit, "
+                        "disable, replace, synthesize, and joint actions. Do not use any "
+                        "SpreadsheetBench or held-out score as evidence."
+                    ),
+                }
             _atomic_json(round_dir / "evidence-packet.json", request["evidence_packet"])
             # If a prior invocation reached materialization but its paired
             # evaluator died, resume that exact candidate without spending
@@ -3620,6 +3836,7 @@ class ContinuousEvolutionEngine:
             evaluated: list[tuple[CandidateProposal, Path, dict[str, Any], ValidationDecision]] = []
             rejected: list[str] = []
             failures: list[dict[str, str]] = []
+            decision_summaries: list[dict[str, Any]] = []
             for proposal in proposals:
                 try:
                     existing = next(
@@ -3671,6 +3888,16 @@ class ContinuousEvolutionEngine:
                         candidate_revision=str(revision["revision_sha256"]),
                     )
                     _atomic_json(candidate_dir / "decision.json", decision.to_dict())
+                    decision_summaries.append(
+                        {
+                            "candidate_id": proposal.candidate_id,
+                            "revision_sha256": str(revision["revision_sha256"]),
+                            "promoted": decision.promoted,
+                            "aggregate_mean_delta": decision.aggregate_mean_delta,
+                            "aggregate_lcb": decision.aggregate_lcb,
+                            "blockers": list(decision.blockers),
+                        }
+                    )
                 except (HarnessError, OSError, subprocess.SubprocessError, ValueError) as exc:
                     # A materialized candidate is already contract-valid here.
                     # Failure to obtain/parse its controlled paired evaluation
@@ -3699,6 +3926,22 @@ class ContinuousEvolutionEngine:
                 rejected.extend(
                     str(item[2]["revision_sha256"]) for item in evaluated if item is not winner
                 )
+            all_blockers = {
+                blocker
+                for item in decision_summaries
+                for blocker in item.get("blockers", [])
+            }
+            coverage_blockers = {
+                "aggregate-insufficient-pairs",
+                "aggregate-pair-coverage-below-minimum",
+            }
+            coverage_only = bool(all_blockers) and all(
+                blocker in coverage_blockers
+                or blocker.startswith("insufficient-pairs:")
+                or blocker.startswith("missing-pair:")
+                or blocker.startswith("unscored-pair:")
+                for blocker in all_blockers
+            )
             round_report = {
                 "schema_version": "continuous-plugin-evolution-round-v1",
                 "round": round_number,
@@ -3711,7 +3954,18 @@ class ContinuousEvolutionEngine:
                 ),
                 "rejected_revision_sha256": sorted(set(rejected)),
                 "candidate_failures": failures,
-                "outcome": "promoted" if winner is not None else "rejected",
+                # Coverage failure is not a capability regression. Keep it
+                # distinct in the durable round record so follow-up tooling
+                # retries missing infrastructure evidence instead of treating
+                # the candidate as disproven.
+                "outcome": (
+                    "promoted"
+                    if winner is not None
+                    else "coverage-inconclusive"
+                    if coverage_only
+                    else "rejected"
+                ),
+                "decision_summaries": decision_summaries,
             }
             state = self.store.record_round(
                 round_number=round_number,

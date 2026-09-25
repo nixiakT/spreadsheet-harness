@@ -71,6 +71,75 @@ def atomic_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def migrate_legacy_skill_manifest(
+    run_root: Path, previous: dict[str, Any], current: dict[str, Any]
+) -> bool:
+    """Migrate the pre-package xlsx manifest without rerunning completed tasks.
+
+    The first official-xlsx runs were created before the manifest recorded the
+    package list for a skill.  The runner now records that list, so a strict
+    equality check would make every resume fail before any task is scheduled.
+    This narrowly scoped migration accepts only that additive metadata change,
+    updates the manifest hash on existing records, and leaves unfinished tasks
+    retryable.
+    """
+    old_skill = previous.get("skill")
+    new_skill = current.get("skill")
+    if not isinstance(old_skill, dict) or not isinstance(new_skill, dict):
+        return False
+    if "packages" in old_skill or "packages" not in new_skill:
+        return False
+    if any(old_skill.get(key) != new_skill.get(key) for key in old_skill):
+        return False
+    old_without = dict(previous)
+    new_without = dict(current)
+    old_without.pop("manifest_sha256", None)
+    new_without.pop("manifest_sha256", None)
+    old_without.pop("skill", None)
+    new_without.pop("skill", None)
+    if old_without != new_without:
+        return False
+
+    old_hash = previous.get("manifest_sha256")
+    new_hash = current.get("manifest_sha256")
+    if not isinstance(old_hash, str) or not isinstance(new_hash, str):
+        return False
+    atomic_json(run_root / "manifest.json", current)
+    tasks_root = run_root / "tasks"
+    for status_path in tasks_root.glob("*/status.json"):
+        try:
+            row = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if row.get("manifest_sha256") == old_hash:
+            row["manifest_sha256"] = new_hash
+            atomic_json(status_path, row)
+    results_path = run_root / "results.json"
+    if results_path.is_file():
+        try:
+            rows = json.loads(results_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            rows = None
+        if isinstance(rows, list):
+            changed = False
+            for row in rows:
+                if isinstance(row, dict) and row.get("manifest_sha256") == old_hash:
+                    row["manifest_sha256"] = new_hash
+                    changed = True
+            if changed:
+                atomic_json(results_path, rows)
+    summary_path = run_root / "summary.json"
+    if summary_path.is_file():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            summary = None
+        if isinstance(summary, dict) and summary.get("manifest_sha256") == old_hash:
+            summary["manifest_sha256"] = new_hash
+            atomic_json(summary_path, summary)
+    return True
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -93,22 +162,22 @@ def generation_prompt(
 ) -> str:
     skill_loading = ({
         "codex": (
-            "The spreadsheet-core skill is already loaded through AGENTS.md and the "
+            f"The `{skill_name}` skill is already loaded through AGENTS.md and the "
             "isolated Codex skill registry. Follow it throughout."
         ),
         "claude": (
-            "The spreadsheet-core skill is already loaded through CLAUDE.md. "
+            f"The `{skill_name}` skill is already loaded through CLAUDE.md. "
             "Follow it throughout."
         ),
         "dsh": (
-            f"Before spreadsheet work, call the skill tool to load `{skill_name}`. "
-            "It is the only benchmark skill in this DSH registry."
+            f"Before spreadsheet work, call the skill tool once for each loaded financial skill: `{skill_name}`. "
+            "These are the only benchmark skills in this DSH registry."
         ),
     }[harness] if skill_name is not None else
         "No benchmark skill is installed or loaded for this run. Use only the harness's native capabilities."
     )
     final_instruction = (
-        "In the final response state that spreadsheet-core was loaded and both artifacts were verified."
+        f"In the final response state that `{skill_name}` was loaded and both artifacts were verified."
         if skill_name is not None
         else "In the final response state that both artifacts were verified."
     )
@@ -395,12 +464,18 @@ def run_one(
         if not script.is_file():
             raise RuntimeError("real harness did not create solution.py")
         record["solution_sha256"] = sha256(script)
-        if (
-            args.harness == "dsh"
-            and args.skill is not None
-            and generation.get("skill_loaded_in_session") is not True
-        ):
-            raise RuntimeError("DSH session did not record loading spreadsheet-core")
+        if args.harness == "dsh" and args.skill is not None:
+            loaded = generation.get("skill_loaded_in_session")
+            expected = codex_runner.skill_names(args.skill)
+            if isinstance(loaded, dict):
+                missing = [name for name in expected if loaded.get(name) is not True]
+            else:
+                missing = expected if loaded is not True else []
+            if missing:
+                raise RuntimeError(
+                    "DSH session did not record loading financial skills: "
+                    + ", ".join(missing)
+                )
         outputs, replay_rows = replay_solution(
             task,
             script,
@@ -462,9 +537,10 @@ def make_manifest(args: argparse.Namespace, tasks: list[SpreadsheetBenchV1Instru
         "skill": (
             {
                 "enabled": True,
-                "name": args.skill.parent.name,
+                "name": ", ".join(codex_runner.skill_names(args.skill)),
                 "path": str(args.skill),
-                "sha256": sha256(args.skill),
+                "sha256": codex_runner.skill_sha256(args.skill),
+                "packages": codex_runner.skill_package_manifest(args.skill),
             }
             if args.skill is not None
             else {"enabled": False, "name": None, "path": None, "sha256": None}
@@ -530,10 +606,13 @@ def main() -> int:
     args.run_root = args.run_root.expanduser().resolve()
     if args.parallelism < 1 or args.max_turns < 1 or args.task_timeout <= 0:
         parser.error("parallelism, max-turns, and timeouts must be positive")
-    if args.skill is not None and (
-        not args.skill.is_file() or args.skill.parent.name != "spreadsheet-core"
-    ):
-        parser.error("--skill must be spreadsheet-core/SKILL.md")
+    if args.skill is not None and not args.skill.exists():
+        parser.error("--skill must point to an existing SKILL.md or skill directory")
+    if args.skill is not None:
+        try:
+            codex_runner.skill_packages(args.skill)
+        except ValueError as exc:
+            parser.error(str(exc))
     if not args.api_key_file.is_file():
         parser.error("API key file is missing")
     api_key = args.api_key_file.read_text(encoding="utf-8").strip()
@@ -551,11 +630,13 @@ def main() -> int:
     if manifest_path.is_file():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
         if previous != manifest:
-            parser.error("existing run manifest differs from requested configuration")
+            if not migrate_legacy_skill_manifest(args.run_root, previous, manifest):
+                parser.error("existing run manifest differs from requested configuration")
     else:
         atomic_json(manifest_path, manifest)
     install_prompts(
-        args.harness, args.skill.parent.name if args.skill is not None else None
+        args.harness,
+        ", ".join(codex_runner.skill_names(args.skill)) if args.skill is not None else None,
     )
     port = free_port()
     proxy, proxy_log = start_proxy(args, port)

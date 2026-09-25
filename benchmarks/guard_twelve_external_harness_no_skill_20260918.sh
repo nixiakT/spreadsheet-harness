@@ -50,10 +50,10 @@ for path in statuses:
         raise SystemExit(0)
     seen.add(key)
     if benchmark == "v1":
-        if row.get("status") not in {"completed", "not_scored"}:
-            print("incomplete")
-            raise SystemExit(0)
-        if row.get("status") == "not_scored" and not isinstance(row.get("generation"), dict):
+        # V1 has no legitimate terminal not_scored state during the primary
+        # run: missing solution.py and sibling replay failures are retryable.
+        # Only a completed three-sibling replay is terminal here.
+        if row.get("status") != "completed":
             print("incomplete")
             raise SystemExit(0)
     elif row.get("status") in {"failed", "timeout"} and int(row.get("model_requests") or 0) < int(row.get("max_turns") or 50):

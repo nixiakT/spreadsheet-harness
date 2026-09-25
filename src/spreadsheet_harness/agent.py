@@ -4801,7 +4801,7 @@ class SpreadsheetAgent:
                                                 "so submission is blocked until a successful "
                                                 "correction.",
                                                 diagnostics=(latest_edit_recovery_diagnostics),
-                                                force_code=False,
+                                                force_code=read_only_deadline_rejected,
                                             ),
                                         }
                                     ],
@@ -5943,9 +5943,19 @@ class SpreadsheetAgent:
                                         "requires a saved workbook edit. "
                                         + (
                                             _edit_recovery_prompt(
-                                                "The workbook is still unchanged.",
+                                                (
+                                                    "The workbook is still unchanged, and the "
+                                                    "read-only inspection budget has already "
+                                                    "been exhausted. Do not perform another "
+                                                    "inspection-only call; use the known "
+                                                    "evidence to make the requested edit, "
+                                                    "save the managed workbook, reopen it, "
+                                                    "and verify the target."
+                                                    if read_only_deadline_rejected
+                                                    else "The workbook is still unchanged."
+                                                ),
                                                 diagnostics=(latest_edit_recovery_diagnostics),
-                                                force_code=False,
+                                                force_code=read_only_deadline_rejected,
                                             )
                                             if can_recover_with_code
                                             else "On your next call, use a mutation tool or "

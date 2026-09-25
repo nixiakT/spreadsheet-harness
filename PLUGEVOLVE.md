@@ -51,13 +51,13 @@ The first registry maps the current harness into these plugin families:
 
 | Family | Current providers | Evolvable surface |
 | --- | --- | --- |
-| Observe | full and compact deterministic profiles | implementation, bounded config |
-| Act | code interpreter and native spreadsheet tools | implementation, description |
-| Control | bare, profile, native, and ours solve policies | prompt, middleware implementation |
-| Verify | formula-runtime validation | bounded config, implementation |
-| Knowledge | independently selectable spreadsheet capability skills | prompt/skill content |
-| Repair | date-text repair | implementation |
-| Workflow | legacy paper workflow | frozen in v1 |
+| Observe | `observe-profile-full`, `observe-profile-compact` | implementation, bounded config |
+| Act | `act-code-interpreter`, `act-native-tools`, `act-code-plus-formula-validation` | implementation, description |
+| Control | `control-bare`, `control-profile`, `control-native`, `control-ours` | prompt, middleware implementation |
+| Verify | `verify-formula-runtime` | bounded config, implementation |
+| Knowledge | `knowledge-*` spreadsheet capability plugins | prompt/skill content |
+| Repair | `repair-date-text` | implementation |
+| Workflow | `workflow-paper` | frozen in v1 |
 
 Consumers require capabilities such as `context.workbook-profile`; they do not
 name or import another provider. A composition may contain at most one provider

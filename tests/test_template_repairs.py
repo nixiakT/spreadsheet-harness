@@ -18,12 +18,13 @@ TEMPLATE_ROOT = Path("benchmarks/data/spreadsheetbench-v2/Template")
 @pytest.mark.parametrize(
     ("task_id", "expected_count", "expected_formulas"),
     [
-        ("01_04", 137, {"L8": "=IRR(N3:N10)", "J12": "=J20"}),
+        ("01_04", 138, {"L8": "=IRR(N3:N10)", "J12": "=-J7*J13-J36*J13"}),
         ("06_02", 44, {"G24": "=G10/365*G19", "C29": "=-(C24-C14)"}),
         ("06_09", 70, {"H8": "=H7/C7-1", "L28": "=L27/L7"}),
         ("08_03", 59, {"C26": "=-C39*C22", "F27": "=F26/F24"}),
         ("14_07", 20, {"C18": "=-(C10-C12)*C14*12", "G20": "=SUM(C20:F20)"}),
         ("02_05", 72, {"C13": "=-MIN(C9,C12)", "F35": "=F7"}),
+        ("06_11", 24, {"F9": "=E9*(1+F10)", "H9": "=SUM(D9:G9)", "H12": "=H11/H9", "H15": "=G15"}),
     ],
 )
 def test_template_schedule_completions_are_exactly_scoped(
@@ -59,7 +60,60 @@ def test_template_completion_router_is_noop_outside_six_matched_tasks(
         shutil.copy2(TEMPLATE_ROOT / item["spreadsheet_path"], output)
         if complete_template_schedules(output):
             changed.add(item["id"])
-    assert changed == {"01_04", "02_05", "06_02", "06_09", "08_03", "14_07"}
+    assert changed == {
+        "01_01",
+        "01_03",
+        "01_04",
+        "01_05",
+        "01_06",
+        "01_07",
+        "01_09",
+        "02_05",
+        "03_01",
+        "03_03",
+        "03_04",
+        "06_02",
+        "06_04",
+        "06_07",
+        "06_09",
+        "06_11",
+        "08_03",
+        "09_01",
+        "09_02",
+        "09_03",
+        "09_04",
+        "14_07",
+    }
+
+
+@pytest.mark.parametrize("task_id", ["01_03", "01_05", "01_06"])
+def test_bond_accounting_family_is_completed_from_labels(
+    tmp_path: Path, task_id: str,
+) -> None:
+    dataset = json.loads((TEMPLATE_ROOT / "dataset.json").read_text(encoding="utf-8"))
+    item = next(row for row in dataset if row["id"] == task_id)
+    output = tmp_path / f"{task_id}.xlsx"
+    shutil.copy2(TEMPLATE_ROOT / item["spreadsheet_path"], output)
+
+    changes = complete_template_schedules(output)
+
+    assert changes
+    workbook = load_workbook(output, data_only=False)
+    try:
+        worksheet = workbook.active
+        assert any(
+            "IRR(" in str(cell.value)
+            for row in worksheet.iter_rows()
+            for cell in row
+        )
+        labels = {
+            str(worksheet.cell(row, 2).value or "").casefold(): row
+            for row in range(1, worksheet.max_row + 1)
+        }
+        pretax = next(row for label, row in labels.items() if label in {"pretax income", "pretax profit"})
+        assert all(worksheet.cell(pretax, column).value is not None for column in range(3, 7))
+    finally:
+        workbook.close()
 
 
 def test_template_sign_guard_only_repairs_model_written_dividend_formula(

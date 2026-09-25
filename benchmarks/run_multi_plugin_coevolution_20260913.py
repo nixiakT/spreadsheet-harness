@@ -229,19 +229,19 @@ def build_arms(
     candidates = enumerate_single_plugin_candidates(
         registry,
         base,
-        config_variants={"profile-deterministic-compact": [{"max-regions-per-sheet": 4}]},
+        config_variants={"observe-profile-compact": [{"max-regions-per-sheet": 4}]},
     )
     coordination = next(
         item for item in candidates
-        if item.operation == "enable" and item.target == "skill-spreadsheet-coordination"
+        if item.operation == "enable" and item.target == "knowledge-coordination"
     ).composition.spec
     core = next(
         item for item in candidates
-        if item.operation == "enable" and item.target == "skill-spreadsheet-core"
+        if item.operation == "enable" and item.target == "knowledge-core"
     ).composition.spec
     profile4 = next(
         item for item in candidates
-        if item.operation == "configure" and item.target == "profile-deterministic-compact"
+        if item.operation == "configure" and item.target == "observe-profile-compact"
     ).composition.spec
     specs = {
         "h0d0": base,

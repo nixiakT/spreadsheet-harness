@@ -37,6 +37,41 @@ EvolutionSurface = Literal["config", "implementation", "prompt", "description"]
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?$")
 
+# Canonical plugin names use ``<kind>-<responsibility>``.  The legacy names
+# are accepted at input boundaries so historical run specs and compositions
+# remain replayable, but all newly resolved manifests emit the canonical form.
+LEGACY_PLUGIN_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "runtime-code-interpreter": "act-code-interpreter",
+        "runtime-native-tools": "act-native-tools",
+        "runtime-code-plus-formula-validation": "act-code-plus-formula-validation",
+        "profile-deterministic-full": "observe-profile-full",
+        "profile-deterministic-compact": "observe-profile-compact",
+        "policy-bare": "control-bare",
+        "policy-profile": "control-profile",
+        "policy-native": "control-native",
+        "policy-ours": "control-ours",
+        "skill-spreadsheet-core": "knowledge-core",
+        "skill-spreadsheet-structure": "knowledge-structure",
+        "skill-spreadsheet-formula": "knowledge-formula",
+        "skill-spreadsheet-financial-model": "knowledge-financial-model",
+        "skill-spreadsheet-manipulation": "knowledge-manipulation",
+        "skill-spreadsheet-analysis": "knowledge-analysis",
+        "skill-spreadsheet-visualization": "knowledge-visualization",
+        "skill-spreadsheet-verification": "knowledge-verification",
+        "skill-spreadsheet-memory": "knowledge-memory",
+        "skill-spreadsheet-coordination": "knowledge-coordination",
+        "verifier-formula-runtime": "verify-formula-runtime",
+    }
+)
+
+
+def canonical_plugin_name(name: str) -> str:
+    """Normalize a plugin name while preserving compatibility with old specs."""
+
+    normalized = str(name).strip()
+    return LEGACY_PLUGIN_ALIASES.get(normalized, normalized)
+
 ALLOWED_PLUGIN_HOOKS = frozenset(
     {
         "before_task",
@@ -462,13 +497,18 @@ class CompositionSpec:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _identifier(self.name, label="composition name"))
-        normalized = tuple(_identifier(name, label="plugin name") for name in self.plugins)
+        normalized = tuple(
+            _identifier(canonical_plugin_name(name), label="plugin name")
+            for name in self.plugins
+        )
         if not normalized or len(normalized) != len(set(normalized)):
             raise ValueError("A composition needs unique plugin names")
         object.__setattr__(self, "plugins", normalized)
         normalized_overrides: list[tuple[str, tuple[tuple[str, Scalar], ...]]] = []
         for raw_name, raw_values in self._overrides:
-            plugin_name = _identifier(raw_name, label="override plugin")
+            plugin_name = _identifier(
+                canonical_plugin_name(raw_name), label="override plugin"
+            )
             values = tuple(
                 sorted(
                     (
@@ -580,6 +620,7 @@ class PluginRegistry:
         return tuple(self._plugins[name] for name in sorted(self._plugins))
 
     def get(self, name: str) -> PluginContract:
+        name = canonical_plugin_name(name)
         try:
             return self._plugins[name]
         except KeyError as exc:
@@ -665,15 +706,15 @@ def execution_plan(composition: ResolvedComposition) -> PluginExecutionPlan:
             "A single-stage composition requires action.spreadsheet and policy.solve"
         )
     tool_modes = {
-        "runtime-code-interpreter": "code-only",
-        "runtime-code-plus-formula-validation": "code-plus-formula-validation",
-        "runtime-native-tools": "native",
+        "act-code-interpreter": "code-only",
+        "act-code-plus-formula-validation": "code-plus-formula-validation",
+        "act-native-tools": "native",
     }
     policies = {
-        "policy-bare": "bare",
-        "policy-profile": "profile",
-        "policy-native": "native",
-        "policy-ours": "ours",
+        "control-bare": "bare",
+        "control-profile": "profile",
+        "control-native": "native",
+        "control-ours": "ours",
     }
     try:
         tool_mode = tool_modes[action.contract.name]
@@ -686,8 +727,8 @@ def execution_plan(composition: ResolvedComposition) -> PluginExecutionPlan:
     profile_config: Mapping[str, Scalar] = MappingProxyType({})
     if profile is not None:
         profile_modes = {
-            "profile-deterministic-full": "full",
-            "profile-deterministic-compact": "compact",
+            "observe-profile-full": "full",
+            "observe-profile-compact": "compact",
         }
         try:
             profile_mode = profile_modes[profile.contract.name]
@@ -1078,9 +1119,10 @@ def enumerate_single_plugin_candidates(
                 replaced=current_name,
             )
 
-    for plugin_name, variants in sorted((config_variants or {}).items()):
+    for raw_plugin_name, variants in sorted((config_variants or {}).items()):
+        plugin_name = canonical_plugin_name(raw_plugin_name)
         if plugin_name not in active:
-            raise ValueError(f"Config variants target inactive plugin {plugin_name!r}")
+            raise ValueError(f"Config variants target inactive plugin {raw_plugin_name!r}")
         for index, variant in enumerate(variants, start=1):
             overrides = {name: dict(values) for name, values in base_overrides.items()}
             overrides[plugin_name] = {**overrides.get(plugin_name, {}), **dict(variant)}
@@ -1220,15 +1262,15 @@ def _strategy(
 
 
 _PLUGIN_FILE_OWNERSHIP: Mapping[str, Mapping[EvolutionSurface, tuple[str, ...]]] = {
-    "runtime-code-interpreter": {
+    "act-code-interpreter": {
         "description": ("src/spreadsheet_harness/code_interpreter.py",),
         "implementation": ("src/spreadsheet_harness/code_interpreter.py",),
     },
-    "runtime-native-tools": {
+    "act-native-tools": {
         "description": ("src/spreadsheet_harness/tools.py",),
         "implementation": ("src/spreadsheet_harness/tools.py",),
     },
-    "runtime-code-plus-formula-validation": {
+    "act-code-plus-formula-validation": {
         "description": ("src/spreadsheet_harness/tools.py",),
         "implementation": (
             "src/spreadsheet_harness/code_interpreter.py",
@@ -1236,23 +1278,23 @@ _PLUGIN_FILE_OWNERSHIP: Mapping[str, Mapping[EvolutionSurface, tuple[str, ...]]]
             "src/spreadsheet_harness/tools.py",
         ),
     },
-    "profile-deterministic-full": {
+    "observe-profile-full": {
         "implementation": ("src/spreadsheet_harness/preprocess.py",),
     },
-    "profile-deterministic-compact": {
+    "observe-profile-compact": {
         "implementation": ("src/spreadsheet_harness/preprocess.py",),
     },
-    "policy-bare": {"prompt": ("src/spreadsheet_harness/arms.py",)},
-    "policy-profile": {"prompt": ("src/spreadsheet_harness/arms.py",)},
-    "policy-native": {
+    "control-bare": {"prompt": ("src/spreadsheet_harness/arms.py",)},
+    "control-profile": {"prompt": ("src/spreadsheet_harness/arms.py",)},
+    "control-native": {
         "prompt": ("src/spreadsheet_harness/arms.py",),
         "implementation": ("src/spreadsheet_harness/arms.py",),
     },
-    "policy-ours": {
+    "control-ours": {
         "prompt": ("src/spreadsheet_harness/arms.py",),
         "implementation": ("src/spreadsheet_harness/arms.py",),
     },
-    "verifier-formula-runtime": {
+    "verify-formula-runtime": {
         "implementation": (
             "src/spreadsheet_harness/formula_runtime.py",
             "src/spreadsheet_harness/arms.py",
@@ -1265,7 +1307,7 @@ _PLUGIN_FILE_OWNERSHIP: Mapping[str, Mapping[EvolutionSurface, tuple[str, ...]]]
     # addition to its prompt.  Keeping this ownership explicit is what lets a
     # continuous evolution candidate change a bounded repair rule without
     # acquiring write access to the rest of the harness.
-    "skill-spreadsheet-financial-model": {
+    "knowledge-financial-model": {
         "implementation": ("src/spreadsheet_harness/financial_model_repairs.py",),
     },
 }
@@ -1315,7 +1357,7 @@ def default_plugin_registry() -> PluginRegistry:
     )
     contracts = (
             PluginContract(
-                "runtime-code-interpreter",
+                "act-code-interpreter",
                 "1.0.0",
                 "act",
                 "runtime.code-interpreter",
@@ -1332,7 +1374,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "runtime-native-tools",
+                "act-native-tools",
                 "1.0.0",
                 "act",
                 "runtime.native-tools",
@@ -1349,7 +1391,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "runtime-code-plus-formula-validation",
+                "act-code-plus-formula-validation",
                 "1.0.0",
                 "act",
                 "runtime.code-plus-formula-validation",
@@ -1366,7 +1408,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "profile-deterministic-full",
+                "observe-profile-full",
                 "1.1.0",
                 "observe",
                 "profile.deterministic-full",
@@ -1383,7 +1425,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "profile-deterministic-compact",
+                "observe-profile-compact",
                 "1.1.0",
                 "observe",
                 "profile.deterministic-compact",
@@ -1401,7 +1443,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "policy-bare",
+                "control-bare",
                 "1.0.0",
                 "control",
                 "policy.bare",
@@ -1417,7 +1459,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "policy-profile",
+                "control-profile",
                 "1.0.0",
                 "control",
                 "policy.profile",
@@ -1433,7 +1475,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "policy-native",
+                "control-native",
                 "1.0.0",
                 "control",
                 "policy.native",
@@ -1449,14 +1491,15 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "policy-ours",
-                "1.28.0",
+                "control-ours",
+                "1.29.0",
                 "control",
                 "policy.ours",
                 frozenset({"policy.solve", "policy.debugging-detector"}),
                 frozenset({"action.spreadsheet", "context.workbook-profile", "model.request"}),
                 frozenset({"before_model_request", "after_tool"}),
-                evolvable_surfaces=frozenset({"prompt", "implementation"}),
+                config_fields=(ConfigField("grounded-v2-execution", "boolean", False),),
+                evolvable_surfaces=frozenset({"config", "prompt", "implementation"}),
                 spreadsheet_capabilities=frozenset({"composition"}),
                 evolution_strategy=_strategy(
                     ("routing-trace", "unused-capability", "tool-sequence"),
@@ -1465,7 +1508,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-core",
+                "knowledge-core",
                 "1.0.0",
                 "knowledge",
                 "knowledge.spreadsheet-core",
@@ -1481,7 +1524,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-structure",
+                "knowledge-structure",
                 "1.0.0",
                 "knowledge",
                 "knowledge.spreadsheet-structure",
@@ -1497,7 +1540,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-formula",
+                "knowledge-formula",
                 "1.1.0",
                 "knowledge",
                 "knowledge.spreadsheet-formula",
@@ -1513,7 +1556,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-financial-model",
+                "knowledge-financial-model",
                 "1.3.0",
                 "knowledge",
                 "knowledge.spreadsheet-financial-model",
@@ -1534,7 +1577,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-manipulation",
+                "knowledge-manipulation",
                 "1.1.0",
                 "knowledge",
                 "knowledge.spreadsheet-manipulation",
@@ -1550,7 +1593,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-analysis",
+                "knowledge-analysis",
                 "1.0.0",
                 "knowledge",
                 "knowledge.spreadsheet-analysis",
@@ -1566,7 +1609,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-visualization",
+                "knowledge-visualization",
                 "1.0.0",
                 "knowledge",
                 "knowledge.spreadsheet-visualization",
@@ -1582,7 +1625,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-verification",
+                "knowledge-verification",
                 "1.1.0",
                 "knowledge",
                 "knowledge.spreadsheet-verification",
@@ -1598,7 +1641,7 @@ def default_plugin_registry() -> PluginRegistry:
                 ),
             ),
             PluginContract(
-                "skill-spreadsheet-memory",
+                "knowledge-memory",
                 "1.0.0",
                 "knowledge",
                 "knowledge.spreadsheet-memory",
@@ -1620,7 +1663,7 @@ def default_plugin_registry() -> PluginRegistry:
             # has to supply the SKILL.md and pass the same paired gates as an
             # edit to an existing plugin.
             PluginContract(
-                "skill-spreadsheet-coordination",
+                "knowledge-coordination",
                 "0.1.0",
                 "knowledge",
                 "knowledge.spreadsheet-coordination",
@@ -1648,7 +1691,7 @@ def default_plugin_registry() -> PluginRegistry:
                 synthesis_template="knowledge-skill-v1",
             ),
             PluginContract(
-                "verifier-formula-runtime",
+                "verify-formula-runtime",
                 "1.0.0",
                 "verify",
                 "verification.formula-runtime",
@@ -1709,17 +1752,17 @@ def default_plugin_registry() -> PluginRegistry:
 SPREADSHEET_HARNESS_BASIC_COMPOSITION = CompositionSpec.create(
     "spreadsheet-harness-basic",
     (
-        "runtime-code-plus-formula-validation",
-        "profile-deterministic-compact",
-        "policy-ours",
-        "skill-spreadsheet-structure",
-        "skill-spreadsheet-formula",
-        "skill-spreadsheet-manipulation",
-        "skill-spreadsheet-analysis",
-        "skill-spreadsheet-visualization",
-        "skill-spreadsheet-verification",
-        "skill-spreadsheet-memory",
-        "verifier-formula-runtime",
+        "act-code-plus-formula-validation",
+        "observe-profile-compact",
+        "control-ours",
+        "knowledge-structure",
+        "knowledge-formula",
+        "knowledge-manipulation",
+        "knowledge-analysis",
+        "knowledge-visualization",
+        "knowledge-verification",
+        "knowledge-memory",
+        "verify-formula-runtime",
         "repair-date-text",
     ),
 )
@@ -1727,11 +1770,11 @@ SPREADSHEET_HARNESS_BASIC_COMPOSITION = CompositionSpec.create(
 SPREADSHEET_HARNESS_CORE_COMPOSITION = CompositionSpec.create(
     "spreadsheet-harness-core",
     (
-        "runtime-code-plus-formula-validation",
-        "profile-deterministic-compact",
-        "policy-ours",
-        "skill-spreadsheet-core",
-        "verifier-formula-runtime",
+        "act-code-plus-formula-validation",
+        "observe-profile-compact",
+        "control-ours",
+        "knowledge-core",
+        "verify-formula-runtime",
         "repair-date-text",
     ),
 )
@@ -1740,30 +1783,30 @@ SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION = CompositionSpec.create(
     "spreadsheet-harness-financial",
     (
         *SPREADSHEET_HARNESS_BASIC_COMPOSITION.plugins,
-        "skill-spreadsheet-financial-model",
+        "knowledge-financial-model",
     ),
 )
 
 
 ARM_COMPOSITIONS: Mapping[str, CompositionSpec] = MappingProxyType(
     {
-        "bare": CompositionSpec.create("bare", ("runtime-code-interpreter", "policy-bare")),
+        "bare": CompositionSpec.create("bare", ("act-code-interpreter", "control-bare")),
         "profile": CompositionSpec.create(
             "profile",
-            ("runtime-code-interpreter", "profile-deterministic-full", "policy-profile"),
+            ("act-code-interpreter", "observe-profile-full", "control-profile"),
         ),
-        "native": CompositionSpec.create("native", ("runtime-native-tools", "policy-native")),
+        "native": CompositionSpec.create("native", ("act-native-tools", "control-native")),
         "paper": CompositionSpec.create("paper", ("workflow-paper",)),
         # Clean-room Spreadsheet-RL ablations.  These names are intentionally
         # explicit so benchmark reports do not conflate a tool-interface proxy
         # with the paper's RL-trained checkpoint.
         "spreadsheet-rl-minimal": CompositionSpec.create(
             "spreadsheet-rl-minimal",
-            ("runtime-code-plus-formula-validation", "policy-bare"),
+            ("act-code-plus-formula-validation", "control-bare"),
         ),
         "spreadsheet-rl-native": CompositionSpec.create(
             "spreadsheet-rl-native",
-            ("runtime-native-tools", "policy-native"),
+            ("act-native-tools", "control-native"),
         ),
         "paper-vision": CompositionSpec.create("paper-vision", ("workflow-paper",)),
         "spreadsheet-agent": CompositionSpec.create(
@@ -1774,9 +1817,9 @@ ARM_COMPOSITIONS: Mapping[str, CompositionSpec] = MappingProxyType(
         "ours": CompositionSpec.create(
             "ours",
             (
-                "runtime-code-interpreter",
-                "profile-deterministic-compact",
-                "policy-ours",
+                "act-code-interpreter",
+                "observe-profile-compact",
+                "control-ours",
                 "repair-date-text",
             ),
         ),
@@ -1786,18 +1829,18 @@ ARM_COMPOSITIONS: Mapping[str, CompositionSpec] = MappingProxyType(
 PLUGEOLVE_SEED_COMPOSITION = CompositionSpec.create(
     "plugevolve-seed",
     (
-        "runtime-code-plus-formula-validation",
-        "profile-deterministic-compact",
-        "policy-ours",
-        "skill-spreadsheet-structure",
-        "skill-spreadsheet-formula",
-        "skill-spreadsheet-financial-model",
-        "skill-spreadsheet-manipulation",
-        "skill-spreadsheet-analysis",
-        "skill-spreadsheet-visualization",
-        "skill-spreadsheet-verification",
-        "skill-spreadsheet-memory",
-        "verifier-formula-runtime",
+        "act-code-plus-formula-validation",
+        "observe-profile-compact",
+        "control-ours",
+        "knowledge-structure",
+        "knowledge-formula",
+        "knowledge-financial-model",
+        "knowledge-manipulation",
+        "knowledge-analysis",
+        "knowledge-visualization",
+        "knowledge-verification",
+        "knowledge-memory",
+        "verify-formula-runtime",
         "repair-date-text",
     ),
 )
@@ -1835,6 +1878,7 @@ __all__ = [
     "ALLOWED_PLUGIN_HOOKS",
     "ARM_COMPOSITIONS",
     "BUILTIN_COMPOSITIONS",
+    "LEGACY_PLUGIN_ALIASES",
     "KERNEL_CAPABILITIES",
     "PLUGEOLVE_SEED_COMPOSITION",
     "SPREADSHEET_HARNESS_BASIC_COMPOSITION",
@@ -1858,6 +1902,7 @@ __all__ = [
     "ResolvedComposition",
     "SpreadsheetCapability",
     "contextual_marginal_contribution",
+    "canonical_plugin_name",
     "default_plugin_registry",
     "enumerate_single_plugin_candidates",
     "execution_plan",

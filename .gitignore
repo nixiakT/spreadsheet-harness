@@ -12,6 +12,7 @@ build/
 runs/
 benchmarks/data/
 benchmarks/results/
+benchmarkresults/
 diagnostics/
 .DS_Store
 

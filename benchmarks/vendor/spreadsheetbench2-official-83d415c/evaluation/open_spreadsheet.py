@@ -2,9 +2,28 @@ import os
 import argparse
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from tqdm import tqdm
+
+
+def _service_port() -> int:
+    """Return the per-worker UNO port.
+
+    The historical evaluator used 2002 unconditionally.  That is safe only
+    for one process; task-level screening can run several evaluator
+    subprocesses, so callers may assign an isolated port through the
+    environment without changing the official command-line contract.
+    """
+    raw = os.environ.get("SPREADSHEETBENCH_LO_PORT", "2002")
+    try:
+        port = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SPREADSHEETBENCH_LO_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError("SPREADSHEETBENCH_LO_PORT must be between 1 and 65535")
+    return port
 
 
 def find_libreoffice() -> str:
@@ -41,6 +60,7 @@ LIBREOFFICE_PROGRAM_DIR = _find_libreoffice_program_dir()
 
 # Global variable to hold the LibreOffice process
 _libreoffice_process = None
+_libreoffice_profile = None
 
 
 def _env_for_lo_python() -> dict:
@@ -74,14 +94,15 @@ def _soffice_bin() -> str:
 
 def _check_service_ready() -> bool:
     """Check whether the LibreOffice UNO service is ready."""
-    check_code = '''
+    port = _service_port()
+    check_code = f'''
 import uno
 try:
     local_context = uno.getComponentContext()
     resolver = local_context.ServiceManager.createInstanceWithContext(
         "com.sun.star.bridge.UnoUrlResolver", local_context
     )
-    resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
+    resolver.resolve("uno:socket,host=localhost,port={port};urp;StarOffice.ComponentContext")
     print("OK")
 except:
     print("FAIL")
@@ -111,19 +132,27 @@ except:
 
 def start_libreoffice_service() -> bool:
     """Start the LibreOffice headless service."""
-    global _libreoffice_process
+    global _libreoffice_process, _libreoffice_profile
 
     if _libreoffice_process is not None:
         print("LibreOffice service is already running")
         return True
 
     soffice = _soffice_bin()
+    # LibreOffice locks its user profile.  Give every evaluator subprocess a
+    # private profile as well as a private UNO endpoint; otherwise parallel
+    # workers can still block before they reach the socket listener.
+    profile_dir = Path(tempfile.mkdtemp(prefix="spreadsheetbench-lo-"))
+    _libreoffice_profile = profile_dir
+    profile_uri = profile_dir.resolve().as_uri()
+    port = _service_port()
     cmd = [
         soffice,
         "--headless",
-        "--accept=socket,host=127.0.0.1,port=2002;urp;",
+        f"--accept=socket,host=127.0.0.1,port={port};urp;",
         "--norestore",
-        "--nofirststartwizard"
+        "--nofirststartwizard",
+        f"-env:UserInstallation={profile_uri}",
     ]
 
     try:
@@ -152,7 +181,7 @@ def start_libreoffice_service() -> bool:
 
 def stop_libreoffice_service() -> None:
     """Stop the LibreOffice service."""
-    global _libreoffice_process
+    global _libreoffice_process, _libreoffice_profile
 
     if _libreoffice_process is None:
         return
@@ -168,6 +197,9 @@ def stop_libreoffice_service() -> None:
         print(f"Error stopping LibreOffice service: {e}")
     finally:
         _libreoffice_process = None
+        if _libreoffice_profile is not None:
+            shutil.rmtree(_libreoffice_profile, ignore_errors=True)
+            _libreoffice_profile = None
 
 
 def batch_open_files(files: list) -> None:
@@ -185,6 +217,7 @@ def batch_open_files(files: list) -> None:
         json.dump([os.path.abspath(f) for f in files], fp)
 
     # Batch processing script - establish UNO connection only once
+    port = _service_port()
     code = f'''
 import uno
 import json
@@ -220,7 +253,7 @@ try:
     resolver = local_context.ServiceManager.createInstanceWithContext(
         "com.sun.star.bridge.UnoUrlResolver", local_context
     )
-    context = resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
+    context = resolver.resolve("uno:socket,host=localhost,port={port};urp;StarOffice.ComponentContext")
     desktop = context.ServiceManager.createInstanceWithContext(
         "com.sun.star.frame.Desktop", context
     )

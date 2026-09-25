@@ -16,6 +16,7 @@ from spreadsheet_harness.spreadsheetbench_v1 import (
     summarize_v1_scores,
     v1_planner_replay_plan,
 )
+from spreadsheet_harness.spreadsheetbench_v1 import _official_cells, _official_answer_segments
 
 
 def _book(path: Path, value: object, *, title: str = "Sheet") -> None:
@@ -33,6 +34,18 @@ def test_official_compare_v1_uses_first_sheet_for_unqualified_range(tmp_path: Pa
     _book(golden, 1.234)
     _book(candidate, 1.23)
     assert official_compare_v1(golden, candidate, "A1")
+
+
+def test_v1_answer_position_parser_handles_legacy_ranges() -> None:
+    assert _official_answer_segments("'Received'!'Received!A1:G16") == [
+        ("Received", "A1:G16")
+    ]
+    assert _official_answer_segments("Sheet3'!A:G,'Sheet4'!A:G") == [
+        ("Sheet3", "A:G"),
+        ("Sheet4", "A:G"),
+    ]
+    assert _official_cells("G12：J15")[:2] == ["G12", "G13"]
+    assert len(_official_cells("A:G", max_row=3)) == 21
 
 
 def test_v1_instruction_keeps_provider_failure_not_scored(tmp_path: Path) -> None:

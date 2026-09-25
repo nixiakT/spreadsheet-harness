@@ -600,8 +600,8 @@ def test_profile_truncation_routes_to_deterministic_provider_recomposition(tmp_p
     )
     assert route is not None
     assert route.operation == "replace"
-    assert route.target_plugin == "profile-deterministic-compact"
-    assert route.replacement_plugin == "profile-deterministic-full"
+    assert route.target_plugin == "observe-profile-compact"
+    assert route.replacement_plugin == "observe-profile-full"
     assert route.to_dict()["method_operator"] == "recomposition"
 
 
@@ -654,7 +654,7 @@ def test_validated_multi_plugin_handoff_failure_routes_to_synthesis(tmp_path):
     )
     assert route is not None
     assert route.operation == "synthesize"
-    assert route.target_plugin == "skill-spreadsheet-coordination"
+    assert route.target_plugin == "knowledge-coordination"
     assert "multi-plugin-handoff-locally-validated-but-evaluator-failed" in route.reasons
 
 
@@ -708,8 +708,8 @@ def test_router_emits_joint_route_for_interface_and_domain_failures(tmp_path):
     mutations = route.mutation_items()
     assert {item.group for item in mutations} == {"harness", "domain"}
     assert {item.target_plugin for item in mutations} == {
-        "skill-spreadsheet-coordination",
-        "skill-spreadsheet-formula",
+        "knowledge-coordination",
+        "knowledge-formula",
     }
     assert route.to_dict()["scope"] == "joint"
     assert len(route.to_dict()["mutations"]) == 2
@@ -960,7 +960,7 @@ def test_joint_materialization_is_atomic_and_preserves_kernel_manifest(tmp_path,
     composition = _composition_from_document(
         json.loads((candidate_dir / "composition.json").read_text(encoding="utf-8"))
     )
-    assert "skill-spreadsheet-coordination" in composition.plugins
+    assert "knowledge-coordination" in composition.plugins
     assert registry.resolve(composition).to_dict()["kernel_capabilities"] == sorted(
         KERNEL_CAPABILITIES
     )

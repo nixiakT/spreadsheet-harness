@@ -66,12 +66,12 @@ def test_failure_attribution_distinguishes_gap_capability_and_infrastructure() -
 
     assert gap.source == "capability-gap"
     assert gap.action == "enable-plugin"
-    assert gap.candidate_plugins[0]["plugin"] == "skill-spreadsheet-formula"
+    assert gap.candidate_plugins[0]["plugin"] == "knowledge-formula"
     assert capability.source == "capability"
     assert capability.action == "evolve-plugin"
     assert {item["plugin"] for item in capability.target_plugins} == {
-        "skill-spreadsheet-formula",
-        "skill-spreadsheet-verification",
+        "knowledge-formula",
+        "knowledge-verification",
     }
     assert infrastructure.source == "infrastructure"
     assert infrastructure.action == "retry-infrastructure"
@@ -93,8 +93,8 @@ def test_unactivated_selected_provider_routes_to_composition_repair() -> None:
     assert attribution.source == "composition"
     assert attribution.action == "repair-composition"
     assert {item["plugin"] for item in attribution.target_plugins} == {
-        "profile-deterministic-compact",
-        "policy-ours",
+        "observe-profile-compact",
+        "control-ours",
     }
 
 

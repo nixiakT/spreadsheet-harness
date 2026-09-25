@@ -26,6 +26,10 @@ from run_codex_spreadsheetbench_v2 import (
     load_tasks,
     recalculate_workbook,
     sha256,
+    skill_names,
+    skill_package_manifest,
+    skill_packages,
+    skill_sha256,
     workbook_is_valid,
     write_json,
 )
@@ -51,8 +55,9 @@ def dsh_prompt(
     task: dict[str, Any], workspace: Path, skill_name: str | None
 ) -> str:
     skill_note = (
-        f"Before doing spreadsheet work, call the `skill` tool to load `{skill_name}` and follow it.\n"
-        "This is the only benchmark skill available in the DeepSeek Harness skill registry."
+        "Before doing spreadsheet work, call the `skill` tool once for each of the following "
+        f"financial skills: {skill_name}. Follow all of them throughout the task.\n"
+        "These are the only benchmark skills available in the DeepSeek Harness skill registry."
         if skill_name is not None
         else "No benchmark skill is installed or loaded for this run. Use the DeepSeek Harness's native capabilities."
     )
@@ -116,10 +121,12 @@ def audit_state(audit_path: Path, slug: str) -> tuple[int, bool]:
     return accepted, exceeded
 
 
-def session_skill_loaded(dsh_home: Path, skill_name: str) -> bool:
+def session_skill_loaded(dsh_home: Path, skill_name: str | list[str]) -> bool | dict[str, bool]:
+    names = [skill_name] if isinstance(skill_name, str) else list(skill_name)
+    loaded = {name: False for name in names}
     sessions = dsh_home / "sessions"
     if not sessions.exists():
-        return False
+        return loaded if len(names) > 1 else False
     # Headless DSH stores sessions as zstd-compressed JSONL.  Keep support for
     # plain JSONL too, since older/package-local profiles may use that format.
     for path in sessions.rglob("*.jsonl*"):
@@ -149,9 +156,11 @@ def session_skill_loaded(dsh_home: Path, skill_name: str) -> bool:
                 data = event if isinstance(event, dict) else {}
             if event.get("type") == "tool/call" and data.get("name") == "skill":
                 arguments = data.get("arguments", "")
-                if skill_name in str(arguments):
-                    return True
-    return False
+                arguments_text = str(arguments)
+                for name in names:
+                    if name in arguments_text:
+                        loaded[name] = True
+    return loaded if len(names) > 1 else loaded[names[0]]
 
 
 def prepare_dsh_home(
@@ -165,9 +174,9 @@ def prepare_dsh_home(
     profile = dsh_home / "profiles/headless"
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     if skill is not None:
-        skill_dir = dsh_home / "skills" / skill.parent.name
-        skill_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copy2(skill, skill_dir / "SKILL.md")
+        for package in skill_packages(skill):
+            skill_dir = dsh_home / "skills" / package.parent.name
+            shutil.copytree(package.parent, skill_dir, dirs_exist_ok=True)
     else:
         # Prevent a reused workspace from inheriting a previously installed skill.
         shutil.rmtree(dsh_home / "skills", ignore_errors=True)
@@ -346,7 +355,7 @@ def run_one(
             "--profile",
             "headless",
             dsh_prompt(
-                task, task_root, skill.parent.name if skill is not None else None
+                task, task_root, ", ".join(skill_names(skill)) if skill is not None else None
             ),
         ]
         try:
@@ -412,16 +421,18 @@ def run_one(
         "started_at": started,
         "elapsed_seconds": round(time.time() - started, 3),
         "skill_enabled": skill is not None,
-        "skill_name": skill.parent.name if skill is not None else None,
+        "skill_name": ", ".join(skill_names(skill)) if skill is not None else None,
+        "skill_names": skill_names(skill),
+        "skill_packages": skill_package_manifest(skill),
         "skill_path": str(skill) if skill is not None else None,
-        "skill_sha256": sha256(skill) if skill is not None else None,
+        "skill_sha256": skill_sha256(skill),
         "skill_load_mode": (
             "official-dsh-skill-filesystem-and-skill-tool"
             if skill is not None
             else "none"
         ),
         "skill_loaded_in_session": (
-            session_skill_loaded(dsh_home, skill.parent.name)
+            session_skill_loaded(dsh_home, skill_names(skill))
             if skill is not None
             else False
         ),
@@ -492,8 +503,13 @@ def main() -> int:
         parser.error("parallelism, max-turns, and task-timeout must be positive")
     if not args.dsh_bin.is_file() or not os.access(args.dsh_bin, os.X_OK):
         parser.error(f"official dsh binary is not executable: {args.dsh_bin}")
-    if args.skill is not None and not args.skill.is_file():
+    if args.skill is not None and not args.skill.exists():
         parser.error(f"skill not found: {args.skill}")
+    if args.skill is not None:
+        try:
+            skill_packages(args.skill)
+        except ValueError as exc:
+            parser.error(str(exc))
     if not args.api_key_file.is_file() or not args.api_key_file.read_text(
         encoding="utf-8"
     ).strip():
@@ -525,11 +541,15 @@ def main() -> int:
             "parallelism": args.parallelism,
             "skill_enabled": args.skill is not None,
             "skill": str(args.skill) if args.skill is not None else None,
-            "skill_sha256": sha256(args.skill) if args.skill is not None else None,
+            "skill_sha256": skill_sha256(args.skill),
             "base_url": args.base_url,
             "task_plan": [task["_task_id"] for task in tasks],
         },
     )
+    if args.skill is not None and args.skill.is_dir():
+        manifest = json.loads((args.run_root / "manifest.json").read_text(encoding="utf-8"))
+        manifest["skill_packages"] = skill_package_manifest(args.skill)
+        write_json(args.run_root / "manifest.json", manifest)
     port = free_local_port()
     audit_path = args.run_root / "proxy-requests.jsonl"
     proxy_log = args.run_root / "proxy.log"

@@ -13,7 +13,55 @@ from spreadsheet_harness.financial_model_repairs import (
     complete_financial_model_runtime_actions,
     complete_isolated_formula_holes,
     complete_revenue_growth_schedule,
+    translate_repeated_financial_period_formulas,
 )
+
+
+def test_translate_repeated_financial_period_formulas_uses_excel_fill_semantics(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.xlsx"
+    output = tmp_path / "output.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Schedule"
+    worksheet["H2"] = 10
+    worksheet["I2"] = 20
+    worksheet["J2"] = 30
+    worksheet["K2"] = 40
+    worksheet["H4"] = 0.1
+    worksheet["I4"] = 0.2
+    worksheet["J4"] = 0.3
+    worksheet["K4"] = 0.4
+    workbook.save(source)
+    workbook.close()
+    shutil.copy2(source, output)
+
+    workbook = load_workbook(output, data_only=False)
+    worksheet = workbook["Schedule"]
+    for column in range(8, 12):
+        worksheet.cell(3, column).value = "=H2*H4"
+        worksheet.cell(5, column).value = "=$H$2*$H$4"
+    workbook.save(output)
+    workbook.close()
+
+    changed = translate_repeated_financial_period_formulas(output, source_path=source)
+    assert [item["target"] for item in changed] == ["I3", "J3", "K3"]
+    workbook = load_workbook(output, data_only=False)
+    worksheet = workbook["Schedule"]
+    assert [worksheet.cell(3, column).value for column in range(8, 12)] == [
+        "=H2*H4",
+        "=I2*I4",
+        "=J2*J4",
+        "=K2*K4",
+    ]
+    assert [worksheet.cell(5, column).value for column in range(8, 12)] == [
+        "=$H$2*$H$4",
+        "=$H$2*$H$4",
+        "=$H$2*$H$4",
+        "=$H$2*$H$4",
+    ]
+    workbook.close()
 
 
 def _rewrite_zip_member(path: Path, member_name: str, callback) -> None:
@@ -100,6 +148,31 @@ def test_complete_revenue_growth_schedule_fills_only_calculation_rows(tmp_path: 
     assert worksheet["C13"].value == "=C7*(1+C12)"
     assert worksheet["D13"].value == "=C13*(1+D12)"
     assert worksheet["C5"].value == 0.3
+    workbook.close()
+
+
+def test_aif_monthly_operating_completion_is_instruction_grounded(tmp_path: Path) -> None:
+    """The recurring AIF clauses are filled from labels and linked period headers."""
+    source = Path("benchmarks/data/spreadsheetbench-v2/Financial_Model/spreadsheet/05_Project AIF/05_02_AIF_input.xlsx")
+    if not source.is_file():
+        return
+    output = tmp_path / "aif.xlsx"
+    shutil.copy2(source, output)
+    instruction = (
+        "In the Workings Cost sheet, compute cumulative salary costs from Apr-25 to Jun-33, "
+        "then link Ticket Size per Portfolio for all tranches from Dashboard including Pre-Op Cost. "
+        "In the Revenue sheet, calculate monthly management fees from Apr-25 to Jun-33 at 1.75% annually. "
+        "In the IS - Mgmt Co. sheet, compute Total Expenses from Apr-25 to Jun-33. "
+        "In the CF sheet, compute Capital Expenditure from Workings Cost, then add a closing cash cross-check against the BS sheet."
+    )
+    complete_financial_model_runtime_actions(output, source_path=source, instruction=instruction)
+    workbook = load_workbook(output, data_only=False)
+    assert workbook["Workings Cost Sheet"]["N23"].value == "=Dashboard!H15"
+    assert workbook["Workings Cost Sheet"]["O77"].value == "=O60*O68"
+    assert workbook["Revenue"]["P27"].value == "=P17*P19/12"
+    assert workbook["IS - Mgmt Co."]["O55"].value == "=+O23+O30+O38+O42+O47+O52"
+    assert workbook["CF"]["N17"].value == "=-'Workings Cost Sheet'!O205-'Workings Cost Sheet'!O206"
+    assert workbook["CF"]["N31"].value == "=N29-BS!O10"
     workbook.close()
 
 

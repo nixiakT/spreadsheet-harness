@@ -12,6 +12,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from spreadsheet_harness.plugins import canonical_plugin_name
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "paper_fig_data/plugin_usage_heatmap.csv"
@@ -56,19 +57,19 @@ CATEGORY_NAMES = {
 
 # Exact registry names from src/spreadsheet_harness/plugins.py.
 PLUGIN_META = {
-    "runtime-code-plus-formula-validation": ("Act", "H"),
-    "profile-deterministic-compact": ("Observe", "H"),
-    "policy-ours": ("Control", "H"),
-    "skill-spreadsheet-structure": ("Observe", "H"),
-    "skill-spreadsheet-formula": ("Knowledge", "H"),
-    "skill-spreadsheet-manipulation": ("Act", "H"),
-    "skill-spreadsheet-analysis": ("Observe", "H"),
-    "skill-spreadsheet-visualization": ("Knowledge", "H"),
-    "skill-spreadsheet-verification": ("Verify", "H"),
-    "skill-spreadsheet-memory": ("Knowledge", "H"),
-    "verifier-formula-runtime": ("Verify", "H"),
+    "act-code-plus-formula-validation": ("Act", "H"),
+    "observe-profile-compact": ("Observe", "H"),
+    "control-ours": ("Control", "H"),
+    "knowledge-structure": ("Knowledge", "H"),
+    "knowledge-formula": ("Knowledge", "H"),
+    "knowledge-manipulation": ("Knowledge", "H"),
+    "knowledge-analysis": ("Knowledge", "H"),
+    "knowledge-visualization": ("Knowledge", "H"),
+    "knowledge-verification": ("Knowledge", "H"),
+    "knowledge-memory": ("Knowledge", "H"),
+    "verify-formula-runtime": ("Verify", "H"),
     "repair-date-text": ("Repair", "H"),
-    "skill-spreadsheet-financial-model": ("Knowledge", "D"),
+    "knowledge-financial-model": ("Knowledge", "D"),
 }
 
 VALIDATION_EVENTS = {
@@ -85,8 +86,8 @@ def read_json(path: Path):
 
 def skill_plugin(name: str) -> str:
     if name == "visual-review":
-        return "skill-spreadsheet-visualization"
-    return f"skill-{name}"
+        return "knowledge-visualization"
+    return canonical_plugin_name(f"skill-{name}")
 
 
 def result_record(path: Path) -> dict:
@@ -178,19 +179,19 @@ def extract_trace(path: Path) -> Counter[str]:
                     if plugin in PLUGIN_META:
                         calls[plugin] += 1
             elif name == "tool.called":
-                calls["runtime-code-plus-formula-validation"] += 1
+                calls["act-code-plus-formula-validation"] += 1
             elif name == "preprocess.profile":
-                calls["profile-deterministic-compact"] += 1
+                calls["observe-profile-compact"] += 1
             elif name == "agent.started":
-                calls["policy-ours"] += 1
+                calls["control-ours"] += 1
             elif name in VALIDATION_EVENTS:
-                calls["verifier-formula-runtime"] += 1
+                calls["verify-formula-runtime"] += 1
             elif name == "postprocess.date_text_repair":
                 # The event exists only when at least one cell was changed.
                 calls["repair-date-text"] += 1
             elif name == "harness.financial_domain_runtime.warm_started":
                 # This event is guarded by plugin_plan.financial_model_runtime.
-                calls["skill-spreadsheet-financial-model"] += 1
+                calls["knowledge-financial-model"] += 1
     return calls
 
 
@@ -303,10 +304,10 @@ def main() -> None:
     for spec in RUNS:
         method_key = f"{spec['backbone']}|{spec['method']}"
         for plugin in (
-            "skill-spreadsheet-verification",
-            "verifier-formula-runtime",
+            "knowledge-verification",
+            "verify-formula-runtime",
             "repair-date-text",
-            "policy-ours",
+            "control-ours",
         ):
             values = failure_audit[method_key][plugin]
             passed = values.get("pass", [])

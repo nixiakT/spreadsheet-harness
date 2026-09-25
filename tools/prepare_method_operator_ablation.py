@@ -128,12 +128,12 @@ def main() -> int:
         "composition": "spreadsheet-harness-financial",
         "groups": {
             "harness": [
-                "policy-ours",
-                "profile-deterministic-compact",
-                "profile-deterministic-full",
-                "skill-spreadsheet-coordination",
+                "control-ours",
+                "observe-profile-compact",
+                "observe-profile-full",
+                "knowledge-coordination",
             ],
-            "domain": ["skill-spreadsheet-financial-model", "skill-spreadsheet-formula"],
+            "domain": ["knowledge-financial-model", "knowledge-formula"],
         },
         "contexts": contexts,
         "heldout_task_ids": heldout,

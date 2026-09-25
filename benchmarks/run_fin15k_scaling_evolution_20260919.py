@@ -54,28 +54,34 @@ SCOPES: Mapping[str, tuple[str, ...]] = {
     "coevolution": ("harness", "domain", "joint"),
 }
 GENERAL_PLUGINS = (
-    "runtime-code-plus-formula-validation",
-    "profile-deterministic-compact",
-    "profile-deterministic-full",
-    "policy-ours",
-    "skill-spreadsheet-structure",
-    "skill-spreadsheet-formula",
-    "skill-spreadsheet-manipulation",
-    "skill-spreadsheet-analysis",
-    "skill-spreadsheet-visualization",
-    "skill-spreadsheet-verification",
-    "skill-spreadsheet-memory",
-    "verifier-formula-runtime",
+    "act-code-plus-formula-validation",
+    "observe-profile-compact",
+    "observe-profile-full",
+    "control-ours",
+    "knowledge-structure",
+    "knowledge-formula",
+    "knowledge-manipulation",
+    "knowledge-analysis",
+    "knowledge-visualization",
+    "knowledge-verification",
+    "knowledge-memory",
+    "verify-formula-runtime",
     "repair-date-text",
-    "skill-spreadsheet-coordination",
+    "knowledge-coordination",
 )
-DOMAIN_PLUGINS = ("skill-spreadsheet-financial-model",)
+DOMAIN_PLUGINS = ("knowledge-financial-model",)
 SCORE_WEIGHTS = {
     "accuracy": 1.0,
     "modification_accuracy": 0.25,
     "regression_accuracy": 0.10,
 }
 SEED = 20260919
+
+
+def configured_solver_model() -> str:
+    """Return the protocol-pinned solver override for a fresh root."""
+
+    return os.environ.get("SPREADSHEET_FIN15K_SOLVER_MODEL", SOLVER_MODEL)
 
 
 def now() -> str:
@@ -262,7 +268,12 @@ def prepare(root: Path) -> dict[str, Any]:
     if protocol_path.is_file():
         verify_protocol(root)
         return load(root / "split-manifest.json")
-    if root.exists() and any(root.iterdir()):
+    preexisting = (
+        [item for item in root.iterdir() if item.name != "PROTOCOL_ROLE.json"]
+        if root.exists()
+        else []
+    )
+    if preexisting:
         raise RuntimeError(f"Refusing to overwrite non-empty experiment root: {root}")
     if not KEY_FILE.is_file() or not KEY_FILE.read_text(encoding="utf-8").strip():
         raise RuntimeError(f"LiteLLM key file is missing or empty: {KEY_FILE}")
@@ -339,7 +350,7 @@ def prepare(root: Path) -> dict[str, Any]:
         "candidates_per_round": 1,
         "solver": {
             "requested": "qwen36-35b-a3b",
-            "actual": SOLVER_MODEL,
+            "actual": configured_solver_model(),
             "substitution_reason": "requested model returned LiteLLM 500 during preflight",
             "base_url": BASE_URL,
             "temperature": 0.0,
@@ -458,7 +469,7 @@ def _baseline_cell(root: Path, task: Mapping[str, Any]) -> dict[str, Any]:
         "--api-key-file",
         str(KEY_FILE),
         "--model",
-        SOLVER_MODEL,
+        configured_solver_model(),
         "--api-protocol",
         "chat-completions",
         "--reasoning-effort",
@@ -630,7 +641,7 @@ def build_config(root: Path, size: int, scope_name: str) -> Path:
         "evaluation_binding": {
             "protocol": "fin15k-fixed-family-gate-v1",
             "provider": BASE_URL,
-            "solver_model": SOLVER_MODEL,
+            "solver_model": configured_solver_model(),
             "temperature": 0.0,
             "top_p": 1.0,
             "thinking": True,
@@ -942,7 +953,7 @@ def _v2_cell(
         "--api-key-file",
         str(KEY_FILE),
         "--model",
-        SOLVER_MODEL,
+        configured_solver_model(),
         "--api-protocol",
         "chat-completions",
         "--reasoning-effort",

@@ -291,6 +291,31 @@ def test_recalculate_and_read_sparse_pending_scope_has_no_500_cell_limit(
     }
 
 
+def test_recalculate_and_read_formula_gate_accepts_clean_empty_scope(
+    sample_workbook: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "empty-sparse-recalc-run")
+    monkeypatch.setattr(
+        session,
+        "recalculate",
+        lambda: pytest.fail("a clean empty formula scope must not recalculate"),
+    )
+    tools = SpreadsheetToolRegistry(
+        session, enable_code=False, allowed_tools={"recalculate_and_read"}
+    )
+    tools.allow_empty_pending_formula_validation()
+
+    result = tools.invoke(
+        "recalculate_and_read",
+        {"validation_scope": "pending_formula_changes"},
+    ).data
+
+    assert result["ok"] is True
+    assert result["validation_noop"] is True
+    assert result["calculation_valid"] is True
+    assert result["validation_scope"]["coordinate_count"] == 0
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

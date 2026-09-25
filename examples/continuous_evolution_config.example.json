@@ -3,8 +3,8 @@
   "repository_root": ".",
   "composition": "spreadsheet-harness-financial",
   "groups": {
-    "harness": ["policy-ours", "profile-deterministic-compact", "verifier-formula-runtime"],
-    "domain": ["skill-spreadsheet-financial-model", "skill-spreadsheet-formula"]
+    "harness": ["control-ours", "observe-profile-compact", "verify-formula-runtime"],
+    "domain": ["knowledge-financial-model", "knowledge-formula"]
   },
   "contexts": [
     {

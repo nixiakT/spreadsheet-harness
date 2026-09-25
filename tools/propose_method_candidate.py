@@ -65,14 +65,17 @@ def _compact_editable_files_for_model(files: Any) -> Any:
     # the entire 216KB file.  A proposer only needs the public outline and a
     # small amount of exact context to emit a unified hunk—the controller
     # canonicalizes that hunk against the complete frozen source afterwards.
-    max_excerpt_chars = 72_000
+    # Keep implementation proposals small enough for GLM's thinking route.
+    # The previous bound often sent the complete repair module, leaving too
+    # little output budget for a valid JSON patch.
+    max_excerpt_chars = 32_000
     for item in files:
         if not isinstance(item, dict) or not isinstance(item.get("content"), str):
             result.append(item)
             continue
         source = item["content"]
         lines = source.splitlines()
-        if len(source) <= 80_000:
+        if len(source) <= 32_000:
             result.append(item)
             continue
         keep: set[int] = set(range(min(60, len(lines))))
@@ -205,10 +208,16 @@ def _canonicalize_implementation_patch(
 
 def _json_text(value: str) -> dict[str, Any]:
     text = value.strip()
+    if not text:
+        raise ValueError("Proposer returned empty text content")
     if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        if text.startswith("json"):
-            text = text[4:].lstrip()
+        parts = text.split("\n", 1)
+        if len(parts) == 2:
+            text = parts[1].rsplit("```", 1)[0].strip()
+            if text.startswith("json"):
+                text = text[4:].lstrip()
+        else:
+            text = text.strip("`").strip()
     try:
         result = json.loads(text)
     except json.JSONDecodeError:
@@ -248,7 +257,26 @@ def _content(document: dict[str, Any]) -> str:
     content is empty; :func:`_json_text` still requires a complete JSON object
     and performs no schema repair.
     """
-    message = document["choices"][0]["message"]
+    # LiteLLM/OpenAI-compatible providers do not all use the same envelope.
+    # GLM occasionally returns a Responses-shaped ``output_text`` or puts the
+    # JSON in ``choices[0].text`` even though the endpoint is chat-completions.
+    # Normalize those forms before declaring an empty proposal; this avoids
+    # spending three full retries on a response that is already usable.
+    output_text = document.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+    choices = document.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("Proposer response has no choices or output_text")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise ValueError("Proposer response choice is not an object")
+    direct_text = choice.get("text")
+    if isinstance(direct_text, str) and direct_text.strip():
+        return direct_text
+    message = choice.get("message") or {}
+    if not isinstance(message, dict):
+        raise ValueError("Proposer response message is not an object")
     content = message.get("content", "")
     if isinstance(content, str):
         if content.strip():
@@ -279,14 +307,30 @@ def _post_model_json(
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
+            request_body = dict(body)
+            # GLM thinking routes occasionally return HTTP 200 with an empty
+            # final channel (especially for the large implementation excerpt).
+            # A blind retry sends the same request and reproduces the failure.
+            # Retry once with a compact, non-thinking JSON-only request, then
+            # once with an explicit JSON response format.  This changes only
+            # proposer transport; the deterministic route and mutation schema
+            # remain controller-owned.
+            if attempt == 2:
+                request_body["chat_template_kwargs"] = {"enable_thinking": False}
+                request_body["max_tokens"] = min(int(request_body.get("max_tokens", 4096)), 2048)
+            elif attempt >= 3:
+                request_body["response_format"] = {"type": "json_object"}
             with httpx.Client(timeout=args.timeout, trust_env=False) as client:
                 response = client.post(
                     args.base_url.rstrip("/") + "/chat/completions",
                     headers={"Authorization": "Bearer " + key},
-                    json=body,
+                    json=request_body,
                 )
             response.raise_for_status()
-            return _json_text(_content(response.json()))
+            document = response.json()
+            if not isinstance(document, dict):
+                raise ValueError("Proposer response must be a JSON object")
+            return _json_text(_content(document))
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             last_error = exc
             if attempt == attempts:
@@ -323,6 +367,8 @@ def _model_proposal(args: argparse.Namespace, request: dict[str, Any]) -> dict[s
         visible = {
             "route": route,
             "operator_policy": request["operator_policy"],
+            "profile_guidance": request.get("profile_guidance", {}),
+            "plugin_profile": _compact_evidence_for_model(request.get("plugin_profile", {})),
             "plugin_contracts": request.get("plugin_contracts", {}),
             "editable_files_by_plugin": {
                 name: _compact_editable_files_for_model(files)
@@ -365,7 +411,50 @@ def _model_proposal(args: argparse.Namespace, request: dict[str, Any]) -> dict[s
                 {"role": "user", "content": json.dumps(visible, ensure_ascii=False)},
             ],
         }
-        return _post_model_json(args, body)
+        generated = _post_model_json(args, body, attempts=4)
+        # A few gateways wrap the model object in the same ``candidates``
+        # envelope consumed by the controller.  Accept exactly one wrapped
+        # object here; never merge or invent mutations.
+        if "mutations" not in generated and isinstance(generated.get("candidates"), list):
+            wrapped = generated["candidates"]
+            if len(wrapped) == 1 and isinstance(wrapped[0], dict):
+                generated = wrapped[0]
+        raw_mutations = generated.get("mutations")
+        expected_targets = {
+            str(item.get("target_plugin")) for item in route_items
+        }
+        observed_targets = {
+            str(item.get("target_plugin"))
+            for item in raw_mutations
+            if isinstance(item, dict)
+        } if isinstance(raw_mutations, list) else set()
+        if isinstance(raw_mutations, list) and observed_targets == expected_targets:
+            return generated
+        # Keep the update atomic, but avoid asking one context window to emit
+        # a large implementation patch and a second prompt replacement at
+        # once. Each sub-request still uses the controller-locked coordinate;
+        # the controller combines the returned mutations atomically below.
+        mutations: list[dict[str, Any]] = []
+        for item in route_items:
+            target = str(item.get("target_plugin"))
+            subrequest = dict(request)
+            subrequest["route"] = item
+            subrequest["plugin_contract"] = request.get("plugin_contracts", {}).get(target, {})
+            subrequest["editable_files"] = request.get("editable_files_by_plugin", {}).get(target, [])
+            generated_item = _model_proposal(args, subrequest)
+            mutation = dict(generated_item)
+            mutation.update(
+                target_plugin=target,
+                operation=item.get("operation"),
+                surface=item.get("surface"),
+            )
+            if item.get("replacement_plugin") is not None:
+                mutation["replacement_plugin"] = item.get("replacement_plugin")
+            mutations.append(mutation)
+        return {
+            "rationale": "Joint atomic proposal assembled from independently bounded route coordinates.",
+            "mutations": mutations,
+        }
     surface = route.get("surface")
     schema: dict[str, Any] = {"rationale": "short evidence-grounded explanation"}
     if surface in {"prompt", "description"}:
@@ -379,6 +468,8 @@ def _model_proposal(args: argparse.Namespace, request: dict[str, Any]) -> dict[s
     visible = {
         "route": route,
         "operator_policy": request["operator_policy"],
+        "profile_guidance": request.get("profile_guidance", {}),
+        "plugin_profile": _compact_evidence_for_model(request.get("plugin_profile", {})),
         "plugin_contract": request["plugin_contract"],
         "editable_files": _compact_editable_files_for_model(
             request.get("editable_files", [])
@@ -413,7 +504,103 @@ def _model_proposal(args: argparse.Namespace, request: dict[str, Any]) -> dict[s
             {"role": "user", "content": json.dumps(visible, ensure_ascii=False)},
         ],
     }
-    return _post_model_json(args, body)
+    generated = _post_model_json(args, body, attempts=4)
+    if "content" not in generated and "patch" not in generated and "config_patch" not in generated:
+        wrapped = generated.get("candidates")
+        if isinstance(wrapped, list) and len(wrapped) == 1 and isinstance(wrapped[0], dict):
+            generated = wrapped[0]
+    return generated
+
+
+def _semantic_repair(args: argparse.Namespace, request: dict[str, Any], error: str) -> dict[str, Any]:
+    """Ask the proposer to repair schema/patch semantics after local validation.
+
+    Transport retries cannot fix a diff with the wrong path or ambiguous
+    context.  This compact second-stage request feeds back only the frozen
+    route, exact editable paths and validator error; it never relaxes the
+    controller's coordinate or permission checks.
+    """
+    route = request["route"]
+    items = route.get("mutations") or [route]
+    schemas = []
+    for item in items:
+        files = request.get("editable_files_by_plugin", {}).get(
+            str(item.get("target_plugin")), request.get("editable_files", [])
+        )
+        schemas.append(
+            {
+                "target_plugin": item.get("target_plugin"),
+                "operation": item.get("operation"),
+                "surface": item.get("surface"),
+                "editable_paths": [str(f.get("path")) for f in files if isinstance(f, dict)],
+                "source": _compact_editable_files_for_model(files),
+                "required_field": (
+                    "patch" if item.get("surface") == "implementation"
+                    else "content" if item.get("surface") in {"prompt", "description"}
+                    else "config_patch"
+                ),
+            }
+        )
+    body = {
+        "model": args.model,
+        "temperature": 0,
+        "top_p": 1,
+        # A unified diff plus JSON quoting commonly exceeds 2k tokens even
+        # for one small implementation hunk.  The request is non-thinking
+        # and still bounded by the caller's 4k default.
+        "max_tokens": min(int(args.max_tokens), 4096),
+        "chat_template_kwargs": {"enable_thinking": False},
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Return JSON only. Repair the candidate to satisfy the local validator. "
+                    "Keep every deterministic target_plugin, operation, and surface unchanged. "
+                    "For an implementation patch use exactly the editable path, include both "
+                    "--- a/PATH and +++ b/PATH, and use old context copied verbatim from the "
+                    "provided source; do not invent offsets or paths. For joint routes return "
+                    "one mutation object for every target. Do not explain outside JSON."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "route": route,
+                        "targets": schemas,
+                        "validation_error": error[:1200],
+                        "previous_candidate": request.get("last_candidate", {}),
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+    }
+    # A valid implementation diff may exceed two thousand tokens.  Keep the
+    # repair response JSON-only but allow bounded retries before failing the
+    # evolution cell on a transient truncation.
+    return _post_model_json(args, body, attempts=4)
+
+
+def _coerce_patch_field(value: dict[str, Any]) -> dict[str, Any]:
+    """Normalize common provider wrappers without inventing patch content."""
+
+    if not isinstance(value, dict) or value.get("patch"):
+        return value
+    wrapped_candidates = value.get("candidates")
+    if isinstance(wrapped_candidates, list) and len(wrapped_candidates) == 1 and isinstance(wrapped_candidates[0], dict):
+        return _coerce_patch_field(wrapped_candidates[0])
+    for key in ("diff", "content"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and "diff --git " in candidate and "@@" in candidate:
+            normalized = dict(value)
+            normalized["patch"] = candidate
+            return normalized
+    wrapped = value.get("candidate")
+    if isinstance(wrapped, dict):
+        return _coerce_patch_field(wrapped)
+    return value
 
 
 def _content_mutation(
@@ -488,6 +675,16 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=1800)
     args = parser.parse_args()
     request = json.loads(args.request.read_text(encoding="utf-8"))
+    # Proposal directories are resumable controller state.  If a valid
+    # response was materialized by a previous retry or an audited fallback,
+    # never spend another provider call overwriting it.
+    if args.response.is_file():
+        try:
+            existing = json.loads(args.response.read_text(encoding="utf-8"))
+            if isinstance(existing, dict) and isinstance(existing.get("candidates"), list) and existing["candidates"]:
+                return 0
+        except (OSError, json.JSONDecodeError):
+            pass
     route = request["route"]
     operation = route["operation"]
     route_items = route.get("mutations") or [route]
@@ -504,27 +701,36 @@ def main() -> int:
     }
     if joint:
         generated = _model_proposal(args, request)
-        raw_mutations = generated.get("mutations")
-        if not isinstance(raw_mutations, list):
-            raise ValueError("Joint proposer response must contain a mutations list")
-        by_target: dict[str, dict[str, Any]] = {}
-        for item in raw_mutations:
-            if not isinstance(item, dict):
-                raise ValueError("Joint proposer mutation must be an object")
-            target = str(item.get("target_plugin", ""))
-            if not target or target in by_target:
-                raise ValueError("Joint proposer returned duplicate/empty target")
-            by_target[target] = item
-        if set(by_target) != {str(item.get("target_plugin")) for item in route_items}:
-            raise ValueError("Joint proposer mutation targets do not match deterministic route")
-        mutations = [
-            _content_mutation(
-                by_target[str(item["target_plugin"])],
-                item,
-                request.get("editable_files_by_plugin", {}).get(str(item["target_plugin"]), []),
-            )
-            for item in route_items
-        ]
+        for repair_attempt in range(3):
+            try:
+                raw_mutations = generated.get("mutations")
+                if not isinstance(raw_mutations, list):
+                    raise ValueError("Joint proposer response must contain a mutations list")
+                by_target: dict[str, dict[str, Any]] = {}
+                for item in raw_mutations:
+                    if not isinstance(item, dict):
+                        raise ValueError("Joint proposer mutation must be an object")
+                    target = str(item.get("target_plugin", ""))
+                    if not target or target in by_target:
+                        raise ValueError("Joint proposer returned duplicate/empty target")
+                    by_target[target] = item
+                if set(by_target) != {str(item.get("target_plugin")) for item in route_items}:
+                    raise ValueError("Joint proposer mutation targets do not match deterministic route")
+                mutations = [
+                    _content_mutation(
+                        by_target[str(item["target_plugin"])],
+                        item,
+                        request.get("editable_files_by_plugin", {}).get(str(item["target_plugin"]), []),
+                    )
+                    for item in route_items
+                ]
+                break
+            except ValueError as exc:
+                if repair_attempt == 2:
+                    raise
+                request = dict(request)
+                request["last_candidate"] = generated
+                generated = _semantic_repair(args, request, str(exc))
         candidate.update(
             scope="joint",
             rationale=str(generated.get("rationale", ""))[:4000],
@@ -536,34 +742,44 @@ def main() -> int:
         pass
     else:
         generated = _model_proposal(args, request)
+        for repair_attempt in range(3):
+            try:
+                surface = route.get("surface")
+                if surface in {"prompt", "description"}:
+                    files = request.get("editable_files") or []
+                    if len(files) != 1:
+                        raise ValueError("Replacement proposal needs exactly one editable file")
+                    content = generated.get("content")
+                    if not isinstance(content, str) or not content.strip():
+                        raise ValueError("Replacement proposal omitted content")
+                    candidate.update(
+                        operator="replace-file",
+                        files=[{"path": files[0]["path"], "content": content}],
+                    )
+                elif surface == "implementation":
+                    generated = _coerce_patch_field(generated)
+                    patch = generated.get("patch")
+                    if not isinstance(patch, str) or not patch.strip():
+                        raise ValueError("Implementation proposal omitted patch")
+                    candidate.update(
+                        operator="unified-diff",
+                        patch=_canonicalize_implementation_patch(
+                            patch, request.get("editable_files") or []
+                        ),
+                    )
+                elif surface == "config":
+                    config_patch = generated.get("config_patch")
+                    if not isinstance(config_patch, dict):
+                        raise ValueError("Config proposal omitted config_patch")
+                    candidate.update(operator="bounded-config", config_patch=config_patch)
+                break
+            except ValueError as exc:
+                if repair_attempt == 2:
+                    raise
+                request = dict(request)
+                request["last_candidate"] = generated
+                generated = _semantic_repair(args, request, str(exc))
         candidate["rationale"] = str(generated.get("rationale", ""))[:4000]
-        surface = route.get("surface")
-        if surface in {"prompt", "description"}:
-            files = request.get("editable_files") or []
-            if len(files) != 1:
-                raise ValueError("Replacement proposal needs exactly one editable file")
-            content = generated.get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("Replacement proposal omitted content")
-            candidate.update(
-                operator="replace-file",
-                files=[{"path": files[0]["path"], "content": content}],
-            )
-        elif surface == "implementation":
-            patch = generated.get("patch")
-            if not isinstance(patch, str) or not patch.strip():
-                raise ValueError("Implementation proposal omitted patch")
-            candidate.update(
-                operator="unified-diff",
-                patch=_canonicalize_implementation_patch(
-                    patch, request.get("editable_files") or []
-                ),
-            )
-        elif surface == "config":
-            config_patch = generated.get("config_patch")
-            if not isinstance(config_patch, dict):
-                raise ValueError("Config proposal omitted config_patch")
-            candidate.update(operator="bounded-config", config_patch=config_patch)
     args.response.parent.mkdir(parents=True, exist_ok=True)
     args.response.write_text(
         json.dumps({"candidates": [candidate]}, ensure_ascii=False, indent=2) + "\n",

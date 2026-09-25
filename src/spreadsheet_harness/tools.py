@@ -416,6 +416,7 @@ class SpreadsheetToolRegistry:
         )
         self._last_render: dict[str, Any] | None = None
         self._pending_formula_validation: tuple[FormulaCoordinate, ...] = ()
+        self._allow_empty_pending_formula_validation = False
         self._handlers: dict[str, Callable[[dict[str, Any]], ToolOutcome]] = {
             "list_sheets": self._list_sheets,
             # Official SpreadsheetBench compatibility tools.  ``view_xlsx`` is
@@ -788,6 +789,16 @@ class SpreadsheetToolRegistry:
             sorted({(str(sheet), str(cell).upper()) for sheet, cell in coordinates})
         )
 
+    def allow_empty_pending_formula_validation(self, enabled: bool = True) -> None:
+        """Allow a formula-gated stage to acknowledge a clean no-op validation.
+
+        Standalone callers keep the strict preflight error, while an agent stage
+        that has already proved there are no changed formula cells can avoid
+        wasting a turn on a recoverable no-op failure.
+        """
+
+        self._allow_empty_pending_formula_validation = bool(enabled)
+
     def _list_sheets(self, _: dict[str, Any]) -> ToolOutcome:
         return ToolOutcome(self.session.list_sheets())
 
@@ -1025,6 +1036,25 @@ class SpreadsheetToolRegistry:
                     "pending_formula_changes validation must omit sheet and range_ref"
                 )
             if not self._pending_formula_validation:
+                if self._allow_empty_pending_formula_validation:
+                    return ToolOutcome(
+                        {
+                            "ok": True,
+                            "calculation_valid": True,
+                            "calculation_errors": {"count": 0, "coordinates": []},
+                            "validation_scope": {
+                                "kind": _PENDING_FORMULA_VALIDATION_SCOPE,
+                                "coordinate_count": 0,
+                                "coordinate_sha256": formula_coordinate_sha256(()),
+                                "formula_cells_present": 0,
+                                "formula_cells_absent": 0,
+                                "coverage_complete": True,
+                            },
+                            "calculation": None,
+                            "validation_noop": True,
+                            "message": "No formula cells changed; runtime validation was already clean.",
+                        }
+                    )
                 return self._calculation_preflight_failure(
                     "No pending formula changes are available for sparse validation"
                 )

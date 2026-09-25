@@ -65,7 +65,7 @@ domain failure, for example:
 {
   "route": "composition_interface",
   "required_capability": "financial.scenario-selector",
-  "provider": "skill-spreadsheet-financial-model",
+  "provider": "knowledge-financial-model",
   "missing_evidence": ["Assumptions!B4", "Model!C7:F7"],
   "harness_surface": "context.workbook-profile"
 }
@@ -227,3 +227,28 @@ to the benchmark CLI with `--composition-file ARM=PATH`.  Implementation
 revisions are confined to the paths declared by the owning plugin contract;
 the financial-model plugin consequently owns both its `SKILL.md` prompt and
 `src/spreadsheet_harness/financial_model_repairs.py`.
+
+## Plugin trace envelope and three evolution mechanisms
+
+Each new workbook run keeps the ordinary `trajectory.jsonl` and also writes a
+plugin-facing sidecar: `plugin-trace.jsonl` plus `plugin-profile.json`.  The
+sidecar normalizes composition loading, skill selection, provider invocation,
+failure attribution, workbook operations, and the final evaluator outcome into
+one schema.  A plugin profile records loaded/selected/invoked counts,
+attributed failures, operation signals, success/failure/infrastructure/unscored
+outcomes, and the run score without exposing raw workbook answers or model
+prose.
+
+Fin-1.5K evolution consumes this development-only profile through three
+explicit mechanisms:
+
+* `h-only`: only the general harness coordinate may edit, disable, replace, or
+  synthesize a harness-side plugin;
+* `d-only`: only the domain plugin coordinate may change;
+* `joint`: one harness mutation and one domain mutation are proposed and
+  materialized atomically, which is the route for coordination-plugin synthesis
+  and domain hand-off fixes.
+
+The proposer receives the normalized profile and bounded evidence packet.  The
+controller still owns operation/scope validation and promotion; SpreadsheetBench
+held-out results are never fed back into the profile or proposer.

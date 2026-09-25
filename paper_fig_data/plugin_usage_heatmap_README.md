@@ -2,6 +2,8 @@
 
 审计日期：2026-09-17/18。没有重新运行实验；统计脚本只读现有 trajectory。主数据为 `paper_fig_data/plugin_usage_heatmap.csv`，可复算脚本为 `paper_fig_data/audit_plugin_usage.py`。Qwen BASIC 补跑在审计时仍在后台进行，因此该部分固定为 **2026-09-17T15:57:58Z** 的快照；脚本内置同一 cutoff，日后复算不会静默纳入新完成的任务。
 
+说明：本报告审计的是 2026 年 9 月 17–18 日生成的历史 trace，表中的旧插件名保持不变以保护证据身份。当前代码使用 `kind-responsibility` canonical 名称；读取旧 trace 时由 `canonical_plugin_name()` 兼容归一化。
+
 ## 结论与推荐
 
 主图推荐使用 **`task_activation_rate`**。理由是 routed skill、runtime provider、profile hook、control policy 和 verifier 的可审计调用单位不同；“某任务是否真实触发过”在这些插件类型间最可比。`avg_calls_per_task` 适合作为补充图或注释，尤其适合展示 runtime/verifier 强度。`call_share` 可复算且每个 method/category 内约为 100%，但会被高频 `tool.called` 的 runtime provider 主导，不建议作为主文热图颜色。

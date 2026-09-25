@@ -573,8 +573,8 @@ def test_bare_composition_is_minimal_and_skips_repair_detector(
     resolved = arms.resolve_arm_composition("bare")
     plan = arms.execution_plan(resolved)
     assert tuple(plugin.contract.name for plugin in resolved.plugins) == (
-        "runtime-code-interpreter",
-        "policy-bare",
+        "act-code-interpreter",
+        "control-bare",
     )
     assert plan.tool_mode == "code-only"
     assert plan.profile_mode == "none"
@@ -616,7 +616,7 @@ def test_bare_composition_is_minimal_and_skips_repair_detector(
         for event in events
         if event["event"] == "harness.plugin.activated"
     ]
-    assert activated == ["runtime-code-interpreter", "policy-bare"]
+    assert activated == ["act-code-interpreter", "control-bare"]
     assert all(
         not event["event"].startswith(("preprocess.", "harness.financial_", "harness.repair"))
         for event in events
@@ -933,6 +933,20 @@ def test_instruction_routing_prefers_named_sheets_and_bounded_skills() -> None:
             "spreadsheet-verification",
         ),
         task_category="Template",
+    ) == (
+        "spreadsheet-financial-model",
+        "spreadsheet-formula",
+        "spreadsheet-verification",
+    )
+    assert arms._routed_skill_names(
+        "Build a debt forecast and calculate WACC.",
+        (
+            "spreadsheet-structure",
+            "spreadsheet-formula",
+            "spreadsheet-financial-model",
+            "spreadsheet-manipulation",
+            "spreadsheet-verification",
+        ),
     ) == (
         "spreadsheet-financial-model",
         "spreadsheet-formula",
@@ -1470,8 +1484,8 @@ def test_v1_direct_keeps_full_executor_budget_without_planner_or_repairs(
         max_turns_per_arm=50, v1_execution_mode="direct",
     )
     assert [s["name"] for s in result.stages] == ["execute"]
+    assert FakeAgent.calls[0]["max_turns"] == 50
     call = FakeAgent.calls[0]
-    assert call["max_turns"] == 50
     assert call["require_formula_runtime_validation"] is True
     assert "replayed unchanged" in call["base_instructions"]
     assert "partial samples" in call["prompt"]
@@ -2718,6 +2732,29 @@ def test_template_forecast_guard_restores_speculative_input_links(tmp_path: Path
     output = load_workbook(session.workbook_path, data_only=False)
     assert output["WC_Forecast"]["G14"].value is None
     assert output["WC_Forecast"]["G24"].value == "=G10*G19/365"
+    output.close()
+
+
+def test_template_populated_input_guard_restores_input_drift(tmp_path: Path) -> None:
+    from openpyxl import Workbook, load_workbook
+
+    source = tmp_path / "template-input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "WC_Forecast"
+    worksheet["B9"] = "Revenue"
+    worksheet["C9"] = 100
+    workbook.save(source)
+    workbook.close()
+    session = WorkbookSession.create(source, tmp_path / "template-input-guard")
+    mutated = load_workbook(session.workbook_path, data_only=False)
+    mutated["WC_Forecast"]["C9"] = 999
+    mutated.save(session.workbook_path)
+    mutated.close()
+
+    assert arms._restore_template_populated_input_content(session) == 1
+    output = load_workbook(session.workbook_path, data_only=False)
+    assert output["WC_Forecast"]["C9"].value == 100
     output.close()
 
 

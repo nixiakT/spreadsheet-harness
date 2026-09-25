@@ -1660,7 +1660,11 @@ print("SHEET_STRICT_ISOLATION_OK")
                 env=environment,
                 text=True,
                 capture_output=True,
-                timeout=20,
+                # Under the requested 72-task fan-out, each worker performs a
+                # strict bwrap probe in its own process.  Namespace creation
+                # can be queued by the kernel; 20s caused false
+                # CodeIsolationError results before the model was called.
+                timeout=120,
                 check=False,
                 preexec_fn=_outer_sandbox_limits if os.name == "posix" else None,
             )

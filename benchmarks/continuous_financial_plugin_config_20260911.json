@@ -3,8 +3,8 @@
   "repository_root": "/data/zju-160/tongzeyuan/spreadsheet-harness",
   "composition": "spreadsheet-harness-financial",
   "groups": {
-    "harness": ["policy-ours", "profile-deterministic-compact"],
-    "domain": ["skill-spreadsheet-financial-model"]
+    "harness": ["control-ours", "observe-profile-compact"],
+    "domain": ["knowledge-financial-model"]
   },
   "contexts": [
     {

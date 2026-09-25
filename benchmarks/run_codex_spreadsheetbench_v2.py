@@ -43,6 +43,46 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def skill_packages(skill: Path | None) -> list[Path]:
+    """Resolve either one SKILL.md or a directory of skill packages."""
+    if skill is None:
+        return []
+    if skill.is_file():
+        return [skill]
+    packages = sorted(skill.glob("*/SKILL.md"))
+    if not packages:
+        raise ValueError(f"skill directory contains no */SKILL.md packages: {skill}")
+    names = [path.parent.name for path in packages]
+    if len(names) != len(set(names)):
+        raise ValueError(f"duplicate skill package names under: {skill}")
+    return packages
+
+
+def skill_sha256(skill: Path | None) -> str | None:
+    if skill is None:
+        return None
+    if skill.is_file():
+        return sha256(skill)
+    digest = hashlib.sha256()
+    for path in sorted(item for item in skill.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(skill).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def skill_package_manifest(skill: Path | None) -> list[dict[str, str]]:
+    return [
+        {"name": path.parent.name, "path": str(path), "sha256": sha256(path)}
+        for path in skill_packages(skill)
+    ]
+
+
+def skill_names(skill: Path | None) -> list[str]:
+    return [path.parent.name for path in skill_packages(skill)]
+
+
 def workbook_is_valid(path: Path) -> bool:
     if not path.is_file():
         return False
@@ -162,6 +202,9 @@ def make_codex_home(
                 'model_reasoning_effort = "medium"',
                 "disable_response_storage = true",
                 'preferred_auth_method = "apikey"',
+                # Financial skill bundles are intentionally complete and can
+                # exceed Codex's default 32 KiB project-doc budget.
+                "project_doc_max_bytes = 200000",
                 "",
                 "[model_providers.litellm]",
                 'name = "litellm"',
@@ -181,10 +224,11 @@ def make_codex_home(
     )
     (home / "config.toml").chmod(0o600)
     if skill is not None:
-        # Keep a Codex-discoverable copy as well as the explicit prompt reference.
-        skill_target = home / "skills" / skill.parent.name
-        skill_target.mkdir(parents=True)
-        shutil.copy2(skill, skill_target / skill.name)
+        # Keep a Codex-discoverable copy of the complete skill package,
+        # including supporting scripts referenced by SKILL.md.
+        for package in skill_packages(skill):
+            skill_target = home / "skills" / package.parent.name
+            shutil.copytree(package.parent, skill_target)
     return home
 
 
@@ -196,11 +240,12 @@ def make_claude_home(base_dir: Path) -> Path:
 
 
 def prompt_for(
-    task: dict[str, Any], workspace: Path, *, skill_enabled: bool = True
+    task: dict[str, Any], workspace: Path, *, skill_enabled: bool = True,
+    skill_name: str | None = None,
 ) -> str:
     category = task["_category"]
     skill_note = (
-        "The required spreadsheet-manipulation skill is already loaded through this workspace's AGENTS.md\n"
+        f"The `{skill_name or 'spreadsheet'}` skill is already loaded through this workspace's AGENTS.md\n"
         "and the Codex skill registry. Follow it throughout the task. Do not read SKILL.md again; begin by\n"
         "inspecting the workbook. In your final response explicitly state that the skill was loaded."
         if skill_enabled
@@ -280,10 +325,25 @@ def run_one(
     task_root.mkdir(parents=True, exist_ok=True)
     agents_path = task_root / "AGENTS.md"
     if skill is not None:
-        skill_text = skill.read_text(encoding="utf-8")
+        packages = skill_packages(skill)
+        names = [package.parent.name for package in packages]
+        skill_sections: list[str] = []
+        for package in packages:
+            # Keep the model workspace self-contained.  In particular, do not
+            # expose the repository's sibling skills (such as skills/xlsx) via
+            # a source-path reference in AGENTS.md during a skill-only run.
+            skill_target = task_root / ".skills" / package.parent.name
+            shutil.copytree(package.parent, skill_target, dirs_exist_ok=True)
+            skill_sections.append(
+                f"# Skill package: {package.parent.name}\n\n"
+                + package.read_text(encoding="utf-8")
+                + f"\n\nSupporting resources: {skill_target}\n"
+            )
+        skill_text = "\n\n".join(skill_sections)
         agents_path.write_text(
-            "# Loaded spreadsheet-manipulation skill\n\n"
-            "The following skill is binding. It is already loaded; do not spend a tool call reading it.\n\n"
+            f"# Loaded benchmark skills: {', '.join(names)}\n\n"
+            "Only the following benchmark skills are installed. Their instructions are binding; "
+            "do not spend a tool call reading SKILL.md again.\n\n"
             + skill_text,
             encoding="utf-8",
         )
@@ -445,7 +505,13 @@ def run_one(
             "w", encoding="utf-8"
         ) as stderr:
             return_code = invoke(
-                command, prompt_for(task, task_root, skill_enabled=skill is not None)
+                command,
+                prompt_for(
+                    task,
+                    task_root,
+                    skill_enabled=skill is not None,
+                    skill_name=", ".join(skill_names(skill)) if skill is not None else None,
+                ),
             )
             for _ in range(max_turns):
                 if artifact_ready():
@@ -518,7 +584,8 @@ def run_one(
         "elapsed_seconds": round(time.time() - started, 3),
         "skill_enabled": skill is not None,
         "skill_path": str(skill) if skill is not None else None,
-        "skill_sha256": sha256(skill) if skill is not None else None,
+        "skill_sha256": skill_sha256(skill),
+        "skill_packages": skill_package_manifest(skill),
         "temperature": 0.0,
         "top_p": 1.0,
         "enable_thinking": True,
@@ -601,17 +668,20 @@ def main() -> int:
         parser.error("parallelism, max-turns, and max-output-tokens must be positive")
     if not CODEX_BIN.is_file() or not os.access(CODEX_BIN, os.X_OK):
         parser.error(f"Codex binary is not executable: {CODEX_BIN}")
-    if args.skill is not None and not args.skill.is_file():
-        parser.error(f"skill not found: {args.skill}")
+    if args.skill is not None and not args.skill.exists():
+        parser.error(f"skill file/directory not found: {args.skill}")
+    if args.skill is not None:
+        try:
+            skill_packages(args.skill)
+        except ValueError as exc:
+            parser.error(str(exc))
     api_key = args.api_key_file.read_text(encoding="utf-8").strip()
     if not api_key:
         parser.error("API key file is empty")
     evaluator = ROOT / "benchmarks/vendor/spreadsheetbench2-official-83d415c/evaluation/evaluation.py"
     tasks = load_tasks(args.dataset, args.category, set(args.task_id))
     args.run_root.mkdir(parents=True, exist_ok=True)
-    write_or_validate_manifest(
-        args.run_root / "manifest.json",
-        {
+    manifest = {
             "schema_version": 1,
             "benchmark": "SpreadsheetBench-v2",
             "harness": "openai/codex",
@@ -628,11 +698,13 @@ def main() -> int:
             "parallelism": args.parallelism,
             "skill_enabled": args.skill is not None,
             "skill_path": str(args.skill) if args.skill is not None else None,
-            "skill_sha256": sha256(args.skill) if args.skill is not None else None,
+            "skill_sha256": skill_sha256(args.skill),
             "dataset": str(args.dataset),
             "task_ids": [item["_task_id"] for item in tasks],
-        },
-    )
+        }
+    if args.skill is not None and args.skill.is_dir():
+        manifest["skill_packages"] = skill_package_manifest(args.skill)
+    write_or_validate_manifest(args.run_root / "manifest.json", manifest)
     plan_path = args.run_root / "task-plan.json"
     plan_path.write_text(json.dumps([item["_task_id"] for item in tasks], indent=2), encoding="utf-8")
 

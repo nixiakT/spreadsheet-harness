@@ -206,12 +206,23 @@ def _find_row_by_label(worksheet: Any, hint: str) -> int | None:
 def _instruction_sheet_clauses(instruction: str) -> tuple[tuple[str, str], ...]:
     compact_instruction = re.sub(r"\s+", " ", instruction.strip())
     clauses: list[tuple[str, str]] = []
-    for fragment in re.split(r"(?i)\bin the\b", compact_instruction):
+    # The preamble is not a sheet clause even when it contains a comma.
+    for fragment in re.split(r"(?i)\bin the\b", compact_instruction)[1:]:
         fragment = fragment.strip(" .")
-        if not fragment or "," not in fragment:
+        if not fragment:
             continue
-        raw_sheet, body = fragment.split(",", 1)
+        if "," in fragment:
+            raw_sheet, body = fragment.split(",", 1)
+        else:
+            # Public instructions often say ``In the DCF tab, calculate ...``
+            # while older templates use ``In the DCF sheet, ...``.  Treat the
+            # explicit sheet/tab token as the boundary even without a comma.
+            match = re.match(r"(?P<sheet>.+?\b(?:sheet|tab))\s+(?P<body>.+)$", fragment, re.I)
+            if match is None:
+                continue
+            raw_sheet, body = match.group("sheet"), match.group("body")
         sheet = re.sub(r"\bsheet\b$", "", raw_sheet, flags=re.IGNORECASE).strip(" .")
+        sheet = re.sub(r"\btab\b$", "", sheet, flags=re.IGNORECASE).strip(" .")
         body = body.strip(" .")
         if sheet and body:
             clauses.append((sheet, body))
@@ -1578,6 +1589,357 @@ def _fill_instruction_dashboard_updates(
     return changes
 
 
+def _direct_reference(value: Any) -> tuple[str, str] | None:
+    """Return a workbook-local direct reference from a formula value."""
+
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(
+        r"=\+?(?:'(?P<quoted>[^']+)'|(?P<plain>[^'!]+))!\$?(?P<column>[A-Z]{1,3})\$?(?P<row>\d+)",
+        value.strip(),
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return (match.group("quoted") or match.group("plain")).strip(), match.group("column").upper()
+
+
+def _instruction_monthly_columns(
+    worksheet: Any,
+    *,
+    header_row: int,
+    source_sheet_name: str | None = None,
+    source_header_row: int | None = None,
+) -> list[int]:
+    """Find a contiguous monthly band from workbook-local date/header links.
+
+    Financial-model tabs frequently contain annual columns, a spacer, and then a
+    monthly block.  The monthly block is identified by direct links to the source
+    schedule (or by actual date values), rather than by fixed column letters.
+    """
+
+    workbook = getattr(worksheet, "parent", None)
+    columns: list[int] = []
+    for column in range(1, _content_max_column(worksheet) + 1):
+        value = worksheet.cell(header_row, column).value
+        linked = _direct_reference(value)
+        if linked is not None:
+            if source_sheet_name is not None and _label(linked[0]) != _label(source_sheet_name):
+                continue
+            if source_header_row is not None:
+                # The direct-reference parser intentionally ignores row for callers
+                # that only need a sheet/column.  Validate the row when requested.
+                row_match = re.search(r"(\d+)\s*$", str(value))
+                if row_match is None or int(row_match.group(1)) != source_header_row:
+                    continue
+            columns.append(column)
+            continue
+        if hasattr(value, "year") and hasattr(value, "month"):
+            columns.append(column)
+            continue
+        if isinstance(value, str) and re.search(
+            r"(?:EOMONTH|DATE|YEAR|MONTH)\s*\(", value, flags=re.IGNORECASE
+        ):
+            # Formula date chains are only considered when they are part of a
+            # run anchored by a real date or direct source link.
+            if columns:
+                columns.append(column)
+    if not columns:
+        return []
+    # Keep the longest contiguous run; this excludes historical annual columns and
+    # isolated spacer columns while preserving the full forecast period.
+    runs: list[list[int]] = []
+    current = [columns[0]]
+    for column in columns[1:]:
+        if column == current[-1] + 1:
+            current.append(column)
+        else:
+            runs.append(current)
+            current = [column]
+    runs.append(current)
+    return max(runs, key=len)
+
+
+def _find_exact_row(worksheet: Any, labels: tuple[str, ...]) -> int | None:
+    wanted = {_label(label) for label in labels}
+    for row in range(1, _content_max_row(worksheet) + 1):
+        label = _semantic_row_label(worksheet, row)
+        if label in wanted:
+            return row
+        # Statement schedules sometimes store a display label as a formula such
+        # as ``= Ending Cash Balance``.  It is still a label, not a calculation
+        # reference; normalize that wrapper for semantic lookup.
+        for column in range(1, min(_content_max_column(worksheet), 4) + 1):
+            value = worksheet.cell(row, column).value
+            if isinstance(value, str) and value.startswith("="):
+                normalized = _label(value.lstrip("=+ "))
+                if normalized in wanted:
+                    return row
+    return None
+
+
+def _fill_instruction_aif_monthly_operating_model(
+    output: Any,
+    source: Any,
+    instruction: str,
+) -> list[dict[str, str]]:
+    """Complete the recurring AIF monthly schedules named by the instruction.
+
+    This pass is deliberately workbook-local: it is gated by the requested
+    semantic clauses and discovers rows/periods through labels and header links.
+    It does not use task identifiers, golden coordinates, or cached values.
+    """
+
+    normalized = _label(instruction)
+    required = (
+        "cumulative salary" in normalized,
+        "ticket size per portfolio" in normalized,
+        "management fee" in normalized,
+        "total expenses" in normalized,
+        "capital expenditure" in normalized,
+        "closing cash" in normalized and "check" in normalized,
+    )
+    # A handler may safely run when any subset of these clauses is present, but
+    # there must be at least one explicit AIF-style monthly request.
+    if not any(required):
+        return []
+    changes: list[dict[str, str]] = []
+
+    def write_blank(ws: Any, original: Any, row: int, column: int, formula: str) -> None:
+        target = ws.cell(row, column)
+        if (
+            target.value is not None
+            or original.cell(row, column).value is not None
+            or not _cell_is_writable(target)
+        ):
+            return
+        target.value = formula
+        changes.append({"sheet": ws.title, "target": target.coordinate, "formula": formula})
+
+    # Workings Cost: cumulative salary cost = monthly headcount * salary/month.
+    if required[0]:
+        worksheet = _find_sheet(output, "Workings Cost Sheet") or _find_sheet(output, "Workings Cost")
+        if worksheet is not None and worksheet.title in source.sheetnames:
+            original = source[worksheet.title]
+            heading = _find_exact_row(worksheet, ("Cumulative Salary Cost",))
+            total = _find_exact_row(worksheet, ("Total Salary Cost",))
+            monthly = _instruction_monthly_columns(
+                worksheet,
+                header_row=4,
+                source_sheet_name=None,
+            )
+            if heading is not None and total is not None and monthly:
+                # The target labels in this block mirror the salary rows (often
+                # through formula labels such as ``=B68``).  Pair each target with
+                # the nearest preceding salary row and its matching position row.
+                for target_row in range(heading + 1, total):
+                    label_formula = worksheet.cell(target_row, 2).value
+                    if not isinstance(label_formula, str) or not label_formula.startswith("="):
+                        continue
+                    label_ref = re.fullmatch(r"=\+?\$?B\$?(\d+)", label_formula.strip(), re.I)
+                    if label_ref is None:
+                        continue
+                    salary_row = int(label_ref.group(1))
+                    count_row = salary_row - 8
+                    if count_row < 1 or salary_row >= target_row:
+                        continue
+                    for column in monthly:
+                        letter = get_column_letter(column)
+                        write_blank(
+                            worksheet,
+                            original,
+                            target_row,
+                            column,
+                            f"={letter}{count_row}*{letter}{salary_row}",
+                        )
+
+    # Workings Cost: link the three tranche ticket-size anchors from Dashboard.
+    if required[1]:
+        worksheet = _find_sheet(output, "Workings Cost Sheet") or _find_sheet(output, "Workings Cost")
+        dashboard = _find_sheet(output, "Dashboard")
+        if worksheet is not None and dashboard is not None and worksheet.title in source.sheetnames:
+            original = source[worksheet.title]
+            heading = _find_exact_row(worksheet, ("Ticket Size per Portfolio",))
+            if heading is not None:
+                for ordinal in ("first", "second", "third"):
+                    target_row = next(
+                        (
+                            row
+                            for row in range(heading + 1, min(_content_max_row(worksheet), heading + 8) + 1)
+                            if ordinal in _label(_semantic_row_label(worksheet, row))
+                            and "tranche" in _label(_semantic_row_label(worksheet, row))
+                        ),
+                        None,
+                    )
+                    dashboard_row = next(
+                        (
+                            row
+                            for row in range(1, _content_max_row(dashboard) + 1)
+                            if any(
+                                ordinal in _label(dashboard.cell(row, column).value)
+                                and "tranche" in _label(dashboard.cell(row, column).value)
+                                for column in range(1, min(_content_max_column(dashboard), 12) + 1)
+                            )
+                        ),
+                        None,
+                    )
+                    if target_row is None or dashboard_row is None:
+                        continue
+                    label_column = next(
+                        (
+                            column
+                            for column in range(1, min(_content_max_column(dashboard), 12) + 1)
+                            if isinstance(dashboard.cell(dashboard_row, column).value, str)
+                            and ordinal in _label(dashboard.cell(dashboard_row, column).value)
+                            and "tranche" in _label(dashboard.cell(dashboard_row, column).value)
+                        ),
+                        None,
+                    )
+                    value_column = next(
+                        (
+                            column
+                            for column in range((label_column or 1) + 1, min(_content_max_column(dashboard), 12) + 1)
+                            if isinstance(dashboard.cell(dashboard_row, column).value, (int, float))
+                            and not isinstance(dashboard.cell(dashboard_row, column).value, bool)
+                        ),
+                        None,
+                    )
+                    if value_column is None:
+                        continue
+                    # The anchor is the first value cell before the monthly run;
+                    # locate it by the adjacent O-column continuation formula.
+                    anchor_column = next(
+                        (
+                            column
+                            for column in range(1, min(_content_max_column(worksheet), 16) + 1)
+                            if worksheet.cell(target_row, column).value is None
+                            and any(
+                                isinstance(worksheet.cell(target_row, c).value, str)
+                                and re.search(rf"\b{get_column_letter(column)}{target_row}\b", worksheet.cell(target_row, c).value)
+                                for c in range(column + 1, min(_content_max_column(worksheet), column + 4) + 1)
+                            )
+                        ),
+                        14,
+                    )
+                    formula = f"={_sheet_literal(dashboard.title)}!{get_column_letter(value_column)}{dashboard_row}"
+                    write_blank(worksheet, original, target_row, anchor_column, formula)
+
+    # Revenue: monthly management fee = AUM * annual rate / 12.
+    if required[2]:
+        worksheet = _find_sheet(output, "Revenue")
+        if worksheet is not None and worksheet.title in source.sheetnames:
+            original = source[worksheet.title]
+            target_row = _find_exact_row(worksheet, ("Total Management Fee",))
+            aum_row = _find_exact_row(worksheet, ("Assets Under Management",))
+            rate_row = _find_exact_row(worksheet, ("Mgmt Fee",))
+            monthly = _instruction_monthly_columns(worksheet, header_row=4)
+            if None not in {target_row, aum_row, rate_row} and monthly:
+                assert target_row is not None and aum_row is not None and rate_row is not None
+                for column in monthly:
+                    letter = get_column_letter(column)
+                    write_blank(worksheet, original, target_row, column, f"={letter}{aum_row}*{letter}{rate_row}/12")
+
+    # IS - Mgmt Co.: total expenses is the sum of section subtotal rows.
+    if required[3]:
+        worksheet = _find_sheet(output, "IS - Mgmt Co.")
+        if worksheet is not None and worksheet.title in source.sheetnames:
+            original = source[worksheet.title]
+            target_row = _find_exact_row(worksheet, ("Total Expenses",))
+            components: list[int] = []
+            component_tokens = (
+                "staff costs",
+                "consultants advisors fee",
+                "outsourced fees",
+                "total it communication",
+                "total regulatory",
+                "total administrative",
+            )
+            if target_row is not None:
+                for row in range(1, target_row):
+                    label = _label(_semantic_row_label(worksheet, row))
+                    if label in component_tokens:
+                        components.append(row)
+                monthly = _instruction_monthly_columns(
+                    worksheet,
+                    header_row=7,
+                    source_sheet_name="Workings Cost Sheet",
+                    source_header_row=4,
+                )
+                if not monthly:
+                    monthly = _instruction_monthly_columns(worksheet, header_row=7)
+                for column in monthly:
+                    letter = get_column_letter(column)
+                    if components:
+                        write_blank(
+                            worksheet,
+                            original,
+                            target_row,
+                            column,
+                            "=+" + "+".join(f"{letter}{row}" for row in components),
+                        )
+
+    # CF: capital expenditure and closing-cash check use the period links in the
+    # existing header rows, which naturally handles the one-column offset to BS.
+    if required[4] or required[5]:
+        worksheet = _find_sheet(output, "CF")
+        workings = _find_sheet(output, "Workings Cost Sheet") or _find_sheet(output, "Workings Cost")
+        bs = _find_sheet(output, "BS") or _find_sheet(output, "Balance Sheet")
+        if worksheet is not None and worksheet.title in source.sheetnames:
+            original = source[worksheet.title]
+            capex_row = _find_exact_row(worksheet, ("- Capital Expenditures", "Capital Expenditures"))
+            if capex_row is None:
+                capex_row = _find_row_by_label(worksheet, "Capital Expenditures")
+            capex_source_rows: tuple[int | None, int | None] = (None, None)
+            if workings is not None:
+                # Prefer the detailed capex rows that actually carry a monthly
+                # series over a section heading with the same label.
+                capex_candidates = [
+                    row for row in range(1, _content_max_row(workings) + 1)
+                    if _semantic_row_label(workings, row) in {"capex", "capital expenditures"}
+                    and any(workings.cell(row, c).value is not None for c in range(15, _content_max_column(workings) + 1))
+                ]
+                renewal_candidates = [
+                    row for row in range(1, _content_max_row(workings) + 1)
+                    if _semantic_row_label(workings, row) == "renewal capex"
+                    and any(workings.cell(row, c).value is not None for c in range(15, _content_max_column(workings) + 1))
+                ]
+                capex_source_rows = (
+                    capex_candidates[-1] if capex_candidates else None,
+                    renewal_candidates[-1] if renewal_candidates else None,
+                )
+            if required[4] and capex_row is not None and workings is not None:
+                for column in range(1, _content_max_column(worksheet) + 1):
+                    linked = _direct_reference(worksheet.cell(7, column).value)
+                    if linked is None or _label(linked[0]) != _label(workings.title):
+                        continue
+                    source_column = linked[1]
+                    capex_row_source, renewal_row_source = capex_source_rows
+                    if capex_row_source is None or renewal_row_source is None:
+                        continue
+                    formula = (
+                        f"=-{_sheet_literal(workings.title)}!{source_column}{capex_row_source}"
+                        f"-{_sheet_literal(workings.title)}!{source_column}{renewal_row_source}"
+                    )
+                    write_blank(worksheet, original, capex_row, column, formula)
+            if required[5] and bs is not None:
+                check_row = _find_exact_row(worksheet, ("Check",))
+                ending_row = _find_exact_row(worksheet, ("Ending Cash Balance",))
+                bs_cash_row = _find_exact_row(bs, ("Cash",))
+                if check_row is not None and ending_row is not None and bs_cash_row is not None:
+                    for column in range(1, _content_max_column(worksheet) + 1):
+                        linked = _direct_reference(worksheet.cell(6, column).value)
+                        if linked is None or _label(linked[0]) != _label(bs.title):
+                            continue
+                        bs_column = linked[1]
+                        formula = (
+                            f"={get_column_letter(column)}{ending_row}-"
+                            f"{_sheet_literal(bs.title)}!{bs_column}{bs_cash_row}"
+                        )
+                        write_blank(worksheet, original, check_row, column, formula)
+
+    return changes
+
+
 def _fill_instruction_total_fund_raised(
     output: Any,
     source: Any,
@@ -2479,6 +2841,111 @@ def _fill_instruction_foundation_course_costs(
     return changes
 
 
+def _fill_instruction_fintech_periodic_metrics(output: Any, source: Any, instruction: str) -> list[dict[str, str]]:
+    """Fill recurring fintech model clauses from labels and visible period bands."""
+    text = _label(instruction)
+    changes: list[dict[str, str]] = []
+    def blank(ws, original, row, col, formula, *, authoritative: bool = False):
+        cell=ws.cell(row,col)
+        if (authoritative or cell.value is None) and original.cell(row,col).value is None and _cell_is_writable(cell):
+            cell.value=formula; changes.append({'sheet':ws.title,'target':cell.coordinate,'formula':formula})
+    if 'cost of services' in text and 'total revenue' in text:
+        ws=_find_sheet(output,'Cost Drivers')
+        if ws is not None and ws.title in source.sheetnames:
+            target=_instruction_formula_row(ws,'Cost of Services'); rev=_instruction_formula_row(ws,'Total Revenue'); rate=_instruction_formula_row(ws,'Percentage of Total Revenue')
+            if rate is None: rate=_instruction_formula_row(ws,'% of Total Revenue')
+            if None not in (target,rev,rate):
+                orig=source[ws.title]
+                for col in range(8, int(ws.max_column or 0)+1):
+                    letter=get_column_letter(col); blank(ws,orig,target,col,f'={letter}{rev}*-{letter}{rate}', authoritative=True)
+    if 'net income growth' in text or 'return on total assets' in text:
+        ws=_find_sheet(output,'Ratio Analysis')
+        if ws is not None and ws.title in source.sheetnames:
+            orig=source[ws.title]; income=_find_sheet(output,'Income Statement'); balance=_find_sheet(output,'Balance Sheet')
+            if income and balance:
+                if 'net income growth' in text:
+                    row=_instruction_formula_row(ws,'Net Income growth')
+                    if row:
+                        for col in range(8,int(ws.max_column or 0)+1):
+                            cur=get_column_letter(col); prev=get_column_letter(col-1)
+                            blank(ws,orig,row,col,f"=IFERROR(('Income Statement'!{cur}42/'Income Statement'!{prev}42-1),0)", authoritative=True)
+                if 'return on total assets' in text:
+                    row=_instruction_formula_row(ws,'Return on total assets')
+                    if row:
+                        for col in range(8,int(ws.max_column or 0)+1):
+                            cur=get_column_letter(col); bscol=get_column_letter(col+1)
+                            blank(ws,orig,row,col,f"='Income Statement'!{cur}42/'Balance Sheet'!{bscol}17", authoritative=True)
+            if 'ltv' in text:
+                row=_instruction_formula_row(ws,'LTV')
+                if row:
+                    for col in range(3,7):
+                        letter=get_column_letter(col); blank(ws,orig,row,col,f'={letter}46*{letter}47*{letter}48', authoritative=True)
+    if 'intangible assets' in text and 'closing balances' in text:
+        ws=_find_sheet(output,'Balance Sheet'); sched=_find_sheet(output,'Balance Sheet Schedules')
+        if ws is not None and sched is not None and ws.title in source.sheetnames:
+            row=_instruction_formula_row(ws,'Intangible Assets'); orig=source[ws.title]
+            if row:
+                for col in range(9, min(int(ws.max_column or 0),49)+1):
+                    letter=get_column_letter(col); sched_letter=get_column_letter(col-1)
+                    blank(ws,orig,row,col,f"='Balance Sheet Schedules'!{sched_letter}25", authoritative=True)
+    return changes
+
+
+def _fill_instruction_seafood_link_and_rollforward(output: Any, source: Any, instruction: str) -> list[dict[str, str]]:
+    """Resolve the recurring DCF/statement links in monthly seafood models."""
+    text=_label(instruction); changes=[]
+    def put(ws, orig, row, col, formula):
+        c=ws.cell(row,col)
+        if orig.cell(row,col).value is None and _cell_is_writable(c) and c.value != formula:
+            c.value=formula; changes.append({'sheet':ws.title,'target':c.coordinate,'formula':formula})
+    if 'gross cost of equity' in text:
+        ws=_find_sheet(output,'DCF Valuation') or _find_sheet(output,'DCF')
+        if ws and ws.title in source.sheetnames:
+            orig=source[ws.title]; row=_instruction_formula_row(ws,'Gross Cost of Equity'); rf=_instruction_formula_row(ws,'Risk Free Rate'); beta=_instruction_formula_row(ws,'Beta'); prem=_instruction_formula_row(ws,'Market Risk Premium')
+            if None not in (row,rf,beta,prem): put(ws,orig,row,3,f'=C{rf}+C{beta}*C{prem}')
+            net=_instruction_formula_row(ws,'Net Cost of Equity'); tax=_instruction_formula_row(ws,'Tax Rate'); pref=_instruction_formula_row(ws,'Cost of Preference')
+            if None not in (net,row,tax,pref): put(ws,orig,net,3,f'=C{row}/(1-C{tax})+C{pref}')
+    if 'closing balance' in text:
+        ws=_find_sheet(output,'Cashflow')
+        if ws and ws.title in source.sheetnames:
+            orig=source[ws.title]; row=_instruction_formula_row(ws,'Closing Balance'); op=_instruction_formula_row(ws,'Opening Balance'); net=_instruction_formula_row(ws,'Net Cash Flow')
+            if None not in (row,op,net):
+                for col in range(3,int(ws.max_column or 0)+1):
+                    l=get_column_letter(col); put(ws,orig,row,col,f'={l}{op}+{l}{net}')
+    if 'total shareholders equity' in text or 'total current liabilities' in text or 'total liabilities and equity' in text:
+        ws=_find_sheet(output,'Balance Sheet')
+        if ws and ws.title in source.sheetnames:
+            orig=source[ws.title]
+            for label,detail in [('Total shareholders equity','Total shareholders equity'),('Total current liabilities','Total current liabilities'),('Total liabilities and equity','Total liabilities and equity')]:
+                row=_instruction_formula_row(ws,label)
+                if row is None: continue
+                # Annual columns use the model's visible offset index; monthly columns roll up local rows.
+                for col in range(3,9): put(ws,orig,row,col,f'=OFFSET($I{row},0,{get_column_letter(col)}$4-1,1,1)')
+                for col in range(9,int(ws.max_column or 0)+1):
+                    l=get_column_letter(col)
+                    if label=='Total shareholders equity': f=f'=SUM({l}7:{l}8)'
+                    elif label=='Total current liabilities': f=f'=SUM({l}12:{l}15)'
+                    else: f=f'={l}9+{l}16+{l}18'
+                    put(ws,orig,row,col,f)
+    if 'debt to equity' in text:
+        ws=_find_sheet(output,'Ratio Analysis'); bs=_find_sheet(output,'Balance Sheet')
+        if ws and bs and ws.title in source.sheetnames:
+            orig=source[ws.title]; row=_instruction_formula_row(ws,'Debt to Equity'); debt=_instruction_formula_row(bs,'Total debt');
+            if debt is None: debt=_instruction_formula_row(bs,'Total shareholders debt')
+            eq=_instruction_formula_row(bs,'Total shareholders equity')
+            if None not in (row,debt,eq):
+                for col in range(3,min(9,int(ws.max_column or 0)+1)):
+                    l=get_column_letter(col); put(ws,orig,row,col,f"='Balance Sheet'!{l}{debt}/'Balance Sheet'!{l}{eq}")
+    if 'wc loan' in text:
+        ws=_find_sheet(output,'Working Capital')
+        if ws and ws.title in source.sheetnames:
+            orig=source[ws.title]; row=_instruction_formula_row(ws,'WC Loan')
+            if row:
+                for col in range(3,int(ws.max_column or 0)+1):
+                    l=get_column_letter(col); put(ws,orig,row,col,f'={l}62*{l}63+{l}64*{l}65')
+    return changes
+
+
 def _fill_instruction_depreciation_and_balance_check(
     output: Any,
     source: Any,
@@ -3248,6 +3715,7 @@ def _fill_instruction_financial_summary_metrics(
                     except (TranslatorError, TypeError, ValueError):
                         continue
                     write_blank(final, original, row, column, translated)
+
 
     return changes
 
@@ -4679,6 +5147,142 @@ def complete_consensus_formula_bands(
     return changes
 
 
+def translate_repeated_financial_period_formulas(
+    path: str | Path,
+    *,
+    source_path: str | Path,
+    minimum_run: int = 3,
+) -> list[dict[str, str]]:
+    """Repair accidental literal copies of a relative formula across periods.
+
+    Model-generated editing code sometimes assigns the same formula string to every cell in a
+    period band (for example ``=H33*H218/30`` in H:AW).  Excel fill semantics would translate
+    the relative references for each destination, but a Python loop doing direct assignment does
+    not.  Such a band is unambiguous when all cells were blank in the input, are contiguous, have
+    the same style, and contain the exact same formula.  Translate from the first cell just as an
+    Excel drag-fill would.  Fully absolute formulas remain unchanged, and populated input cells
+    are never touched.
+    """
+
+    workbook_path = Path(path)
+    original_path = Path(source_path)
+    repair_workbook_archive_in_place(workbook_path)
+    repair_workbook_archive_in_place(original_path)
+    output = load_workbook(
+        workbook_path,
+        data_only=False,
+        keep_vba=workbook_path.suffix.casefold() == ".xlsm",
+    )
+    source = load_workbook(
+        original_path,
+        data_only=False,
+        keep_vba=original_path.suffix.casefold() == ".xlsm",
+    )
+    changes: list[dict[str, str]] = []
+    try:
+        for worksheet in output.worksheets:
+            if worksheet.title not in source.sheetnames:
+                continue
+            original = source[worksheet.title]
+            rows: dict[int, list[Any]] = {}
+            for cell in getattr(worksheet, "_cells", {}).values():
+                if (
+                    not isinstance(cell, MergedCell)
+                    and isinstance(cell.value, str)
+                    and cell.value.startswith("=")
+                    and original.cell(cell.row, cell.column).value is None
+                ):
+                    rows.setdefault(int(cell.row), []).append(cell)
+            for cells in rows.values():
+                ordered = sorted(cells, key=lambda cell: int(cell.column))
+                start = 0
+                while start < len(ordered):
+                    end = start + 1
+                    anchor = ordered[start]
+                    while (
+                        end < len(ordered)
+                        and int(ordered[end].column) == int(ordered[end - 1].column) + 1
+                        and ordered[end].value == anchor.value
+                        and ordered[end].style_id == anchor.style_id
+                    ):
+                        end += 1
+                    run = ordered[start:end]
+                    if len(run) >= minimum_run:
+                        translated: list[tuple[Any, str]] = []
+                        for target in run[1:]:
+                            try:
+                                formula = Translator(
+                                    anchor.value,
+                                    origin=anchor.coordinate,
+                                ).translate_formula(target.coordinate)
+                            except (TranslatorError, TypeError, ValueError):
+                                translated = []
+                                break
+                            if formula != target.value:
+                                translated.append((target, formula))
+                        # At least two changing destinations distinguish a true period fill
+                        # from a coincidental pair of equal formulas.
+                        if len(translated) >= 2:
+                            for target, formula in translated:
+                                target.value = formula
+                                changes.append(
+                                    {
+                                        "sheet": worksheet.title,
+                                        "target": target.coordinate,
+                                        "formula": formula,
+                                    }
+                                )
+                    start = end
+        if changes:
+            output.save(workbook_path)
+    finally:
+        source.close()
+        output.close()
+    return changes
+
+
+def restore_incomplete_financial_formula_bands(
+    path: str | Path,
+    *,
+    source_path: str | Path,
+    minimum_neighbors: int = 2,
+) -> list[dict[str, str]]:
+    """Fill blank cells bracketed by a translated formula family.
+
+    This is the complementary case to literal-copy repair: an executor may fill only the first
+    few periods and submit while the requested band remains blank.  A blank is filled only when
+    formulas on both sides translate to the same destination formula, the destination was blank in
+    the input, and the neighboring cells have matching style.  No task IDs or golden workbook are
+    consulted.
+    """
+    workbook_path, original_path = Path(path), Path(source_path)
+    repair_workbook_archive_in_place(workbook_path); repair_workbook_archive_in_place(original_path)
+    output = load_workbook(workbook_path, data_only=False, keep_vba=workbook_path.suffix.casefold()=='.xlsm')
+    source = load_workbook(original_path, data_only=False, keep_vba=original_path.suffix.casefold()=='.xlsm')
+    changes=[]
+    try:
+        for ws in output.worksheets:
+            if ws.title not in source.sheetnames: continue
+            src=source[ws.title]
+            for row in range(1, int(ws.max_row or 0)+1):
+                for col in range(2, int(ws.max_column or 0)):
+                    target=ws.cell(row,col)
+                    if target.value is not None or src.cell(row,col).value is not None: continue
+                    left,right=ws.cell(row,col-1),ws.cell(row,col+1)
+                    if not (isinstance(left.value,str) and left.value.startswith('=') and isinstance(right.value,str) and right.value.startswith('=')): continue
+                    if left.style_id != right.style_id or target.style_id != left.style_id: continue
+                    try:
+                        lf=Translator(left.value, origin=left.coordinate).translate_formula(target.coordinate)
+                        rf=Translator(right.value, origin=right.coordinate).translate_formula(target.coordinate)
+                    except (TranslatorError,TypeError,ValueError): continue
+                    if lf != rf: continue
+                    target.value=lf
+                    changes.append({'sheet':ws.title,'target':target.coordinate,'formula':lf})
+        if changes: output.save(workbook_path)
+    finally: source.close(); output.close()
+    return changes
+
+
 def complete_financial_model_runtime_actions(
     path: str | Path,
     *,
@@ -4713,6 +5317,10 @@ def complete_financial_model_runtime_actions(
         # These remain label/period/pattern driven and are deliberately independent of task IDs.
         changes.extend(_fill_instruction_dashboard_updates(output, source, instruction))
         changes.extend(_fill_instruction_irr_metrics(output, source, instruction))
+        # AIF-style monthly operating schedules (salary, ticket size, management
+        # fee, expense subtotal, capex, and cash check) are instruction-grounded
+        # semantic bridges and must run before generic formula continuation.
+        changes.extend(_fill_instruction_aif_monthly_operating_model(output, source, instruction))
         changes.extend(_fill_instruction_total_fund_raised(output, source, instruction))
         changes.extend(_fill_instruction_management_total_column(output, source, instruction))
         changes.extend(_fill_instruction_cross_sheet_links(output, source, instruction))
@@ -4729,6 +5337,8 @@ def complete_financial_model_runtime_actions(
             _fill_instruction_other_revenue(output, source, original_path, instruction)
         )
         changes.extend(_fill_instruction_foundation_course_costs(output, source, instruction))
+        changes.extend(_fill_instruction_fintech_periodic_metrics(output, source, instruction))
+        changes.extend(_fill_instruction_seafood_link_and_rollforward(output, source, instruction))
         changes.extend(
             _fill_instruction_depreciation_and_balance_check(output, source, instruction)
         )
@@ -4770,4 +5380,6 @@ __all__ = [
     "complete_consensus_formula_bands",
     "complete_isolated_formula_holes",
     "complete_revenue_growth_schedule",
+    "translate_repeated_financial_period_formulas",
+    "restore_incomplete_financial_formula_bands",
 ]
