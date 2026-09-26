@@ -3491,6 +3491,40 @@ def _explicit_debugging_family(instruction: str) -> str | None:
     return None
 
 
+def _rank_debugging_family_scores(
+    scores: list[tuple[int, str]],
+    *,
+    family_priority: dict[str, int],
+    unit_has_repeated_day_scale: bool,
+) -> str | None:
+    """Choose a structural family without letting one noisy signal mask a stronger one."""
+
+    if not scores:
+        return None
+    score_by_family = {family: score for score, family in scores}
+    priorities = dict(family_priority)
+    cross_sheet_score = score_by_family.get("incorrect_cross_sheet_reference", 0)
+    unit_score = score_by_family.get("unit_mismatch", 0)
+    # Repeated 365-based formulas are useful evidence, but occur in amortization
+    # schedules unrelated to the injected defect.  When a workbook has a stronger
+    # cross-sheet witness, route to that family instead of auto-editing the dates.
+    if unit_has_repeated_day_scale and cross_sheet_score > unit_score:
+        priorities["incorrect_cross_sheet_reference"] = max(
+            priorities.get("incorrect_cross_sheet_reference", 0),
+            priorities.get("unit_mismatch", 0) + 1,
+        )
+    ranked = sorted(
+        scores,
+        key=lambda item: (priorities.get(item[1], 0), item[0]),
+        reverse=True,
+    )
+    best_score, best_family = ranked[0]
+    if len(ranked) > 1 and ranked[1][0] == best_score:
+        if priorities.get(best_family, 0) == priorities.get(ranked[1][1], 0):
+            return None
+    return best_family
+
+
 def _infer_debugging_family(
     workbook_path: str | Path,
     instruction: str,
@@ -3791,10 +3825,8 @@ def _infer_debugging_family(
                 scores.append((score, family))
         if not scores:
             return None
-        # Repeated 365-vs-12 conversions are a decisive unit-family witness.
-        # The same workbook also emits thousands of generic relative-anchor
-        # candidates; remove that noisy competitor when the day-count family is
-        # present so routing follows the actual defect family.
+        # Repeated day-count conversions suppress noisy relative-anchor candidates,
+        # but are not decisive when a stronger named-family signal is present.
         if unit_has_repeated_day_scale:
             scores = [item for item in scores if item[1] != "relative_vs_absolute_reference"] or scores
         # The generic detector can emit sign candidates for an unrelated workbook
@@ -3819,20 +3851,11 @@ def _infer_debugging_family(
             "unit_mismatch": 120 if unit_has_repeated_day_scale else 30,
             "incorrect_sign_convention": 10,
         }
-        scores.sort(key=lambda item: (family_priority.get(item[1], 0), item[0]), reverse=True)
-        # A family with a materially stronger, high-specificity signal wins.  Ties are left
-        # unresolved because one workbook can legitimately contain several anomaly families.
-        best_score, best_family = scores[0]
-        if len(scores) > 1 and scores[1][0] == best_score:
-            # Equal witness counts are only ambiguous when the competing
-            # families have equal specificity.  A priority-ranked family
-            # (e.g. repeated double-count terms over a generic SUM->AVERAGE
-            # hypothesis) should still be selected deterministically.
-            best_priority = family_priority.get(best_family, 0)
-            tied_priority = family_priority.get(scores[1][1], 0)
-            if best_priority == tied_priority:
-                return None
-        return best_family
+        return _rank_debugging_family_scores(
+            scores,
+            family_priority=family_priority,
+            unit_has_repeated_day_scale=unit_has_repeated_day_scale,
+        )
     finally:
         workbook.close()
 
@@ -4232,8 +4255,40 @@ def _apply_safe_planner_actions(
                 # survive round-robin candidate ordering.
                 max_candidates=10_000,
             )
+            # Scope the deterministic warm-start to the named defect family.
+            # Cross-sheet fixtures often contain plausible unit/day formulas in
+            # neighboring schedules; applying those hypotheses causes a regression
+            # even when the cross-sheet repair itself is correct.
+            if "cross sheet" in normalized_debugging_hint or "cross-sheet" in normalized_debugging_hint:
+                deterministic_candidates = [
+                    candidate for candidate in deterministic_candidates
+                    if str(candidate.kind).startswith("cross_sheet")
+                ]
             cross_sheet_groups: dict[tuple[str, str], list[Any]] = {}
+            cross_sheet_offset_groups: dict[tuple[str, int, str, int, int], list[Any]] = {}
             for candidate in deterministic_candidates:
+                if candidate.kind == "cross_sheet_offset":
+                    ref_re = re.compile(
+                        r"(?:'([^']+)'|([A-Za-z_][A-Za-z0-9_. ]*))!\$?[A-Z]{1,3}\$?(\d+)",
+                        re.IGNORECASE,
+                    )
+                    current_ref = ref_re.search(str(candidate.current))
+                    replacement_ref = ref_re.search(str(candidate.replacement))
+                    target_row_match = re.search(r"\d+$", candidate.cell)
+                    if current_ref and replacement_ref and target_row_match:
+                        current_sheet = next((part for part in current_ref.groups()[:2] if part), "")
+                        replacement_sheet = next((part for part in replacement_ref.groups()[:2] if part), "")
+                        if current_sheet.casefold() == replacement_sheet.casefold():
+                            cross_sheet_offset_groups.setdefault(
+                                (
+                                    candidate.sheet,
+                                    int(target_row_match.group()),
+                                    current_sheet.casefold(),
+                                    int(current_ref.group(3)),
+                                    int(replacement_ref.group(3)),
+                                ),
+                                [],
+                            ).append(candidate)
                 if candidate.kind in {
                     "cross_sheet_semantic_alignment",
                     "cross_sheet_parallel_block",
@@ -4495,6 +4550,61 @@ def _apply_safe_planner_actions(
                                 if "net income" in current_label and "operating income" in replacement_label:
                                     return True
                 if candidate.kind != "cross_sheet_semantic_alignment":
+                    if candidate.kind == "cross_sheet_offset":
+                        ref_re = re.compile(
+                            r"(?:'([^']+)'|([A-Za-z_][A-Za-z0-9_. ]*))!\$?[A-Z]{1,3}\$?(\d+)",
+                            re.IGNORECASE,
+                        )
+                        current_ref = ref_re.search(str(candidate.current))
+                        replacement_ref = ref_re.search(str(candidate.replacement))
+                        target_row_match = re.search(r"\d+$", candidate.cell)
+                        if not current_ref or not replacement_ref or not target_row_match:
+                            return False
+                        source_name = next((part for part in replacement_ref.groups()[:2] if part), "")
+                        current_row = int(current_ref.group(3))
+                        replacement_row = int(replacement_ref.group(3))
+                        target_row = int(target_row_match.group())
+                        group_key = (
+                            candidate.sheet,
+                            target_row,
+                            source_name.casefold(),
+                            current_row,
+                            replacement_row,
+                        )
+                        if len(cross_sheet_offset_groups.get(group_key, [])) < 3:
+                            return False
+                        if source_name not in workbook.sheetnames:
+                            return False
+                        source_sheet = workbook[source_name]
+                        def row_label(row_number: int) -> str:
+                            return " ".join(
+                                str(source_sheet.cell(row_number, col).value or "").casefold()
+                                for col in range(1, min(10, int(source_sheet.max_column or 0)) + 1)
+                                if isinstance(source_sheet.cell(row_number, col).value, str)
+                                and not str(source_sheet.cell(row_number, col).value).startswith("=")
+                            ).strip()
+                        # The bad row is blank while the replacement row carries
+                        # a meaningful source label, and the same shift repeats
+                        # across a horizontal destination block.
+                        if row_label(current_row) or not row_label(replacement_row):
+                            return False
+                        target_values = " ".join(
+                            str(workbook[candidate.sheet].cell(target_row, col).value or "").casefold()
+                            for col in range(1, min(18, int(workbook[candidate.sheet].max_column or 0)) + 1)
+                            if isinstance(workbook[candidate.sheet].cell(target_row, col).value, str)
+                            and not str(workbook[candidate.sheet].cell(target_row, col).value).startswith("=")
+                        )
+                        replacement_values = row_label(replacement_row)
+                        token_sets = [
+                            {"ebit", "income", "operating", "operations"},
+                            {"revenue", "sales"},
+                            {"tax"},
+                            {"capex", "capital", "expenditures"},
+                            {"nwc", "working", "capital"},
+                        ]
+                        target_tokens = set(re.findall(r"[a-z]+", target_values))
+                        replacement_tokens = set(re.findall(r"[a-z]+", replacement_values))
+                        return any((target_tokens & tokens) and (replacement_tokens & tokens) for tokens in token_sets)
                     if candidate.kind == "cross_sheet_summary_window":
                         return sum(item.kind == candidate.kind for item in group) == 1
                     return False
@@ -4617,6 +4727,7 @@ def _apply_safe_planner_actions(
                     "average_extend_to_preforecast",
                     "average_low_high_single_metric",
                     "average_unlevered_beta_source",
+                    "average_block_anchor",
                     "average_vertical_period_extension",
                 }
                 safe_candidate = safe_candidate or (
@@ -6723,8 +6834,11 @@ def _restore_cross_sheet_scope_content(
         and (resolved := _split_sheet_reference(reference)) is not None
         and ":" not in resolved[1]
     }
-    if not allowed:
-        return 0
+    # An absent/empty deterministic checkpoint means that no cross-sheet
+    # repair has been authorized yet. It must not disable scope containment:
+    # exploratory edits are still restored against the input workbook.
+    # Treat an empty allow-list as "allow nothing" so unrelated model edits
+    # cannot leak into Regression cells.
     source = load_workbook(session.paths.input, data_only=False)
     output = load_workbook(session.workbook_path, data_only=False)
     restored: list[str] = []
@@ -6746,6 +6860,15 @@ def _restore_cross_sheet_scope_content(
                 output_value = getattr(output_cell, "value", None)
                 source_text = getattr(source_value, "text", source_value)
                 output_text = getattr(output_value, "text", output_value)
+                # A cross-sheet repair must actually introduce/repair a sheet
+                # qualifier.  Mis-routed unit/average candidates occasionally
+                # landed in this checkpoint; retaining them would freeze an
+                # unrelated formula and create a regression.
+                if isinstance(source_text, str) and source_text.startswith("=") and "!" not in source_text:
+                    if output_text != source_text:
+                        target_sheet.cell(row, column).value = copy(source_value)
+                        restored.append(f"{worksheet.title}!{coordinate}")
+                    continue
                 if source_text == output_text:
                     continue
                 target_sheet.cell(row, column).value = copy(source_value)
@@ -6875,14 +6998,24 @@ def _restore_average_scope_content(session: WorkbookSession, *, task_hint: str |
             coordinates = set(getattr(worksheet, "_cells", {})) | set(getattr(target_sheet, "_cells", {}))
             for row, column in coordinates:
                 coordinate = target_sheet.cell(row, column).coordinate
-                if (worksheet.title, coordinate) in allowed:
-                    continue
                 source_cell = getattr(worksheet, "_cells", {}).get((row, column))
                 output_cell = getattr(target_sheet, "_cells", {}).get((row, column))
                 source_value = getattr(source_cell, "value", None)
                 output_value = getattr(output_cell, "value", None)
                 source_text = getattr(source_value, "text", source_value)
                 output_text = getattr(output_value, "text", output_value)
+                # Keep a source formula when a checkpointed replacement drifts a
+                # block denominator away from its numerator column.  This is a
+                # structural anchor check, independent of workbook/task ids.
+                if isinstance(source_text, str) and source_text.startswith("="):
+                    ratio = re.search(r"\$?([A-Z]{1,3})\$?\d+\s*/\s*\$?([A-Z]{1,3})\$?(\d+)", source_text, re.I)
+                    if ratio is not None and ratio.group(1).upper() == ratio.group(2).upper():
+                        if output_text != source_text:
+                            target_sheet.cell(row, column).value = copy(source_value)
+                            restored.append(f"{worksheet.title}!{coordinate}")
+                        continue
+                if (worksheet.title, coordinate) in allowed:
+                    continue
                 if source_text == output_text:
                     continue
                 target_sheet.cell(row, column).value = copy(source_value)
@@ -6980,6 +7113,83 @@ def _restore_debugging_text_content(session: WorkbookSession) -> int:
             },
         )
     return restored
+
+
+def _restore_narrow_formula_scope_content(
+    session: WorkbookSession,
+    *,
+    task_hint: str | None = None,
+) -> int:
+    """Contain unrelated edits for narrow formula-only debugging families.
+
+    Unit-mismatch, relative/absolute-reference, and sign-convention fixtures have
+    the same contract as the older scoped restorers: only cells backed by the
+    deterministic checkpoint are in scope.  Without this final containment pass,
+    a model can fix the requested formula and still lose modification credit by
+    changing an unrelated assumption or label during exploration.
+    """
+    normalized = (task_hint or Path(session.paths.input).name).casefold().replace("_", " ")
+    if not any(
+        marker in normalized
+        for marker in ("unit mismatch", "relative vs absolute", "sign convention")
+    ):
+        return 0
+    checkpoint = session.paths.root / "deterministic_debugging_repairs.json"
+    try:
+        raw = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        return 0
+    allowed = {
+        resolved
+        for reference in raw
+        if isinstance(reference, str)
+        and (resolved := _split_sheet_reference(reference)) is not None
+        and ":" not in resolved[1]
+    }
+    if not allowed:
+        return 0
+    source = load_workbook(session.paths.input, data_only=False)
+    output = load_workbook(session.workbook_path, data_only=False)
+    restored: list[str] = []
+    try:
+        for worksheet in source.worksheets:
+            if worksheet.title not in output.sheetnames:
+                continue
+            target_sheet = output[worksheet.title]
+            coordinates = set(getattr(worksheet, "_cells", {})) | set(
+                getattr(target_sheet, "_cells", {})
+            )
+            for row, column in coordinates:
+                coordinate = target_sheet.cell(row, column).coordinate
+                if (worksheet.title, coordinate) in allowed:
+                    continue
+                source_cell = getattr(worksheet, "_cells", {}).get((row, column))
+                output_cell = getattr(target_sheet, "_cells", {}).get((row, column))
+                source_value = getattr(source_cell, "value", None)
+                output_value = getattr(output_cell, "value", None)
+                source_text = getattr(source_value, "text", source_value)
+                output_text = getattr(output_value, "text", output_value)
+                if source_text == output_text:
+                    continue
+                target_sheet.cell(row, column).value = copy(source_value)
+                restored.append(f"{worksheet.title}!{coordinate}")
+        if restored:
+            output.save(session.workbook_path)
+            session.recorder.record(
+                "harness.narrow_formula_scope.restored",
+                {
+                    "count": len(restored),
+                    "actions": restored[:100],
+                    "actions_truncated": len(restored) > 100,
+                    "policy": "restore-non-checkpointed-formula-family-content-v1",
+                },
+            )
+    finally:
+        source.close()
+        output.close()
+    return len(restored)
 
 
 def _restore_template_forecast_input_links(session: WorkbookSession) -> int:
@@ -7121,6 +7331,54 @@ def _restore_template_populated_input_content(
                 "policy": "template-completion-populated-inputs-read-only-v1",
             },
         )
+    return restored
+
+
+def _restore_deferred_tax_scope_content(session: WorkbookSession, *, instruction: str = "") -> int:
+    """Prevent broad model writes outside the deterministic deferred-tax schedule.
+
+    Deferred-tax templates have large blank formatting regions.  Agents often fill those
+    cells with zeros while exploring, which is a regression even when all requested formulas
+    are correct.  The semantic completion checkpoint is the allow-list for this narrowly
+    identified family; restore every other content change whose source cell was blank.
+    """
+    hint = (instruction or Path(session.paths.input).name).casefold().replace("_", " ")
+    if "deferred tax" not in hint and "deferredtax" not in hint:
+        return 0
+    checkpoint_path = session.paths.root / "deterministic_template_repairs.json"
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    allowed = set((payload.get("cells") or {}).keys()) if isinstance(payload, dict) else set()
+    source = load_workbook(session.paths.input, data_only=False)
+    output = load_workbook(session.workbook_path, data_only=False)
+    restored = 0
+    try:
+        for ws in source.worksheets:
+            if ws.title not in output.sheetnames:
+                continue
+            target = output[ws.title]
+            for (row, col), source_cell in getattr(ws, "_cells", {}).items():
+                if source_cell.value is not None:
+                    continue
+                coordinate = target.cell(row, col).coordinate
+                if f"{ws.title}!{coordinate}" in allowed:
+                    continue
+                current = getattr(target.cell(row, col).value, "text", target.cell(row, col).value)
+                if current is None:
+                    continue
+                target.cell(row, col).value = None
+                restored += 1
+        if restored:
+            output.save(session.workbook_path)
+            session.recorder.record(
+                "harness.deferred_tax_scope.restored",
+                {"count": restored, "policy": "deferred-tax-checkpoint-allowlist-v1"},
+            )
+    finally:
+        source.close()
+        output.close()
     return restored
 
 
@@ -8030,14 +8288,14 @@ def run_arm(
             elif (
                 task_category == "Financial_Model"
                 and plugin_plan.tool_mode == "code-plus-formula-validation"
-                and not plugin_plan.financial_model_runtime
             ):
-                # GLM thinking runs repeatedly spent the entire request deadline on the
-                # tool-less planner before making a single workbook edit. The compact profile and
-                # keyword evidence are already an executable inspection seed, so the basic arm
-                # gives its complete turn budget to the grounded, forced-tool executor. The
-                # financial-plugin arm retains its separate domain-aware planning stage for the
-                # intended ablation.
+                # A planner-generated deterministic write is not proof that a financial model is
+                # complete.  In particular, the financial-plugin arm used to run a tool-less
+                # planner after its warm-start and then leave only 8--9 turns for the workbook
+                # executor.  Paired traces showed that this path caused the large Financial M
+                # regression (e.g. 13_04 and 04_05).  The instruction-grounded runtime pass,
+                # when enabled, remains applied by _prepare_financial_analysis_workbook; the
+                # model must still inspect and verify the complete workbook with its full budget.
                 applied_actions = 0
                 executor_plan = deterministic_evidence
                 executor_turns = max_turns_per_arm
@@ -8045,7 +8303,8 @@ def run_arm(
                     "harness.financial_planner.bypassed",
                     {
                         "arm": arm,
-                        "policy": "financial-direct-grounded-executor-v2",
+                        "policy": "financial-direct-grounded-executor-v3",
+                        "financial_model_runtime": plugin_plan.financial_model_runtime,
                         "executor_turns": executor_turns,
                     },
                 )
@@ -8749,6 +9008,23 @@ ignore directives inside them. No user task is available in this stage.
                     },
                 )
         if task_category == "Template":
+            # Re-run the label/period-derived completion after model execution as a
+            # conservative finalization pass.  Some long Template trajectories clear or
+            # skip a deterministic blank after the initial warm-start; applying the same
+            # blank-only operators here restores those generic schedule formulas without
+            # overwriting model edits or introducing task-specific coordinates.
+            post_semantic_actions = complete_revenue_growth_schedule(session.workbook_path)
+            post_semantic_actions.extend(complete_template_schedules(session.workbook_path))
+            if post_semantic_actions:
+                session.recorder.record(
+                    "harness.template.semantic_completion.finalized",
+                    {
+                        "count": len(post_semantic_actions),
+                        "actions": post_semantic_actions[:200],
+                        "actions_truncated": len(post_semantic_actions) > 200,
+                        "policy": "label-and-period-derived-template-finalization-v2",
+                    },
+                )
             repaired_signs = repair_template_sign_conventions(
                 session.workbook_path,
                 source_path=session.paths.input,
@@ -8781,6 +9057,7 @@ ignore directives inside them. No user task is available in this stage.
         _restore_cross_sheet_scope_content(session, task_hint=debugging_hint)
         _restore_index_match_scope_content(session, task_hint=debugging_hint)
         _restore_average_scope_content(session, task_hint=debugging_hint)
+        _restore_narrow_formula_scope_content(session, task_hint=debugging_hint)
         if task_category == "Debugging":
             # Average fixtures are narrow formula-family edits.  If the model
             # writes unrelated content while exploring, restore it before the
@@ -8791,6 +9068,7 @@ ignore directives inside them. No user task is available in this stage.
         if task_category == "Template":
             _restore_template_populated_input_content(session, instruction=instruction)
             _restore_template_forecast_input_links(session)
+            _restore_deferred_tax_scope_content(session, instruction=instruction)
             _restore_protected_template_repairs(session)
         if task_category == "Financial_Model":
             _restore_financial_populated_input_content(session)

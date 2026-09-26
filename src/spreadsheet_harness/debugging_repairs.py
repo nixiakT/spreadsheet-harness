@@ -3059,6 +3059,55 @@ def _interest_balance_average_alternatives(
     return alternatives
 
 
+def _average_block_anchor_alternatives(
+    worksheet: Any, row: int, column: int, formula: str
+) -> list[tuple[str, str, str]]:
+    """Repair a denominator that drifted to the destination column in a block ratio.
+
+    In sources/uses and similar side-by-side blocks, ``D36/$D$41`` is the ratio of a
+    component in column D to that block's total.  A copied corruption commonly changes
+    only the denominator to ``E$41``.  We require a same-row numerator reference, a
+    total/check-labelled denominator row, and a denominator column different from the
+    numerator column before proposing the anchored replacement.
+    """
+    if not isinstance(formula, str) or "/" not in formula:
+        return []
+    alternatives: list[tuple[str, str, str]] = []
+    for division in re.finditer(
+        r"(?P<num>\$?[A-Z]{1,3}\$?\d+)\s*/\s*(?P<den>\$?[A-Z]{1,3}\$?\d+)",
+        formula,
+        re.IGNORECASE,
+    ):
+        num = _CELL_RE.fullmatch(division.group("num"))
+        den = _CELL_RE.fullmatch(division.group("den"))
+        if num is None or den is None:
+            continue
+        num_col = column_index_from_string(num.group("column"))
+        den_col = column_index_from_string(den.group("column"))
+        den_row = int(den.group("row"))
+        if num_col == den_col:
+            continue
+        labels = " ".join(
+            str(worksheet.cell(den_row, c).value or "")
+            for c in range(1, min(worksheet.max_column, den_col + 1) + 1)
+        ).casefold()
+        if not any(token in labels for token in ("total", "subtotal", "ebitda", "revenue", "assets", "liabilities")):
+            continue
+        anchored = f"${get_column_letter(num_col)}${den_row}"
+        replacement = _replace_once(
+            formula, division.start("den"), division.end("den"), anchored
+        )
+        if replacement != formula:
+            alternatives.append(
+                (
+                    "average_block_anchor",
+                    replacement,
+                    "anchor a block ratio denominator to the numerator's source column",
+                )
+            )
+    return alternatives
+
+
 def _cagr_alternatives(
     worksheet: Any, row: int, column: int, formula: str
 ) -> list[tuple[str, str, str]]:
@@ -7287,6 +7336,11 @@ def detect_debugging_repair_candidates(
             elif average_task:
                 alternatives = _formula_alternatives(formula)
                 alternatives.extend(
+                    _average_block_anchor_alternatives(
+                        worksheet, int(cell.row), int(cell.column), formula
+                    )
+                )
+                alternatives.extend(
                     _contextual_average_alternatives(
                         workbook, worksheet, int(cell.row), int(cell.column), formula
                     )
@@ -7519,6 +7573,7 @@ def detect_debugging_repair_candidates(
         "average_extend_to_preforecast": -5,
         "average_low_high_single_metric": -5,
         "average_unlevered_beta_source": -5,
+        "average_block_anchor": -7,
         "average_vertical_period_extension": -6,
         "aggregate_range_shift": 15,
         "aggregate_boundary": 16,

@@ -73,12 +73,22 @@ def main() -> int:
     parser.add_argument("--model-slug", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--parallelism", type=int, default=2)
+    parser.add_argument(
+        "--task-ids", nargs="*", default=None,
+        help="Optional item ids for a focused smoke run; omit for the full category.",
+    )
     parser.add_argument("--base-url", default="http://10.130.138.46:8010/v1")
     parser.add_argument("--api-key-file", type=Path, default=Path("/tmp/spreadsheet-harness-litellm.key"))
     args = parser.parse_args()
     args.output = args.output.resolve()
     data = json.loads((DATASET / args.category / "dataset.json").read_text(encoding="utf-8"))
-    tasks = [f"{args.category}/{item['id']}" for item in data]
+    selected = set(args.task_ids or [])
+    tasks = [
+        f"{args.category}/{item['id']}" for item in data
+        if not selected or item["id"] in selected
+    ]
+    if not tasks:
+        parser.error("--task-ids did not match any item in the selected category")
     rows = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallelism) as pool:
         pending = {pool.submit(run_cell, args, task): task for task in tasks}

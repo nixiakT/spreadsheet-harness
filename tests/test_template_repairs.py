@@ -83,6 +83,8 @@ def test_template_completion_router_is_noop_outside_six_matched_tasks(
         "09_03",
         "09_04",
         "14_07",
+        "05_01",
+        "05_02",
     }
 
 

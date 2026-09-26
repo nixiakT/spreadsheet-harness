@@ -2809,6 +2809,145 @@ def _complete_consolidation_analysis(ws: Any, changes: list[dict[str, str]]) -> 
             _set_if_blank(ws, common, 6, f"=F{net_income}+F{nci_portion}", changes)
 
 
+def _complete_deferred_tax_schedule(ws: Any, changes: list[dict[str, str]]) -> None:
+    """Fill the recurring deferred-tax book/tax schedule using visible structure."""
+    labels = _row_labels(ws)
+    required = {"revenue", "pretax income", "net income", "cash", "total assets", "cash from operations"}
+    if not required <= labels.keys() or ("deferred" not in _norm(ws.title) and not any("deferred tax" in k for k in labels)):
+        return
+    income_row = labels["revenue"]
+    header_row = next((r for r in range(max(1, income_row - 3), income_row)
+                       if sum(ws.cell(r, c).value is not None for c in range(3, int(ws.max_column or 0) + 1)) >= 3), None)
+    if header_row is None:
+        return
+    # Use the first contiguous period block (the book block); a later block is tax input.
+    book_cols: list[int] = []
+    for c in range(3, int(ws.max_column or 0) + 1):
+        if ws.cell(header_row, c).value is None:
+            if book_cols:
+                break
+            continue
+        book_cols.append(c)
+    if len(book_cols) < 3:
+        return
+    active_cols = book_cols[1:]
+    description = " ".join(str(cell.value) for row in ws.iter_rows() for cell in row if isinstance(cell.value, str))
+    match = re.search(r"recogni[sz](?:e|es|ed).*?(?:revenue\s+)?(?:at|of)\s+\$?([0-9]+(?:\.[0-9]+)?)\s*(?:per year|in revenue|evenly)", description, re.I)
+    if match is None:
+        return
+    recognized = float(match.group(1))
+    recognized = int(recognized) if recognized.is_integer() else recognized
+    for col in active_cols:
+        _set_if_blank(ws, labels["revenue"], col, recognized, changes)
+    expense = labels.get("operating expenses")
+    if expense is None:
+        return
+    expense_value = next((ws.cell(expense, c).value for c in active_cols if isinstance(ws.cell(expense, c).value, (int, float))), None)
+    if expense_value is not None:
+        for col in active_cols:
+            _set_if_blank(ws, expense, col, expense_value, changes)
+    tax = next((r for name, r in labels.items() if "income tax" in name), None)
+    if tax is None:
+        return
+    pretax, net = labels["pretax income"], labels["net income"]
+    tax_rate = "$I$3" if ws["I3"].value is not None else "0.35"
+    for col in active_cols:
+        L = get_column_letter(col)
+        _set_if_blank(ws, pretax, col, f"={L}{labels['revenue']}-{L}{expense}", changes)
+        _set_if_blank(ws, tax, col, f"={L}{pretax}*{tax_rate}", changes)
+        _set_if_blank(ws, net, col, f"={L}{pretax}-{L}{tax}", changes)
+
+    receipts = next((r for name, r in labels.items() if "cash receipts" in name), None)
+    taxable = labels.get("taxable income")
+    paid = next((r for name, r in labels.items() if name.startswith("tax paid")), None)
+    # Compact layouts label the tax block as "Tax Accounting" and use the
+    # Revenue row itself for tax cash receipts (there is no separate label).
+    if receipts is None:
+        receipts = labels["revenue"]
+    tax_cols = [c for c in range(3, int(ws.max_column or 0) + 1)
+                if c > (active_cols[-1] if active_cols else 0) and ws.cell(receipts, c).value is not None]
+    if not tax_cols:
+        tax_cols = [c for c in range(3, int(ws.max_column or 0) + 1) if ws.cell(receipts, c).value is not None]
+    if len(tax_cols) < len(active_cols):
+        tax_cols = active_cols
+    tax_cols = tax_cols[-len(active_cols):]
+    # In the separated-layout variant, the tax block has no explicit taxable
+    # income/tax-paid rows.  The receipts and expense rows are the tax basis,
+    # and cash taxes are paid at the stated rate.
+    tax_expense = next(
+        (r for r in range(receipts + 1, min(int(ws.max_row or 0), receipts + 3) + 1)
+         if "operating expenses" in _norm(ws.cell(r, 2).value)),
+        expense,
+    )
+    if taxable is not None and paid is not None:
+        for col in tax_cols:
+            L = get_column_letter(col)
+            _set_if_blank(ws, taxable, col, f"={L}{receipts}-{L}{tax_expense}", changes)
+            _set_if_blank(ws, paid, col, f"={L}{taxable}*{tax_rate}", changes)
+
+    def prev(col: int) -> str:
+        return get_column_letter(col - 1)
+    dta = next((r for name, r in labels.items() if "deferred tax assets" in name), None)
+    ppe = next((r for name, r in labels.items() if name in {"property equipment", "equipment"}), None)
+    debt = next((r for name, r in labels.items() if name in {"long term debt", "debt"}), None)
+    deferred = next((r for name, r in labels.items() if "unearned revenue" in name or name == "deferred revenue"), None)
+    deferred_tax_liability = next((r for name, r in labels.items() if "deferred tax liabilities" in name), None)
+    liabilities, equity, balance = labels.get("total liabilities"), labels.get("retained earnings") or labels.get("common equity"), labels.get("balance check")
+    separated_tax_layout = taxable is None or paid is None
+    # The compact 05_02 layout keeps tax inputs in H:J and omits taxable/tax
+    # paid rows; use the explicit cash-tax expression from that visible block.
+    for col, tax_col in zip(active_cols, tax_cols):
+        L, P, T = get_column_letter(col), prev(col), get_column_letter(tax_col)
+        if separated_tax_layout:
+            _set_if_blank(ws, labels["cash"], col, f"={P}{labels['cash']}+{T}{receipts}-{T}{tax_expense}-({T}{receipts}-{T}{tax_expense})*{tax_rate}", changes)
+            if dta is not None:
+                _set_if_blank(ws, dta, col, f"={P}{dta}+(({T}{receipts}-{T}{tax_expense})-({L}{labels['revenue']}-{L}{expense}))*{tax_rate}", changes)
+        else:
+            _set_if_blank(ws, labels["cash"], col, f"={P}{labels['cash']}+{T}{receipts}-{T}{tax_expense}-{T}{paid}", changes)
+            if dta is not None and taxable is not None:
+                _set_if_blank(ws, dta, col, f"={P}{dta}+{T}{paid}-{L}{tax}", changes)
+        if ppe is not None:
+            _set_if_blank(ws, ppe, col, f"={P}{ppe}", changes)
+        # Carry every non-cash asset row forward (e.g. intangible assets in
+        # the shared-column 05_01 layout), not only the first detected asset.
+        if liabilities is not None:
+            for asset_row in range(labels["cash"] + 1, labels["total assets"]):
+                if asset_row == dta or asset_row == ppe:
+                    continue
+                _set_if_blank(ws, asset_row, col, f"={P}{asset_row}", changes)
+        _set_if_blank(ws, labels["total assets"], col, f"=SUM({L}{labels['cash']}:{L}{labels['total assets'] - 1})", changes)
+        if debt is not None:
+            _set_if_blank(ws, debt, col, f"={P}{debt}", changes)
+        if deferred is not None:
+            _set_if_blank(ws, deferred, col, f"={P}{deferred}+{T}{receipts}-{L}{labels['revenue']}", changes)
+        if deferred_tax_liability is not None:
+            _set_if_blank(ws, deferred_tax_liability, col, f"={P}{deferred_tax_liability}", changes)
+        liability_end = labels["total liabilities"] - 1 if liabilities is not None else (deferred or debt)
+        if liabilities is not None and debt is not None:
+            _set_if_blank(ws, liabilities, col, f"=SUM({L}{debt}:{L}{liability_end})", changes)
+        if equity is not None:
+            _set_if_blank(ws, equity, col, f"={P}{equity}+{L}{net}", changes)
+        if balance is not None and liabilities is not None and equity is not None:
+            _set_if_blank(ws, balance, col, f"={L}{labels['total assets']}-{L}{liabilities}-{L}{equity}", changes)
+    cfo = labels["cash from operations"]
+    change_dta = next((r for name, r in labels.items() if "change in deferred tax assets" in name), None)
+    change_deferred = next((r for name, r in labels.items() if "change in unearned revenue" in name or "change in deferred revenue" in name), None)
+    cfo_start = next(
+        (r for r in range(max(1, cfo - 5), cfo)
+         if _norm(ws.cell(r, 2).value) == "net income"),
+        net,
+    )
+    for col in active_cols:
+        L, P = get_column_letter(col), prev(col)
+        _set_if_blank(ws, cfo_start, col, f"={L}{net}", changes)
+        if change_dta is not None and dta is not None:
+            _set_if_blank(ws, change_dta, col, f"={P}{dta}-{L}{dta}", changes)
+        if change_deferred is not None and deferred is not None:
+            _set_if_blank(ws, change_deferred, col, f"={L}{deferred}-{P}{deferred}", changes)
+        # Prefer the explicit cash-flow statement rows when present.
+        _set_if_blank(ws, cfo, col, f"=SUM({L}{cfo_start}:{L}{change_deferred or cfo_start})", changes)
+
+
 def complete_template_schedules(path: str | Path) -> list[dict[str, str]]:
     """Apply only complete, label-matched template repairs and return an audit trail."""
 
@@ -2824,6 +2963,7 @@ def complete_template_schedules(path: str | Path) -> list[dict[str, str]]:
             if len(changes) == before_bond:
                 _complete_general_bond_accounting_family(ws, changes)
             _complete_consolidation_analysis(ws, changes)
+            _complete_deferred_tax_schedule(ws, changes)
             _complete_drug_revenue_model(ws, changes)
             _complete_compact_wc_forecast(ws, changes)
             _complete_quarterly_wc_schedule(ws, changes)

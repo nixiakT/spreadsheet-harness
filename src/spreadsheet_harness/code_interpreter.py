@@ -576,10 +576,20 @@ def inspect_range(
     range_ref: str,
     workbook: Any | None = None,
     *,
+    wb: Any | None = None,
     include_styles: bool = False,
     max_cells: int = 500,
 ) -> dict[str, Any]:
     """Inspect one bounded A1 range similarly to the native inspect_range tool."""
+
+    # Models sometimes use the short ``wb=`` spelling exposed by the code
+    # interpreter examples.  Keep it as a compatibility alias so a harmless
+    # naming variation does not consume an entire repair turn or terminate a
+    # debugging run before the requested workbook edit is attempted.
+    if workbook is not None and wb is not None and workbook is not wb:
+        raise TypeError("Pass only one of workbook= or wb=")
+    if workbook is None:
+        workbook = wb
 
     # Historical trajectories occasionally emitted the arguments in the
     # opposite order (``inspect_range("A1:D8", "Sheet1", wb)``).  Treat that
@@ -689,6 +699,12 @@ def inspect_range(
                 f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
             ),
             "requested_range": range_ref,
+            # Compatibility aliases used by older workbook-inspection examples.
+            # Keeping these aliases in the structured result avoids wasting a
+            # model turn on a harmless KeyError while preserving the canonical
+            # ``range`` field above.
+            "dimension": formula_sheet.calculate_dimension(),
+            "dimensions": formula_sheet.calculate_dimension(),
             "requested_cell_count": requested_count,
             "truncated": truncated,
             # Keep a legacy-friendly alias for models that expect inspect tools to

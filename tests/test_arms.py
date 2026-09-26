@@ -28,6 +28,59 @@ from spreadsheet_harness.tools import ToolOutcome
 from spreadsheet_harness.trajectory import read_trajectory
 
 
+def test_debugging_family_routing_prefers_stronger_cross_sheet_witness() -> None:
+    selected = arms._rank_debugging_family_scores(
+        [
+            (39, "double_counting"),
+            (19, "incorrect_cross_sheet_reference"),
+            (15, "unit_mismatch"),
+        ],
+        family_priority={
+            "double_counting": 110,
+            "incorrect_cross_sheet_reference": 70,
+            "unit_mismatch": 120,
+        },
+        unit_has_repeated_day_scale=True,
+    )
+
+    assert selected == "incorrect_cross_sheet_reference"
+
+
+def test_debugging_family_routing_keeps_unit_when_cross_sheet_evidence_is_weaker() -> None:
+    selected = arms._rank_debugging_family_scores(
+        [(5, "incorrect_cross_sheet_reference"), (9, "unit_mismatch")],
+        family_priority={"incorrect_cross_sheet_reference": 70, "unit_mismatch": 120},
+        unit_has_repeated_day_scale=True,
+    )
+
+    assert selected == "unit_mismatch"
+
+
+def test_cross_sheet_scope_restores_exploratory_edits_without_checkpoint(
+    sample_workbook: Path,
+    tmp_path: Path,
+) -> None:
+    session = WorkbookSession.create(sample_workbook, tmp_path / "cross-sheet-scope")
+    workbook = load_workbook(session.workbook_path, data_only=False)
+    workbook["Sales"]["D2"] = "=Sales!A1"
+    workbook.save(session.workbook_path)
+    workbook.close()
+
+    restored = arms._restore_cross_sheet_scope_content(
+        session,
+        task_hint="Incorrect Cross Sheet References",
+    )
+
+    source = load_workbook(session.paths.input, data_only=False)
+    output = load_workbook(session.workbook_path, data_only=False)
+    try:
+        assert restored == 1
+        assert output["Sales"]["D2"].value == source["Sales"]["D2"].value
+    finally:
+        source.close()
+        output.close()
+
+
 class FakeTools:
     created: list[FakeTools] = []
 
@@ -1367,10 +1420,11 @@ def test_financial_plugin_warm_starts_domain_runtime_before_evidence(
     )
     assert "Deterministic Financial warm-start already completed" in executor_prompt
     assert "one bounded batch of sheet_harness.view_xlsx calls" in executor_prompt
-    # Partial warm-starts retain the planner so it can identify the remaining
-    # clauses; only complete instruction-sheet coverage may bypass planning.
-    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
-    assert not [
+    # A partial warm-start is evidence for the grounded executor, not authority for a
+    # tool-less planner to write additional formulas.  Financial tasks keep the full
+    # workbook-aware execution budget regardless of runtime coverage.
+    assert [call["stage"] for call in FakeAgent.calls] == ["execute"]
+    assert [
         event
         for event in events
         if event["event"] == "harness.financial_planner.bypassed"

@@ -459,7 +459,9 @@ assert inventory["sheets"]["sheets"][0]["name"] == "Sales"
 assert inventory["by_name"]["Sales"]["dimension"] == "A1:D5"
 
 inspected = sheet_harness.inspect_range("Sales", "A1:D3", wb)
+inspected_alias = sheet_harness.inspect_range("Sales", "A1:D3", wb=wb)
 assert inspected["ok"] is True
+assert inspected_alias["matrix"] == inspected["matrix"]
 assert inspected["sheet"] == "Sales"
 assert inspected["range"] == "A1:D3"
 assert inspected["region"] == "A1:D3"
