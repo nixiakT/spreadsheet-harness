@@ -8642,7 +8642,15 @@ def run_arm(
             # the workbook.  This deliberately happens before review/recalculation: saving with
             # openpyxl invalidates formula caches, so doing it after the last recalculation would
             # create artificial official-regression failures.
-            if task_category == "Financial_Model" and executor_turns:
+            if (
+                task_category == "Financial_Model"
+                and executor_turns
+                # Instruction-grounded runtime targets are authoritative. A
+                # workbook-wide period/band pass after them can manufacture
+                # unrelated terminal/summary formulas (especially in Qwen
+                # Financial) and introduce #DIV/0!/value regressions.
+                and not financial_warm_start_count
+            ):
                 translated_period_formulas = translate_repeated_financial_period_formulas(
                     session.workbook_path,
                     source_path=session.paths.input,
