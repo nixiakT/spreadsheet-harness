@@ -3196,6 +3196,11 @@ def _prepare_financial_analysis_workbook(
             instruction=instruction,
         )
         if financial_runtime_actions:
+            financial_runtime_actions = _reject_runtime_formula_error_actions(
+                session,
+                financial_runtime_actions,
+            )
+        if financial_runtime_actions:
             protected_actions.extend(financial_runtime_actions)
             session.recorder.record(
                 "harness.financial_domain_runtime.warm_started",
@@ -3256,6 +3261,64 @@ def _prepare_financial_analysis_workbook(
             runtime_actions=financial_runtime_actions,
         )
     return Path(session.workbook_path)
+
+
+def _reject_runtime_formula_error_actions(
+    session: WorkbookSession,
+    actions: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Reject warm-start targets whose own recalculated value is an Excel error."""
+
+    targets = {
+        (str(action.get("sheet")), str(action.get("target")).replace("$", ""))
+        for action in actions
+        if action.get("sheet") and action.get("target")
+    }
+    if not targets:
+        return actions
+    rejected: set[tuple[str, str]] = set()
+    try:
+        with tempfile.TemporaryDirectory(prefix="financial-runtime-check-") as raw:
+            candidate = Path(raw) / Path(session.workbook_path).name
+            shutil.copy2(session.workbook_path, candidate)
+            recalculate_workbook(
+                candidate,
+                candidate,
+                cache_seed=session.paths.input,
+                timeout_seconds=90.0,
+            )
+            checked = load_workbook(candidate, data_only=True)
+            try:
+                for sheet, coordinate in targets:
+                    if sheet in checked.sheetnames:
+                        value = checked[sheet][coordinate].value
+                        if isinstance(value, str) and value.startswith("#"):
+                            rejected.add((sheet, coordinate))
+            finally:
+                checked.close()
+    except Exception:
+        return actions
+    if not rejected:
+        return actions
+    restore_ooxml_cell_contents(
+        session.paths.input,
+        session.workbook_path,
+        selected_coordinates={sheet: [cell] for sheet, cell in rejected},
+    )
+    session.recorder.record(
+        "harness.financial_runtime.error_targets_rejected",
+        {
+            "count": len(rejected),
+            "targets": [f"{sheet}!{cell}" for sheet, cell in sorted(rejected)],
+            "policy": "reject-runtime-own-cell-excel-errors-v1",
+        },
+    )
+    return [
+        action
+        for action in actions
+        if (str(action.get("sheet")), str(action.get("target")).replace("$", ""))
+        not in rejected
+    ]
 
 
 def _write_financial_repair_checkpoint(
