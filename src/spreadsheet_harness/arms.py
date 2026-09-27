@@ -383,7 +383,8 @@ _CODE_INTERPRETER_RUNTIME_GUIDE = """The code_interpreter preloads a helper modu
   `sheet_harness.defined_name_refs(wb)` expose more structure when needed.
   `inspect_range(...)` returns a dictionary with `matrix`, `cells` (coordinate-to-cell mapping),
   `cell_list`, `merged_ranges`, and `tables`; read those fields directly instead of iterating over
-  the dictionary itself. `cells["B3"]` is a mapping-like snapshot with keys such as `value`,
+  the dictionary itself. `matrix` rows contain scalar values, not `(coordinate, value)` pairs;
+  use `cell_list` or `cells` when coordinates are needed. `cells["B3"]` is a mapping-like snapshot with keys such as `value`,
   `formula`, `data_type`, and `cached_data_type`; access those keys directly instead of expecting
   openpyxl Cell methods or helper attributes on the snapshot. If you need live typed values,
   number formats, or styles for one coordinate, read the worksheet cell itself via `ws["B3"]`

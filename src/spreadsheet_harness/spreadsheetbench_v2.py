@@ -297,15 +297,21 @@ def _try_salvage_provider_failure(
     """Score a valid artifact left behind by a terminal provider failure.
 
     A provider can fail after the agent has already saved a complete workbook
-    (for example, a quota response on the next turn).  The old runner marked
-    such runs ``not_scored`` even though the official evaluator could score
-    the artifact.  Salvage is deliberately narrow: only ProviderError is
-    eligible, the workbook must differ from the session input, be loadable,
-    recalculate successfully, and pass through the pinned evaluator.  This
-    never converts an unchanged or malformed partial artifact into a score.
+    (for example, a quota response on the next turn).  The agent can also hit
+    the strict formula-validation terminal after saving a usable artifact.
+    In both cases the official evaluator is the authority: salvage is allowed
+    only when the workbook differs from input, loads, recalculates, and scores.
+    Unchanged or malformed partial artifacts remain unscored.
     """
 
-    if not isinstance(exc, ProviderError) or evaluator is None or session is None:
+    salvageable = isinstance(exc, ProviderError) or (
+        isinstance(exc, AgentExecutionFailure)
+        and getattr(exc, "reason", "") in {
+            "edit_recovery_exhausted",
+            "agent_budget_exhausted",
+        }
+    )
+    if not salvageable or evaluator is None or session is None:
         return False
     workbook = session.workbook_path
     if task.category == "Visualization" or not workbook.is_file():
@@ -335,7 +341,11 @@ def _try_salvage_provider_failure(
         {
             "status": "completed",
             "passed": score.get("accuracy") == 1.0,
-            "outcome_kind": "scored_after_provider_failure",
+            "outcome_kind": (
+                "scored_after_provider_failure"
+                if isinstance(exc, ProviderError)
+                else "scored_after_agent_failure"
+            ),
             "official_score": score,
             "official_evaluator_sha256": evaluator_sha256,
             "recalculation": recalculation,
@@ -343,7 +353,7 @@ def _try_salvage_provider_failure(
             "output_sha256": _sha256(workbook),
             "error_type": type(exc).__name__,
             "error": _redact_provider_secrets(exc, config, vision_config),
-            "provider_failure_salvaged": True,
+            "artifact_failure_salvaged": True,
         }
     )
     return True

@@ -262,7 +262,12 @@ def workbook_path() -> Path:
 SHEET_WORKBOOK = str(workbook_path())
 
 
-def workbook_sha256(path: str | Path | None = None) -> str:
+def workbook_sha256(path: str | Path | Any | None = None) -> str:
+    # Compatibility: older model-written snippets pass the loaded Workbook
+    # object instead of a filesystem path.  Hash its serialized OOXML without
+    # requiring the model to save/reload merely to compute a diagnostic digest.
+    if path is not None and hasattr(path, "save") and hasattr(path, "worksheets"):
+        return _serialized_workbook_digest(path)
     target = Path(path) if path is not None else workbook_path()
     digest = hashlib.sha256()
     with target.open("rb") as handle:

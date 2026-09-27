@@ -77,7 +77,7 @@ def main() -> int:
         "--task-ids", nargs="*", default=None,
         help="Optional item ids for a focused smoke run; omit for the full category.",
     )
-    parser.add_argument("--base-url", default="http://10.130.138.46:8010/v1")
+    parser.add_argument("--base-url", default="http://47.96.153.159:8010/v1")
     parser.add_argument("--api-key-file", type=Path, default=Path("/tmp/spreadsheet-harness-litellm.key"))
     args = parser.parse_args()
     args.output = args.output.resolve()

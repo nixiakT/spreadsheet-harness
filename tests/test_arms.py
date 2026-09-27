@@ -1479,10 +1479,11 @@ def test_financial_sheet_coverage_is_not_proof_of_task_completion(
         task_category="Financial_Model",
     )
 
-    # Touching both sheets does not prove all requested clauses or dependencies
-    # are correct. A warm start must still reach planning and execution.
-    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
-    assert [stage["name"] for stage in result.stages] == ["plan", "execute"]
+    # Touching both sheets does not prove all requested clauses or dependencies,
+    # but the financial-plugin path now keeps the full grounded executor budget
+    # instead of handing control to a tool-less planner that can consume it.
+    assert [call["stage"] for call in FakeAgent.calls] == ["execute"]
+    assert [stage["name"] for stage in result.stages] == ["execute"]
     events = read_trajectory(session.paths.trajectory)
     bypassed = [
         event for event in events if event["event"] == "harness.financial_executor.bypassed"
@@ -1628,9 +1629,9 @@ provenance:
         task_category="Financial_Model",
     )
 
-    assert [call["stage"] for call in FakeAgent.calls] == ["plan", "execute"]
+    assert [call["stage"] for call in FakeAgent.calls] == ["execute"]
     executor = FakeAgent.calls[-1]
-    assert executor["require_workbook_change"] is False
+    assert executor["require_workbook_change"] is True
     assert executor["max_read_only_code_calls_before_edit"] == 2
 
 
