@@ -317,7 +317,10 @@ def run_one(
     if status_path.is_file() and output_path.is_file():
         try:
             old = json.loads(status_path.read_text(encoding="utf-8"))
-            if old.get("status") == "completed" and not recalculate_before_evaluation:
+            if old.get("status") == "completed" and (
+                not recalculate_before_evaluation
+                or (isinstance(old.get("official_score"), dict) and workbook_is_valid(output_path))
+            ):
                 return old
         except Exception:
             pass
@@ -376,6 +379,8 @@ def run_one(
             "CODEX_HOME": str(codex_home),
             "OPENAI_API_KEY": "",
             "SHEET_AGENT_TASK_ID": f"{category}/{task_id}",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
         }
     )
     command = [

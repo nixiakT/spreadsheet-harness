@@ -478,12 +478,16 @@ def _model_proposal(args: argparse.Namespace, request: dict[str, Any]) -> dict[s
         "rejected_candidate_sha256": request.get("rejected_candidate_sha256", []),
         "response_schema": schema,
     }
+    implementation_route = any(item.get("surface") == "implementation" for item in route_items)
     body = {
         "model": args.model,
         "temperature": 0,
         "top_p": 1,
         "max_tokens": args.max_tokens,
-        "chat_template_kwargs": {"enable_thinking": True},
+        # Thinking responses from GLM frequently spend the output budget on
+        # rationale and omit the required diff. Implementation routes are
+        # therefore JSON-only by default; semantic repair remains fail-closed.
+        "chat_template_kwargs": {"enable_thinking": not implementation_route},
         "messages": [
             {
                 "role": "system",
@@ -498,7 +502,9 @@ def _model_proposal(args: argparse.Namespace, request: dict[str, Any]) -> dict[s
                     "implementation response, emit a complete git unified diff with exactly one "
                     "'diff --git a/... b/...' header and numeric hunk offsets; never use X,Y or "
                     "other placeholders. For a source excerpt, use minimal hunks with only the "
-                    "exact changed old/new lines and do not copy omitted-line markers as context."
+                    "exact changed old/new lines and do not copy omitted-line markers as context. "
+                    "For implementation routes the patch field is mandatory; a rationale-only "
+                    "response is invalid."
                 ),
             },
             {"role": "user", "content": json.dumps(visible, ensure_ascii=False)},

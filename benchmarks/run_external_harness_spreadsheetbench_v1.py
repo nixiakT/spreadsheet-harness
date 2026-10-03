@@ -256,6 +256,7 @@ def start_proxy(args: argparse.Namespace, port: int) -> tuple[subprocess.Popen[s
             "--api-key-file", str(args.api_key_file),
             "--audit", str(audit),
             "--max-requests", str(args.max_turns),
+            "--timeout", str(args.task_timeout),
         ]
     proxy = subprocess.Popen(
         command, stdout=log_handle, stderr=subprocess.STDOUT, text=True

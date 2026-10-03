@@ -26,7 +26,7 @@ def tree_hash(root: Path) -> dict[str, str]:
     }
 
 
-def complete_task(path: Path) -> bool:
+def complete_task(path: Path, arms: tuple[str, ...] = ARMS) -> bool:
     result = path / "results.json"
     if not result.exists():
         return False
@@ -36,7 +36,8 @@ def complete_task(path: Path) -> bool:
         return False
     return (
         isinstance(rows, list)
-        and len(rows) == len(ARMS)
+        and len(rows) == len(arms)
+        and {row.get("arm") for row in rows} == set(arms)
         and all(row.get("status") == "completed" and row.get("soft") is not None for row in rows)
     )
 
@@ -46,35 +47,41 @@ def run_task(
     task_id: str,
     *,
     model: str,
+    base_url: str,
+    api_key_file: str,
     frozen_source: Path,
+    arms: tuple[str, ...],
+    v1_execution_mode: str,
     request_retries: int,
     request_interval_seconds: float,
 ) -> int:
     output = root / "tasks" / task_id
     log = root / "logs" / f"{task_id}.log"
-    if complete_task(output):
+    if complete_task(output, arms):
         return 0
     command = [
         sys.executable, "-m", "spreadsheet_harness.cli", "benchmark", "v1-compare",
         "--dataset", str(DATASET), "--output", str(output), "--task-id", task_id,
-        "--v1-execution-mode", "direct",
-        "--base-url", BASE_URL, "--model", model,
-        "--api-key-file", "/tmp/spreadsheet-harness-litellm.key",
+        "--v1-execution-mode", v1_execution_mode,
+        "--base-url", base_url, "--model", model,
+        "--api-key-file", api_key_file,
         "--api-protocol", "chat-completions", "--reasoning-effort", "medium",
         "--enable-thinking", "--arm-order-seed", "20260918", "--seed", "41",
         "--temperature", "0", "--top-p", "1", "--max-turns-per-arm", "50",
         "--max-model-calls", "50", "--max-output-tokens", "12288",
-        "--max-total-tokens", "10000000", "--task-timeout", "1800",
-        "--request-timeout", "300", "--litellm-timeout", "300",
+        "--max-total-tokens", "10000000", "--task-timeout", "21600",
+        "--request-timeout", "1800", "--litellm-timeout", "1800",
         "--request-retries", str(request_retries),
         "--request-interval-seconds", str(request_interval_seconds),
     ]
-    for arm in ARMS:
+    for arm in arms:
         command.extend(("--arm", arm))
     env = dict(os.environ)
     for key in ("OPENAI_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                 "http_proxy", "https_proxy", "all_proxy"):
         env.pop(key, None)
+    env["NO_PROXY"] = "10.130.138.46,127.0.0.1,localhost"
+    env["no_proxy"] = env["NO_PROXY"]
     old_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(frozen_source) + (os.pathsep + old_pythonpath if old_pythonpath else "")
     with log.open("x") as stream:
@@ -85,8 +92,23 @@ def run_task(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="dashscope/deepseek-v4-flash-0731")
+    parser.add_argument("--base-url", default=BASE_URL)
+    parser.add_argument("--api-key-file", default="/tmp/spreadsheet-harness-litellm.key")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument(
+        "--arm",
+        action="append",
+        choices=ARMS,
+        dest="selected_arms",
+        help="Arm to run; repeat for multiple arms. Defaults to all three.",
+    )
+    parser.add_argument(
+        "--v1-execution-mode",
+        choices=("legacy", "repaired", "direct"),
+        default="repaired",
+        help="V1 path; repaired enables the V1 planner/YAML fixes.",
+    )
     parser.add_argument(
         "--request-retries",
         type=int,
@@ -103,6 +125,7 @@ def main() -> None:
     parser.add_argument("--task-file", type=Path,
                         help="Optional frozen task-id file; defaults to all 912 instructions")
     args = parser.parse_args()
+    selected_arms = tuple(args.selected_arms or ARMS)
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
     (root / "tasks").mkdir(exist_ok=True)
@@ -132,7 +155,7 @@ def main() -> None:
     for task_id in task_ids:
         task_dir = root / "tasks" / task_id
         log_path = root / "logs" / f"{task_id}.log"
-        if complete_task(task_dir):
+        if complete_task(task_dir, selected_arms):
             continue
         if task_dir.exists() or log_path.exists():
             archive.mkdir(parents=True, exist_ok=True)
@@ -145,8 +168,8 @@ def main() -> None:
     manifest = {
         "schema": "spreadsheetbench-v1-frozen-taskset-20260921",
         "dataset": str(DATASET), "task_count": len(task_ids), "task_ids": task_ids,
-        "arms": list(ARMS), "model": args.model, "base_url": BASE_URL,
-        "execution_mode": "direct", "max_turns": 50, "temperature": 0,
+        "arms": list(selected_arms), "model": args.model, "base_url": args.base_url,
+        "execution_mode": args.v1_execution_mode, "max_turns": 50, "temperature": 0,
         "top_p": 1, "thinking": True, "max_output_tokens": 12288,
         "workers": args.workers, "request_retries": args.request_retries,
         "request_interval_seconds": args.request_interval_seconds,
@@ -162,7 +185,11 @@ def main() -> None:
                 root,
                 task_id,
                 model=args.model,
+                base_url=args.base_url,
+                api_key_file=args.api_key_file,
                 frozen_source=frozen_source,
+                arms=selected_arms,
+                v1_execution_mode=args.v1_execution_mode,
                 request_retries=args.request_retries,
                 request_interval_seconds=args.request_interval_seconds,
             ): task_id

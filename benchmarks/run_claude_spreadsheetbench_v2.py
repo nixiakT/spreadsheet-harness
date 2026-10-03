@@ -131,6 +131,8 @@ def run_one(
         "ANTHROPIC_AUTH_TOKEN": "local-proxy",
         "ANTHROPIC_API_KEY": "local-proxy",
         "DISABLE_AUTOUPDATER": "1",
+        "NO_PROXY": "127.0.0.1,localhost",
+        "no_proxy": "127.0.0.1,localhost",
     })
     started = float(old.get("started_at", time.time()))
     deadline = time.monotonic() + task_timeout

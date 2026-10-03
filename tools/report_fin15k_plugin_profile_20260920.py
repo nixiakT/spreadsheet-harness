@@ -67,7 +67,8 @@ def numeric(value: Any) -> float:
 
 
 def task_metrics(
-    rows: list[dict[str, Any]], cell: Mapping[str, Any], trajectory_path: Path
+    rows: list[dict[str, Any]], cell: Mapping[str, Any], trajectory_path: Path,
+    arm_name: str = "spreadsheet-harness-financial",
 ) -> dict[str, Any]:
     task_id = ""
     family = ""
@@ -186,7 +187,7 @@ def task_metrics(
             summary = read_json(Path(summary_path))
         except (OSError, json.JSONDecodeError):
             summary = {}
-    arm = summary.get("arms", {}).get("spreadsheet-harness-financial", {})
+    arm = summary.get("arms", {}).get(arm_name, {})
     summary_score = arm.get("scored_accuracy")
     if isinstance(summary_score, (int, float)) and math.isfinite(float(summary_score)):
         score = float(summary_score)
@@ -228,6 +229,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--arm", default="spreadsheet-harness-financial")
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
     output = (args.output or root / "plugin-profile").expanduser().resolve()
@@ -240,7 +242,7 @@ def main() -> int:
         trajectory = Path(str(cell.get("trajectory", "")))
         if not trajectory.is_file():
             continue
-        metric = task_metrics(event_rows(trajectory), cell, trajectory)
+        metric = task_metrics(event_rows(trajectory), cell, trajectory, args.arm)
         if metric:
             rows.append(metric)
     ledger_path = output / "plugin-task-ledger.jsonl"

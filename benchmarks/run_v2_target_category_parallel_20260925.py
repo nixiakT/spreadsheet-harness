@@ -43,9 +43,9 @@ def run_cell(args: argparse.Namespace, task_id: str) -> dict[str, object]:
         "--output", str(output), "--arm", args.arm,
         "--max-model-calls", "50", "--max-turns-per-arm", "50",
         "--max-total-tokens", "unlimited", "--max-output-tokens", "unlimited",
-        "--task-timeout", "3600", "--request-timeout", "600",
+        "--task-timeout", str(args.task_timeout), "--request-timeout", str(args.request_timeout),
         "--request-retries", "5", "--request-interval-seconds", "1.1",
-        "--litellm-timeout", "600", "--base-url", args.base_url,
+        "--litellm-timeout", str(args.litellm_timeout), "--base-url", args.base_url,
         "--api-key-file", str(args.api_key_file), "--model", args.model,
         "--api-protocol", "chat-completions", "--reasoning-effort", "medium",
         "--temperature", "0", "--top-p", "1", "--enable-thinking",
@@ -68,11 +68,14 @@ def run_cell(args: argparse.Namespace, task_id: str) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--category", required=True, choices=("Template", "Debugging", "Financial_Model"))
-    parser.add_argument("--arm", required=True, choices=("spreadsheet-harness-basic", "spreadsheet-harness-financial"))
+    parser.add_argument("--arm", required=True, choices=("bare", "spreadsheet-harness-basic", "spreadsheet-harness-financial"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-slug", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--parallelism", type=int, default=2)
+    parser.add_argument("--task-timeout", type=int, default=3600)
+    parser.add_argument("--request-timeout", type=int, default=600)
+    parser.add_argument("--litellm-timeout", type=int, default=600)
     parser.add_argument(
         "--task-ids", nargs="*", default=None,
         help="Optional item ids for a focused smoke run; omit for the full category.",

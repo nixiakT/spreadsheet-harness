@@ -87,6 +87,9 @@ Workspace contract:
   terminate, or reuse a system LibreOffice process. If recalculation fails, leave the output
   intact for the outer runner to recalculate with its own isolated profile.
 - Reopen output.xlsx and verify the requested result before finishing.
+- Also create a reusable `{workspace / 'solution.py'}` containing the complete workbook
+  transformation, then run it (or otherwise use it) to produce output.xlsx. This file is
+  required by the v1 sibling-replay adapter.
 - Keep all inspection output bounded; do not dump whole workbooks.
 
 Finish only after a valid output.xlsx exists. Report the output path and verification result.
@@ -222,7 +225,10 @@ def prepare_dsh_home(
         baseURL: http://127.0.0.1:{proxy_port}/task/{slug}/v1
         defaultContextWindow: 262144
         defaultMaxTokens: 32768
-        streamIdleTimeoutMs: 1800000
+        # Keep DSH's stream idle limit aligned with the outer per-task budget.
+        # The old fixed 30-minute value caused long tasks to fail around 1800s
+        # even when the runner was configured for a six-hour task timeout.
+        streamIdleTimeoutMs: 21600000
         retryPolicy:
           mode: normal
           maxRetries: 5
@@ -348,6 +354,8 @@ def run_one(
                 "DSH_TELEMETRY_DISABLED": "1",
                 "DSH_TOOLS_MODE": "native",
                 "SHEET_AGENT_TASK_ID": f"{category}/{task_id}",
+                "NO_PROXY": "127.0.0.1,localhost",
+                "no_proxy": "127.0.0.1,localhost",
             }
         )
         command = [
@@ -568,6 +576,8 @@ def main() -> int:
                 str(audit_path),
                 "--max-requests",
                 str(args.max_turns),
+                "--timeout",
+                str(args.task_timeout),
             ],
             stdout=proxy_output,
             stderr=subprocess.STDOUT,

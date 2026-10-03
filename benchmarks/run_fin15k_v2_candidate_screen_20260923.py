@@ -42,6 +42,9 @@ EVALUATOR = REPO / "benchmarks/vendor/spreadsheetbench2-official-83d415c/evaluat
 KEY_FILE = Path("/tmp/spreadsheet-harness-litellm.key")
 BASE_URL = "http://10.130.138.46:8010/v1"
 MODEL = "dashscope/deepseek-v4-flash-0731"
+DEFAULT_TASK_TIMEOUT = 21600
+DEFAULT_REQUEST_TIMEOUT = 1800
+DEFAULT_LITELLM_TIMEOUT = 1800
 MECHANISMS = ("h-only", "d-only", "joint")
 SCOPE_BY_MECHANISM = {
     "h-only": "general-only",
@@ -236,13 +239,14 @@ def materialize_candidates(profile_root: Path, mechanism: str, count: int) -> li
     return records[:count]
 
 
-def choose_tasks(per_category: int = 2) -> list[str]:
+def choose_tasks(per_category: int | None = 2) -> list[str]:
     """Fixed non-visual canary with a balanced number per category."""
 
     selected: list[str] = []
     for category in ("Debugging", "Financial_Model", "Template"):
         rows = read(DATASET / category / "dataset.json")
-        for row in rows[:per_category]:
+        selected_rows = rows if per_category is None else rows[:per_category]
+        for row in selected_rows:
             selected.append(f"{category}/{row['id']}")
     return selected
 
@@ -256,6 +260,43 @@ def run_task(job: tuple[dict[str, Any], str, Path, bool, int]) -> dict[str, Any]
     if summary.is_file() and not retry_unscored:
         return {"candidate": candidate, "task_id": task_id, "status": "existing", "output": str(output)}
     if summary.is_file() and retry_unscored:
+        # Retry every incomplete/not-scored result.  The evaluator writes a
+        # summary with ``completed=0``/``errors>0`` for several infrastructure
+        # and provider paths without a stable ``outcome_kind`` marker, so
+        # marker-only filtering silently left ``not_scored`` tasks behind.
+        # Completed tasks remain immutable and are reused below.
+        retryable = False
+        try:
+            prior_summary = read(summary)
+            arm = (prior_summary.get("arms") or {}).get("ours") or {}
+            retryable = (
+                int(arm.get("completed", 0) or 0) < int(arm.get("expected", 1) or 1)
+                or int(arm.get("errors", 0) or 0) > 0
+                or arm.get("scored_accuracy") is None
+            )
+        except Exception:
+            retryable = True
+        result_file = output / "results.json"
+        if not result_file.is_file():
+            retryable = True
+        elif not retryable:
+            try:
+                records = read(result_file)
+                records = records if isinstance(records, list) else [records]
+                for record in records:
+                    kind = str(record.get("outcome_kind", "")).lower() if isinstance(record, dict) else ""
+                    # A cached result is complete only when the model run was
+                    # actually scored.  Earlier recovery runs required an
+                    # additional provider-error keyword, which incorrectly
+                    # preserved not_scored/model_execution_failure rows and
+                    # labelled them as existing-zero.
+                    if kind != "scored":
+                        retryable = True
+                        break
+            except Exception:
+                retryable = True
+        if not retryable:
+            return {"candidate": candidate, "task_id": task_id, "status": "existing", "output": str(output)}
         prior = output.with_name(output.name + ".prior-unscored")
         if not prior.exists():
             os.replace(output, prior)
@@ -270,8 +311,8 @@ def run_task(job: tuple[dict[str, Any], str, Path, bool, int]) -> dict[str, Any]
         "--skill-root", str(candidate_dir / "artifact/skills"), "--output", str(output),
         "--max-model-calls", "50", "--max-turns-per-arm", "50",
         "--max-total-tokens", "unlimited", "--max-output-tokens", "unlimited",
-        "--task-timeout", str(task_timeout), "--request-timeout", "900",
-        "--litellm-timeout", "600", "--request-retries", "3",
+        "--task-timeout", str(task_timeout), "--request-timeout", str(DEFAULT_REQUEST_TIMEOUT),
+        "--litellm-timeout", str(DEFAULT_LITELLM_TIMEOUT), "--request-retries", "3",
         "--arm-order-seed", "20260923", "--base-url", BASE_URL,
         "--api-key-file", str(KEY_FILE), "--model", MODEL,
         "--api-protocol", "chat-completions", "--reasoning-effort", "medium",
@@ -309,8 +350,9 @@ def main() -> int:
     parser.add_argument("--candidates-per-mechanism", type=int, default=3)
     parser.add_argument("--parallelism", type=int, default=6)
     parser.add_argument("--tasks-per-category", type=int, default=2)
+    parser.add_argument("--full-nonvisual", action="store_true")
     parser.add_argument("--retry-unscored", action="store_true")
-    parser.add_argument("--task-timeout", type=int, default=1800)
+    parser.add_argument("--task-timeout", type=int, default=DEFAULT_TASK_TIMEOUT)
     parser.add_argument("--generate-only", action="store_true")
     parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--valid-scale-only", action="store_true")
@@ -337,11 +379,16 @@ def main() -> int:
         "policy": "Fin-1.5K trace/profile proposes; no Fin gate prerequisite; candidate-only V2 evaluation",
         "solver_model": MODEL,
         "proposer_model": "dashscope/glm-5.2",
-        "tasks": choose_tasks(args.tasks_per_category),
+        "tasks": choose_tasks(None if args.full_nonvisual else args.tasks_per_category),
         "candidates": all_candidates,
         "original_arms_rerun": False,
     }
-    write(output_root / "candidate-screen-manifest.json", manifest)
+    # When an explicit candidate manifest is supplied, it is the immutable
+    # source of truth for resume runs.  Do not overwrite the shared output
+    # manifest: concurrent per-mechanism resumes would otherwise erase each
+    # other's candidate list before filtering by --mechanisms.
+    if args.candidate_manifest is None:
+        write(output_root / "candidate-screen-manifest.json", manifest)
     print(json.dumps({"candidates": all_candidates, "tasks": manifest["tasks"]}, ensure_ascii=False, indent=2), flush=True)
     if args.generate_only:
         return 0
@@ -366,16 +413,25 @@ def main() -> int:
         with futures.ThreadPoolExecutor(max_workers=args.parallelism) as pool:
             pending = [pool.submit(run_task, job) for job in group_jobs]
             for future in futures.as_completed(pending):
-                row = future.result()
+                try:
+                    row = future.result()
+                except Exception as exc:
+                    # Isolate one evaluator/provider failure so the remaining
+                    # candidate tasks continue and can be resumed later.
+                    candidate, task_id, _, _, _ = group_jobs[pending.index(future)] if future in pending else (None, "", None, False, 0)
+                    row = {"candidate": candidate or {}, "task_id": task_id, "status": "worker_error", "error": str(exc)}
                 rows.append(row)
-                print(json.dumps({"mechanism": row["candidate"].get("mechanism"), "candidate": row["candidate"].get("candidate_id"), "task": row["task_id"], "status": row["status"]}, ensure_ascii=False), flush=True)
+                print(json.dumps({"mechanism": row.get("candidate", {}).get("mechanism"), "candidate": row.get("candidate", {}).get("candidate_id"), "task": row.get("task_id"), "status": row.get("status")}, ensure_ascii=False), flush=True)
         return rows
 
     with futures.ThreadPoolExecutor(max_workers=max(1, len(grouped))) as groups_pool:
         group_futures = [groups_pool.submit(run_group, group_jobs) for group_jobs in grouped.values()]
         for future in futures.as_completed(group_futures):
             results.extend(future.result())
-    write(output_root / "results.json", results)
+    if args.candidate_manifest is None:
+        write(output_root / "results.json", results)
+    else:
+        write(output_root / f"results-{','.join(sorted({str(r.get('candidate', {}).get('mechanism', 'unknown')) for r in results}))}.json", results)
     return 0 if results and all(row["status"] in {"scored", "existing"} for row in results) else 2
 
 

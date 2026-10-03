@@ -3901,7 +3901,11 @@ def _infer_debugging_family(
         family_priority = {
             "inconsistent_color_coding": 100,
             "double_counting": 110,
-            "embedded_hardcode": 80,
+            # Embedded hardcodes are a more specific witness than the generic
+            # relative-anchor candidates emitted by formula-dense LBO sheets.
+            # Prefer this family when both signals are present so the
+            # hardcoded cell is restored to a formula before model execution.
+            "embedded_hardcode": 110,
             # A small, coherent INDEX/MATCH repair family is more distinctive than the
             # broad cross-sheet peer candidates emitted by almost every financial workbook.
             "incorrect_index_match": 95,
@@ -8532,6 +8536,22 @@ def run_arm(
                         if _debugging_hint_requires_executor(debugging_hint)
                         else 0
                     )
+                    if (
+                        executor_turns == 0
+                        and task_category == "Debugging"
+                        and "deepseek" in config.model.casefold()
+                        and bool(applied_actions)
+                        and os.environ.get("SHEET_HARNESS_DEBUGGING_COVERAGE_TRIAL") == "1"
+                    ):
+                        # Trial only: persisted detector edits certify those cells, not
+                        # coverage of the whole audit. Keep other models/categories and
+                        # the default baseline unchanged for a controlled comparison.
+                        executor_turns = max_turns_per_arm
+                        session.recorder.record(
+                            "harness.debugging_coverage_trial.executor_retained",
+                            {"executor_turns": executor_turns,
+                             "applied_actions": int(applied_actions)},
+                        )
                 elif not sign_actions:
                     applied_actions = 0
                     executor_turns = max_turns_per_arm
@@ -8598,8 +8618,22 @@ def run_arm(
             # Keeping the short-run path unchanged is also important for the
             # Financial warm-start contract: the primary executor gets all calls
             # when the caller explicitly supplied a small turn cap.
+            template_exact_trial = (
+                task_category == "Template"
+                and "deepseek" in config.model.casefold()
+                and os.environ.get("SHEET_HARNESS_TEMPLATE_EXACT_TRIAL") == "1"
+            )
+            debugging_exact_trial = (
+                task_category == "Debugging"
+                and "deepseek" in config.model.casefold()
+                and os.environ.get("SHEET_HARNESS_DEBUGGING_EXACT_TRIAL") == "1"
+            )
             review_cap = (
-                4
+                8
+                if (template_exact_trial or debugging_exact_trial)
+                and sheet_harness_composition
+                and max_turns_per_arm >= 12
+                else 4
                 if sheet_harness_composition and max_turns_per_arm >= 12
                 else 0
             )
