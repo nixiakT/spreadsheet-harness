@@ -111,3 +111,8 @@ Interpretation is deliberately strict: only
 after a provider failure is `provider_salvage`, not a normal completion;
 `algorithm_failure` is not retried. Do not compare candidates or claim an
 improvement until the baseline and candidate have full normal paired coverage.
+
+To evaluate the 500-trace candidates first, add `--evidence-size 500`.
+This selects baseline + 500-h-only/d-only/joint (1188 cells). `--workers 4`
+is useful when checking a provider at reduced concurrency. This selects arms
+without modifying any frozen artifact, composition, or evaluator.

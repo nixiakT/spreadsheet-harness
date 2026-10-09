@@ -1,8 +1,8 @@
 {
   "schema_version": "fin15k-plugin-plan9-codex-v1",
   "status": "materialized-not-evaluated",
-  "baseline_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
-  "baseline_artifact_manifest_sha256": "67a79c641a2fb8147a6d238c4743a7ac21d616d67b8fdf4315ba8028180b9d68",
+  "baseline_revision_sha256": "d5a20b37919d3328910a91c4890e05b0e8e13d9868372a4c84d65e8e4477a5cf",
+  "baseline_artifact_manifest_sha256": "d7e5b2c49200f44a2415f4503eeaaf934484855e968a2c18002c2bf0c53346ba",
   "candidate_count": 9,
   "model_calls": 0,
   "evaluation_calls": 0,
@@ -41,8 +41,8 @@
       "mechanism": "h-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-h-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-50-h-only-c01/artifact",
-      "revision_sha256": "109060d1091e14d7197f2299b25f13a11d51acdaa1b005d3081292a4f8677efc",
-      "artifact_manifest_sha256": "3a1295c8899fec2a2e0fb18cad9abfa41522e723a5909eea7ecc0be722b1bef9",
+      "revision_sha256": "501888b129473ad38d2d4c48e43de8f25890f391547cceb34c572b7b0f5cd63e",
+      "artifact_manifest_sha256": "68387a445ddb4c573a667c3846012498a3a21706760fe0a58b423d4c1e0e1baf",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries"
@@ -89,8 +89,8 @@
       "mechanism": "d-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-d-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-50-d-only-c01/artifact",
-      "revision_sha256": "f60e0120a70ddc64393641b9aaae894b612ae433fc72a5adb397c36ccf4cdb5b",
-      "artifact_manifest_sha256": "e69e99902b45da0d1fc326554866c1959a0753967d645b7903410da29571be88",
+      "revision_sha256": "501228a709b85b15d7c510009b9c83bd844723d9db142b89a7566517f5532d3b",
+      "artifact_manifest_sha256": "c87148da83ea770c49643d244a94e760edbe1f620c2605f833aa251f5066f122",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-financial-targets"
@@ -152,8 +152,8 @@
       "mechanism": "joint",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-joint-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-50-joint-c01/artifact",
-      "revision_sha256": "5f1352761e9b779fe3997b52ae6f3693a344ffce7b25813585ee36624ccdefef",
-      "artifact_manifest_sha256": "d0361d38ba3475c4abda9d3f0db41ae4d2bc8aaac2c02853889bf2362fdf84d5",
+      "revision_sha256": "04f799c55536362f3a3f0071d2e5816267e3c74c06d7eb43912f0d0385a175a5",
+      "artifact_manifest_sha256": "df556068d55db80587dbdc1d5608841c20bb9e988e3c44dd2b79ef208c0b5cd9",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries",
@@ -209,8 +209,8 @@
       "mechanism": "h-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-h-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-200-h-only-c01/artifact",
-      "revision_sha256": "0da908874e0198e813503f8d699d1946398a3e5b768b45565305a95976428ed2",
-      "artifact_manifest_sha256": "1c0dc6e5208349398cdd7ca63f93ba4536a4905e6f76cf1009007763d632f344",
+      "revision_sha256": "3012d88aed1e065cb0c846d4405356ba15a064564358053edb3f425a3e72934f",
+      "artifact_manifest_sha256": "b7a427b6a42af48abe3b58be97822c7184590a28bd3ded6dda8f137dc7cf61fc",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries"
@@ -258,8 +258,8 @@
       "mechanism": "d-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-d-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-200-d-only-c01/artifact",
-      "revision_sha256": "45006c4ecd2b149f640b9d71b3697a59bddf37ae8e2669535ce0a07582a215eb",
-      "artifact_manifest_sha256": "ec30d603fb018bc9965b88e78bbaa8ce76f9f2312bd3f460c0ec92ab39e681bd",
+      "revision_sha256": "385164d7b5951b94af71248660e734038f6dc39d04b377e63c31aeb7889b73fc",
+      "artifact_manifest_sha256": "1187afa761a7dd3e67fa3e0f99f03da44bc9328c1657aa29c92099f7dca4dc5c",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-financial-targets"
@@ -326,8 +326,8 @@
       "mechanism": "joint",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-joint-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-200-joint-c01/artifact",
-      "revision_sha256": "809a97179514bf5259002d8da4ffe60662309fcc30441d2c157dbc6dd8e388f5",
-      "artifact_manifest_sha256": "ada724e9b762e2a4cbbce67b9c363252e6fb01b6fa2cd6030d16b6a8e14fff64",
+      "revision_sha256": "38ec9db6b5b64768ea906bc8a12a3ee00304ed2d31108e7805385cc14860306d",
+      "artifact_manifest_sha256": "c387adb80ca110631540137c7d076731a0cc94e132a9efc4268df2a897c4ff93",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries",
@@ -389,8 +389,8 @@
       "mechanism": "h-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-h-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-500-h-only-c01/artifact",
-      "revision_sha256": "4b797cd24f70081322e63f998500bfbd36d97f25118dea37ff358eca24d87fd0",
-      "artifact_manifest_sha256": "6211fe44cd38f566f1b729194ccb45257503e915fec53167ad603cd955ec2684",
+      "revision_sha256": "8c31b68fad565c4837faabfe33f9550aa260b5ad242729ba1656ec46be200b78",
+      "artifact_manifest_sha256": "fccec45dfcc451549ea1090e4dc0f6b953dd0ebd3a230f16ba4ad4bcd8d27fb9",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries"
@@ -438,8 +438,8 @@
       "mechanism": "d-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-d-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-500-d-only-c01/artifact",
-      "revision_sha256": "03f61a50e00f657940fe2ca25017b899ece7a726b47a2a8553de71a8165d11ab",
-      "artifact_manifest_sha256": "088fd61e9a704d8ff29d6e5b95fd152942c1e13af542488656686c4b323546eb",
+      "revision_sha256": "22a801f76e8ff88f1870ec409d9f4b463ede1d195618d668d1af1438cbc5ee51",
+      "artifact_manifest_sha256": "52504dece16582c25fc462a93f292894b785f715d8218837bb733141f3f2c7dd",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-financial-targets"
@@ -511,8 +511,8 @@
       "mechanism": "joint",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-joint-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-500-joint-c01/artifact",
-      "revision_sha256": "8e818d156a5be2385b6e9873358fdb41327ba86cbcbde4786d3e86d61dbf7426",
-      "artifact_manifest_sha256": "82b620150b292f25306b3bf0a4584b65485367c27ccb256cff53a5b4ac6fd440",
+      "revision_sha256": "319eeae5bb3a764b9c72383025b485945178eda9907d81876b33e9cd193c7bf8",
+      "artifact_manifest_sha256": "1f85221007d605242e6804c65652562ba7fb4014aa1df56827e458e4fd2e97a6",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries",
@@ -582,5 +582,13 @@
     "tools/fin15k_candidate_sources_20261009/observers.py": "f67ebe560bb2b1df0a2e7abd6e2332f2f39e5f04b239691268a60a771168695a"
   },
   "distribution": "baseline-plus-exact-source-overlays-v1",
-  "source_candidate_manifest_sha256": "12d6c44599bde12bb9523409acc95244e6ee0b2c0e4f946ba684087129d1a968"
+  "source_candidate_manifest_sha256": "12d6c44599bde12bb9523409acc95244e6ee0b2c0e4f946ba684087129d1a968",
+  "runtime_hotfix": {
+    "name": "trusted-execution-skips-bwrap-v1",
+    "source": "src/spreadsheet_harness/code_interpreter.py",
+    "old_source_sha256": "8f33723e1173e92114378f838312977dfd381700b145fae4963bcae4499a05a6",
+    "new_source_sha256": "9eca4fea8eef1cfa9aa2c54b4fce0ba44ee7bab0dba2e5b89cf5e1829690f7f2",
+    "old_baseline_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+    "strict_isolation_unchanged": true
+  }
 }

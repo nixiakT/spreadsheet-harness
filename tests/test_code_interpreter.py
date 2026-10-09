@@ -1501,49 +1501,28 @@ def test_code_interpreter_redacts_timeout_output_before_truncation(
         assert len(result[stream]) <= 20_000
 
 
-def test_code_interpreter_redacts_bubblewrap_diagnostic_before_truncation(
+def test_trusted_code_and_bash_never_invoke_available_bubblewrap(
     sample_workbook: Path,
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    secret = "credential-" + "B" * 256
-    diagnostic = "x" * 900 + secret + " permission denied"
-    session = WorkbookSession.create(sample_workbook, tmp_path / "bubblewrap-redaction")
+    session = WorkbookSession.create(sample_workbook, tmp_path / "trusted-no-bwrap")
     interpreter = LocalCodeInterpreter(
         session.workspace,
         session.workbook_path,
         require_isolation=False,
-        secrets=(secret,),
     )
-    monkeypatch.setattr(
-        interpreter,
-        "_command",
-        lambda *_args, **_kwargs: (["bwrap", "probe"], "bubblewrap: test"),
-    )
-    attempts = iter(
-        [
-            subprocess.CompletedProcess(
-                ["bwrap", "probe"],
-                1,
-                stdout="",
-                stderr=diagnostic,
-            ),
-            subprocess.CompletedProcess(
-                [sys.executable],
-                0,
-                stdout="fallback completed",
-                stderr="",
-            ),
-        ]
-    )
-    monkeypatch.setattr(interpreter, "_execute", lambda *_args, **_kwargs: next(attempts))
+    monkeypatch.setattr(code_interpreter.shutil, "which", lambda _: "/usr/bin/bwrap")
 
-    result = interpreter.run("print('fallback')")
+    result = interpreter.run("print('trusted-python')")
+    bash_result = interpreter.run_bash("printf trusted-bash")
 
-    assert result["ok"] is True, result
-    assert secret not in result["bubblewrap_error"]
-    assert secret[:100] not in result["bubblewrap_error"]
-    assert "[REDACTED]" in result["bubblewrap_error"]
+    assert result["ok"] is True
+    assert result["stdout"].strip() == "trusted-python"
+    assert result["sandbox"] == "cwd+rlimit (trusted code only)"
+    assert bash_result["ok"] is True
+    assert bash_result["stdout"] == "trusted-bash"
+    assert bash_result["sandbox"] == "cwd+rlimit (trusted shell)"
 
 
 def test_strict_code_interpreter_redacts_launcher_diagnostic_before_truncation(

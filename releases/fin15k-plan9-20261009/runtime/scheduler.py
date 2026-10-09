@@ -130,7 +130,9 @@ class Arm:
     revision: dict[str, Any]
 
 
-def frozen_arms(bundle: Path) -> tuple[list[Arm], dict[str, Any]]:
+def frozen_arms(
+    bundle: Path, evidence_sizes: tuple[int, ...] = (50, 200, 500)
+) -> tuple[list[Arm], dict[str, Any]]:
     """Check exact full trees, composition/revision identities and a shared kernel."""
     manifest_path = bundle / "candidate-manifest.json"
     manifest = read_json(manifest_path)
@@ -141,6 +143,8 @@ def frozen_arms(bundle: Path) -> tuple[list[Arm], dict[str, Any]]:
         or {(row.get("evidence_size"), row.get("mechanism")) for row in rows} != expected
     ):
         raise HarnessError("Bundle must contain exactly the frozen 50/200/500 x h/d/joint matrix")
+    if not evidence_sizes or not set(evidence_sizes) <= {50, 200, 500}:
+        raise HarnessError("Requested evidence sizes must be a nonempty subset of 50/200/500")
     store = RevisionStore(bundle / "materialization")
     baseline_dir = bundle / "baseline"
     baseline_revision = read_json(baseline_dir / "revision.json")
@@ -155,7 +159,10 @@ def frozen_arms(bundle: Path) -> tuple[list[Arm], dict[str, Any]]:
             baseline_revision,
         )
     ]
-    for row in sorted(rows, key=lambda item: (item["evidence_size"], item["mechanism"])):
+    for row in sorted(
+        (item for item in rows if item["evidence_size"] in evidence_sizes),
+        key=lambda item: (item["evidence_size"], item["mechanism"]),
+    ):
         path = Path(row["candidate_dir"])
         directory = (path if path.is_absolute() else bundle / path).resolve(strict=True)
         if not directory.is_relative_to(bundle) or directory.is_symlink():
@@ -336,7 +343,10 @@ def prepare_binding(
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], list[Arm], list[dict[str, str]]]:
     global_limiter = global_limiter_config(args)
-    arms, bundle_identity = frozen_arms(args.bundle)
+    evidence_sizes = tuple(args.evidence_size or (50, 200, 500))
+    if len(set(evidence_sizes)) != len(evidence_sizes):
+        raise HarnessError("--evidence-size values must be unique")
+    arms, bundle_identity = frozen_arms(args.bundle, evidence_sizes)
     if global_limiter is not None:
         verify_global_limiter_support(arms)
     if args.results.is_relative_to(args.bundle) or args.results.is_relative_to(args.dataset):
@@ -417,6 +427,7 @@ def prepare_binding(
         "task_count_per_arm": len(selected),
         "category_counts": dict(Counter(task.category for task in selected)),
         "full_category_counts": COUNTS,
+        "evidence_sizes": list(evidence_sizes),
         "arm_count": len(arms),
         "expected_cells": len(selected) * len(arms),
         "limit": args.limit,
@@ -1342,6 +1353,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--task-timeout", type=float, default=3600)
     result.add_argument("--hard-timeout-grace", type=float, default=180)
     result.add_argument("--circuit-consecutive", type=int, default=10)
+    result.add_argument(
+        "--evidence-size", type=int, choices=(50, 200, 500), action="append",
+        help="Run only candidates generated from these trace sizes; repeat for several sizes",
+    )
     result.add_argument(
         "--limit", type=int, help="Smoke only: use N tasks per arm, category-interleaved"
     )

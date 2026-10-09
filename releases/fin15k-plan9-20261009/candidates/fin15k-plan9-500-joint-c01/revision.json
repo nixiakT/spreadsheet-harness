@@ -1,4 +1,36 @@
 {
+  "schema_version": "continuous-plugin-revision-v1",
+  "revision_sha256": "319eeae5bb3a764b9c72383025b485945178eda9907d81876b33e9cd193c7bf8",
+  "parent_revision_sha256": "d5a20b37919d3328910a91c4890e05b0e8e13d9868372a4c84d65e8e4477a5cf",
+  "composition": {
+    "name": "spreadsheet-harness-financial",
+    "overrides": {
+      "observe-profile-compact": {
+        "max-formula-clusters-per-sheet": 4,
+        "max-regions-per-sheet": 4,
+        "max-rendered-chars": 6000
+      }
+    },
+    "plugins": [
+      "act-code-plus-formula-validation",
+      "observe-profile-compact",
+      "control-ours",
+      "knowledge-structure",
+      "knowledge-formula",
+      "knowledge-manipulation",
+      "knowledge-analysis",
+      "knowledge-visualization",
+      "knowledge-verification",
+      "knowledge-memory",
+      "verify-formula-runtime",
+      "repair-date-text",
+      "knowledge-financial-model",
+      "observe-task-boundaries",
+      "observe-financial-targets"
+    ]
+  },
+  "resolved_composition_sha256": "9805c50cfbe33508502b74cc4e38c692879accd496e3eb4ce3e64f93c1e2912a",
+  "artifact_manifest_sha256": "1f85221007d605242e6804c65652562ba7fb4014aa1df56827e458e4fd2e97a6",
   "artifact_manifest": {
     "skills/financial-skills/3-statement-model/SKILL.md": "bc2aeb423a3cc9e6ab973dcc4e3c6682427c751e20d8b3a0eec057eab67b1e83",
     "skills/financial-skills/3-statement-model/references/formatting.md": "7e1c5ca7dd566f6821a6094efcbe48913d984766d7278178111ec4c67aca8778",
@@ -19,8 +51,8 @@
     "skills/spreadsheet-manipulation/SKILL.md": "7b0e54de97dc65085acd449026f614d9120f8c65674bda0f550ca1e3d162c7cb",
     "skills/spreadsheet-memory/SKILL.md": "3389278293199e966032089331789782a8cb059bfc17a3c9a87476045edbb614",
     "skills/spreadsheet-structure/SKILL.md": "ea27d6d5115705a7e7d3cdfae69f9b594d031b61f50edfe747023e3b086dc932",
-    "skills/spreadsheet-verification-safety/SKILL.md": "310554bece0071d3429faedb243b795adea21ae83d16bc3d9b8a6622fb3798ce",
     "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
+    "skills/spreadsheet-verification-safety/SKILL.md": "310554bece0071d3429faedb243b795adea21ae83d16bc3d9b8a6622fb3798ce",
     "skills/visual-review/SKILL.md": "d41ebedc305b9c5de53b5df7701180730a50ae47c96fe94012a6988474f91213",
     "skills/xlsx/LICENSE.txt": "79f6d8f5b427252fa3b1c11ecdbdb6bf610b944f7530b4de78f770f38741cfaa",
     "skills/xlsx/SKILL.md": "6712b39718fe815054abca9c3ee72f989613e6f771c8a5c58f30a65a6c905622",
@@ -83,7 +115,7 @@
     "src/spreadsheet_harness/budget.py": "b7d2302dbc0536f194381c271553ab5455298392ce78ef9cc23e72fbbb56e5c6",
     "src/spreadsheet_harness/capability_evolution.py": "3541b89146c250177f1ada8514019693713e118137dcc51269ada58c3d6bd1fe",
     "src/spreadsheet_harness/cli.py": "2824eeaa2b70f4b135fd5d283c3398f8b744ad25ab91207230d281d8fb77d370",
-    "src/spreadsheet_harness/code_interpreter.py": "8f33723e1173e92114378f838312977dfd381700b145fae4963bcae4499a05a6",
+    "src/spreadsheet_harness/code_interpreter.py": "9eca4fea8eef1cfa9aa2c54b4fce0ba44ee7bab0dba2e5b89cf5e1829690f7f2",
     "src/spreadsheet_harness/comparison.py": "98c29f834c4ca478640d38830d1612512a9d54494990a78fa7197e4418cb4d13",
     "src/spreadsheet_harness/config.py": "31670a73d455ee659fb6758f6ced1a00c28dc6bdc0e8d426f7949498c99003b8",
     "src/spreadsheet_harness/continuous_evolution.py": "367efa31264fcf73ae0cf599f71812e51ecba53ecc454ba94fa8ec8da3c444f1",
@@ -118,34 +150,6 @@
     "src/spreadsheet_harness/tools.py": "2c4b022c07e5f64705a0e19290f37a7cb8978feff09e7d58cb588b71c2ba0607",
     "src/spreadsheet_harness/trajectory.py": "1a14ea7e8b8fa284a44d274599b8332f714fb16fab877bf4c003061f37eaf44f",
     "src/spreadsheet_harness/v1_review.py": "ffbe8eebffac6c371a36a7ce498dc43cc5d6a5c44b12a2894750faa5276957f1"
-  },
-  "artifact_manifest_sha256": "82b620150b292f25306b3bf0a4584b65485367c27ccb256cff53a5b4ac6fd440",
-  "composition": {
-    "name": "spreadsheet-harness-financial",
-    "overrides": {
-      "observe-profile-compact": {
-        "max-formula-clusters-per-sheet": 4,
-        "max-regions-per-sheet": 4,
-        "max-rendered-chars": 6000
-      }
-    },
-    "plugins": [
-      "act-code-plus-formula-validation",
-      "observe-profile-compact",
-      "control-ours",
-      "knowledge-structure",
-      "knowledge-formula",
-      "knowledge-manipulation",
-      "knowledge-analysis",
-      "knowledge-visualization",
-      "knowledge-verification",
-      "knowledge-memory",
-      "verify-formula-runtime",
-      "repair-date-text",
-      "knowledge-financial-model",
-      "observe-task-boundaries",
-      "observe-financial-targets"
-    ]
   },
   "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
   "mutation": {
@@ -448,9 +452,5 @@
     ],
     "schema_version": "plugevolve-joint-mutation-v1",
     "scope": "joint"
-  },
-  "parent_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
-  "resolved_composition_sha256": "9805c50cfbe33508502b74cc4e38c692879accd496e3eb4ce3e64f93c1e2912a",
-  "revision_sha256": "8e818d156a5be2385b6e9873358fdb41327ba86cbcbde4786d3e86d61dbf7426",
-  "schema_version": "continuous-plugin-revision-v1"
+  }
 }

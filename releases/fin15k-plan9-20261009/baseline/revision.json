@@ -1,6 +1,6 @@
 {
   "schema_version": "continuous-plugin-revision-v1",
-  "revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+  "revision_sha256": "d5a20b37919d3328910a91c4890e05b0e8e13d9868372a4c84d65e8e4477a5cf",
   "parent_revision_sha256": null,
   "composition": {
     "name": "spreadsheet-harness-financial",
@@ -22,7 +22,7 @@
     "overrides": {}
   },
   "resolved_composition_sha256": "b23ccf45bf0e9b2f9f6cd4ec5506fa1db579764000f602b2b1387c2dec8144ef",
-  "artifact_manifest_sha256": "67a79c641a2fb8147a6d238c4743a7ac21d616d67b8fdf4315ba8028180b9d68",
+  "artifact_manifest_sha256": "d7e5b2c49200f44a2415f4503eeaaf934484855e968a2c18002c2bf0c53346ba",
   "artifact_manifest": {
     "skills/financial-skills/3-statement-model/SKILL.md": "bc2aeb423a3cc9e6ab973dcc4e3c6682427c751e20d8b3a0eec057eab67b1e83",
     "skills/financial-skills/3-statement-model/references/formatting.md": "7e1c5ca7dd566f6821a6094efcbe48913d984766d7278178111ec4c67aca8778",
@@ -107,7 +107,7 @@
     "src/spreadsheet_harness/budget.py": "b7d2302dbc0536f194381c271553ab5455298392ce78ef9cc23e72fbbb56e5c6",
     "src/spreadsheet_harness/capability_evolution.py": "3541b89146c250177f1ada8514019693713e118137dcc51269ada58c3d6bd1fe",
     "src/spreadsheet_harness/cli.py": "2824eeaa2b70f4b135fd5d283c3398f8b744ad25ab91207230d281d8fb77d370",
-    "src/spreadsheet_harness/code_interpreter.py": "8f33723e1173e92114378f838312977dfd381700b145fae4963bcae4499a05a6",
+    "src/spreadsheet_harness/code_interpreter.py": "9eca4fea8eef1cfa9aa2c54b4fce0ba44ee7bab0dba2e5b89cf5e1829690f7f2",
     "src/spreadsheet_harness/comparison.py": "98c29f834c4ca478640d38830d1612512a9d54494990a78fa7197e4418cb4d13",
     "src/spreadsheet_harness/config.py": "31670a73d455ee659fb6758f6ced1a00c28dc6bdc0e8d426f7949498c99003b8",
     "src/spreadsheet_harness/continuous_evolution.py": "367efa31264fcf73ae0cf599f71812e51ecba53ecc454ba94fa8ec8da3c444f1",

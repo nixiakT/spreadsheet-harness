@@ -2,7 +2,10 @@
 
 50／200／500 条 Fin15k 开发轨迹 × h-only／d-only／joint。每格独立从同一个新冻结的
 Financial 基线出发；并非复用旧 skill-only proposal，也不串行混入其他格的改动。
-基线 revision：`522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd`。
+原候选设计基线 revision：`522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd`。
+发布运行基线统一应用 `trusted-execution-skips-bwrap-v1` 兼容修复后为
+`d5a20b37919d3328910a91c4890e05b0e8e13d9868372a4c84d65e8e4477a5cf`；该修复只使
+`require_isolation=False` 明确走 trusted cwd/rlimit，严格隔离路径保持不变。
 
 ## 已核验的开发失败
 
