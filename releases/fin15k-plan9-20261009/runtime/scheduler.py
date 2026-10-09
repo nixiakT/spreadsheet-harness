@@ -17,6 +17,7 @@ import json
 import math
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -984,6 +985,51 @@ def collect_attempts(
     return histories
 
 
+def import_finished_attempts(
+    source: Path, destination: Path, binding: dict[str, Any], jobs: list[dict[str, str]]
+) -> int:
+    """Copy only audited finished cells from a prior compatible run.
+
+    Running/incomplete attempts are deliberately excluded and will be scheduled anew.
+    The child manifest is re-audited by collect_attempts under the new arm selection.
+    """
+    allowed = {job["key"]: job for job in jobs}
+    copied = 0
+    source_cells = source / "cells"
+    if not source_cells.is_dir():
+        raise HarnessError("--import-finished-results must point to a results directory")
+    for path in sorted(source_cells.glob("*/*/*/attempt-*/attempt.json")):
+        meta = read_json(path)
+        key = meta.get("key")
+        if key not in allowed or meta.get("status") != "finished":
+            continue
+        if meta.get("classification") in {"infrastructure_failure", "provider_failure"}:
+            # Preserve audited provider results only; retryable infrastructure failures are
+            # intentionally allowed to run again in the new schedule.
+            continue
+        job = allowed[key]
+        attempt = int(meta.get("attempt", 0))
+        if attempt != 1:
+            raise HarnessError("Imported attempt histories must start at attempt 1")
+        target = destination / "cells" / job["arm"] / job["category"] / job["item_id"] / "attempt-01"
+        if target.exists():
+            raise HarnessError(f"Imported target already exists: {target}")
+        shutil.copytree(path.parent, target)
+        imported = read_json(target / "attempt.json")
+        expected_output = target / "run"
+        imported.update({
+            "binding_sha256": binding["binding_sha256"],
+            "attempt_directory": str(target),
+            "output": str(expected_output),
+            "artifact": next(
+                row["artifact"] for row in binding["arms"] if row["label"] == job["arm"]
+            ),
+        })
+        atomic_json(target / "attempt.json", imported)
+        copied += 1
+    return copied
+
+
 def needs_attempt(history: list[dict[str, Any]]) -> bool:
     return not history or len(history) < 2 and history[-1].get("retryable") is True
 
@@ -1177,6 +1223,14 @@ def run(args: argparse.Namespace) -> int:
         args.results.mkdir(parents=True, exist_ok=False)
         atomic_json(args.results / "run-config.json", binding)
         atomic_json(args.results / "jobs.json", jobs)
+        if args.import_finished_results is not None:
+            imported = import_finished_attempts(
+                args.import_finished_results.expanduser().resolve(strict=True),
+                args.results,
+                binding,
+                jobs,
+            )
+            print(json.dumps({"imported_finished_attempts": imported}), flush=True)
     with (args.results / "scheduler.lock").open("a+") as handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1367,6 +1421,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--no-baseline", action="store_true",
         help="Run selected candidate arms only; disables baseline pairing for this result set",
+    )
+    result.add_argument(
+        "--import-finished-results", type=Path,
+        help="Import finished compatible cells from an earlier run; running cells are excluded",
     )
     result.add_argument(
         "--limit", type=int, help="Smoke only: use N tasks per arm, category-interleaved"
