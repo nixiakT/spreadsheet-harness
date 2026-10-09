@@ -1809,32 +1809,9 @@ class LocalCodeInterpreter:
                 f"{STRICT_ISOLATION_POLICY}: writable workspace, runtime allowlist, no network",
             )
 
-        base = [sys.executable, "-I", str(launcher), str(script)]
-        bubblewrap = shutil.which("bwrap") if platform.system() == "Linux" else None
-        if not bubblewrap:
-            return base, "cwd+rlimit (trusted code only)"
-        return (
-            [
-                bubblewrap,
-                "--die-with-parent",
-                "--new-session",
-                "--unshare-net",
-                "--ro-bind",
-                "/",
-                "/",
-                "--bind",
-                str(self.workspace),
-                str(self.workspace),
-                "--proc",
-                "/proc",
-                "--dev",
-                "/dev",
-                "--chdir",
-                str(self.workspace),
-                *base,
-            ],
-            "bubblewrap: read-only host, writable workspace, network disabled",
-        )
+        # False explicitly selects trusted execution. A bwrap binary may be
+        # present in a container where user namespaces are unavailable.
+        return [sys.executable, "-I", str(launcher), str(script)], "cwd+rlimit (trusted code only)"
 
     def _execute(
         self,
@@ -1925,27 +1902,6 @@ runpy.run_path(
                     + self._bounded_diagnostic(completed.stderr)
                 )
             bubblewrap_error: str | None = None
-            namespace_failure = (
-                not self.require_isolation
-                and sandbox.startswith("bubblewrap:")
-                and completed.returncode != 0
-                and any(
-                    marker_text in completed.stderr.lower()
-                    for marker_text in (
-                        "creating new namespace failed",
-                        "operation not permitted",
-                        "permission denied",
-                    )
-                )
-            )
-            if namespace_failure:
-                bubblewrap_error = self._bounded_diagnostic(completed.stderr)
-                completed = self._execute(
-                    [sys.executable, "-I", str(launcher), str(script)],
-                    environment=environment,
-                    timeout=timeout,
-                )
-                sandbox = "cwd+rlimit fallback (bubblewrap unavailable; trusted code only)"
             stdout, stdout_truncated = self._bounded_output(completed.stdout)
             stderr, stderr_truncated = self._bounded_output(completed.stderr)
             truncated = stdout_truncated or stderr_truncated
@@ -2182,28 +2138,6 @@ runpy.run_path(
         else:
             argv = command_argv
             sandbox = "cwd+rlimit (trusted shell)"
-            bubblewrap = shutil.which("bwrap") if platform.system() == "Linux" else None
-            if bubblewrap:
-                argv = [
-                    bubblewrap,
-                    "--die-with-parent",
-                    "--new-session",
-                    "--unshare-net",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--bind",
-                    str(self.workspace),
-                    str(self.workspace),
-                    "--proc",
-                    "/proc",
-                    "--dev",
-                    "/dev",
-                    "--chdir",
-                    str(self.workspace),
-                    *command_argv,
-                ]
-                sandbox = "bubblewrap: read-only host, writable workspace, network disabled"
 
         environment = _environment(
             self.workspace,
@@ -2218,24 +2152,6 @@ runpy.run_path(
                     + self._bounded_diagnostic(completed.stderr)
                 )
             bubblewrap_error: str | None = None
-            namespace_failure = (
-                not self.require_isolation
-                and sandbox.startswith("bubblewrap:")
-                and completed.returncode != 0
-                and any(
-                    marker_text in completed.stderr.lower()
-                    for marker_text in (
-                        "creating new namespace failed",
-                        "operation not permitted",
-                        "permission denied",
-                    )
-                )
-            )
-            if namespace_failure:
-                bubblewrap_error = self._bounded_diagnostic(completed.stderr)
-                completed = self._execute(command_argv, environment=environment, timeout=timeout)
-                sandbox = "cwd+rlimit fallback (bubblewrap unavailable; trusted shell)"
-
             stdout, stdout_truncated = self._bounded_output(completed.stdout)
             stderr, stderr_truncated = self._bounded_output(completed.stderr)
             after_sha256 = _file_sha256(self.workbook)
