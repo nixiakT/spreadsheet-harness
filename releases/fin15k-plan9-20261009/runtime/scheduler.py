@@ -1015,6 +1015,19 @@ def import_finished_attempts(
         if target.exists():
             raise HarnessError(f"Imported target already exists: {target}")
         shutil.copytree(path.parent, target)
+        source_run = path.parent / "run"
+        target_run = target / "run"
+        # Child JSON records contain absolute output paths. Rebind only textual
+        # metadata to the new audited run root; workbook bytes remain untouched.
+        old_root = str(source_run)
+        new_root = str(target_run)
+        for metadata_path in target_run.rglob("*"):
+            if not metadata_path.is_file() or metadata_path.suffix.lower() not in {".json", ".jsonl", ".log"}:
+                continue
+            raw = metadata_path.read_bytes()
+            replaced = raw.replace(old_root.encode(), new_root.encode())
+            if replaced != raw:
+                metadata_path.write_bytes(replaced)
         imported = read_json(target / "attempt.json")
         expected_output = target / "run"
         imported.update({
