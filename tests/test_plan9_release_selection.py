@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "releases/fin15k-plan9-20261009"
+# Tests must not contaminate the hash-checked release with import caches.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(RELEASE / "baseline/artifact/src"))
 spec = importlib.util.spec_from_file_location("plan9_release_scheduler", RELEASE / "runtime/scheduler.py")
 scheduler = importlib.util.module_from_spec(spec)
