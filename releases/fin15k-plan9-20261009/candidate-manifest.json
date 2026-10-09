@@ -41,8 +41,8 @@
       "mechanism": "h-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-h-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-50-h-only-c01/artifact",
-      "revision_sha256": "501888b129473ad38d2d4c48e43de8f25890f391547cceb34c572b7b0f5cd63e",
-      "artifact_manifest_sha256": "68387a445ddb4c573a667c3846012498a3a21706760fe0a58b423d4c1e0e1baf",
+      "revision_sha256": "f5dc70e775069134b4092de7904b96c587b0223940e7e7fea732dfc89cf3e448",
+      "artifact_manifest_sha256": "37963f06ff8d11cbcdaa86a72c193f75edd5c0be5fb1aaae9cb29d6c89c509be",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries"
@@ -51,7 +51,7 @@
       "authored_request_sha256": "13ba6104883c9398129abeda342284cf30241a3705481f713db8b2496f3b006b",
       "overlay_manifest": {
         "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
-        "src/spreadsheet_harness/arms.py": "240436e59d27430f4fb72a5b06c4b032112744f43fa5904f7242c221e5e8b030",
+        "src/spreadsheet_harness/arms.py": "fe55f27b68b24fc3e38cea6f0a4aceb246885a4c4bf50768d83d9a0ccd32af5d",
         "src/spreadsheet_harness/generated_plugins/manifest.json": "8dccd35691dfdfcbcdb02841410d3dc1baf968329ee9ef7f5c552fb3f09fc4e0",
         "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "f3dcad202a21fda243da81b3233c66199e1893fd81dafd06680087842c7b4219"
       },
@@ -152,8 +152,8 @@
       "mechanism": "joint",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-joint-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-50-joint-c01/artifact",
-      "revision_sha256": "04f799c55536362f3a3f0071d2e5816267e3c74c06d7eb43912f0d0385a175a5",
-      "artifact_manifest_sha256": "df556068d55db80587dbdc1d5608841c20bb9e988e3c44dd2b79ef208c0b5cd9",
+      "revision_sha256": "0a028853170ad0a2a8224e12e62d62d4ee768b1a9beb1b8da38aba0b0803f805",
+      "artifact_manifest_sha256": "66f46e3a05b6cf713522c5d8cc44be0b41a6238335b5461e11a59e4da4d421b1",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries",
@@ -164,7 +164,7 @@
       "overlay_manifest": {
         "skills/spreadsheet-financial-model/SKILL.md": "7c773942c964cc05ef2088c309a324684a8fc0c0877e26e47eb34ea2c7610930",
         "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
-        "src/spreadsheet_harness/arms.py": "240436e59d27430f4fb72a5b06c4b032112744f43fa5904f7242c221e5e8b030",
+        "src/spreadsheet_harness/arms.py": "fe55f27b68b24fc3e38cea6f0a4aceb246885a4c4bf50768d83d9a0ccd32af5d",
         "src/spreadsheet_harness/financial_model_repairs.py": "c3c34bd41771d6d3cc238321f6988958e043f610428b82531348a9f414fb8834",
         "src/spreadsheet_harness/generated_plugins/manifest.json": "a9dc56fd3a34095a94de94afa9d977e27ea49700d30d08602fee99fd6c62f340",
         "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "bc9539ccdbaead9bd5acd1206c24889c142499299bb9afceea8ca180f0c70d7e",
@@ -209,8 +209,8 @@
       "mechanism": "h-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-h-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-200-h-only-c01/artifact",
-      "revision_sha256": "3012d88aed1e065cb0c846d4405356ba15a064564358053edb3f425a3e72934f",
-      "artifact_manifest_sha256": "b7a427b6a42af48abe3b58be97822c7184590a28bd3ded6dda8f137dc7cf61fc",
+      "revision_sha256": "1b97ad7a13383aa3e3af81ad1847ed1221d848f6b9946157f1877ec46335c7cf",
+      "artifact_manifest_sha256": "ed9fc540d902e8d3186b0569ea9efe5e093934f73238f7330457931f581ceff2",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries"
@@ -220,7 +220,7 @@
       "overlay_manifest": {
         "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
         "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
-        "src/spreadsheet_harness/arms.py": "c8f8178349ab3068851c64a61dd625f628f36354835a166cec4a463ca4845bbd",
+        "src/spreadsheet_harness/arms.py": "5db5af1f07e30c3c51072a144a41fbe8dab5083cd63d3cb32b54d998a7f516bf",
         "src/spreadsheet_harness/generated_plugins/manifest.json": "8dccd35691dfdfcbcdb02841410d3dc1baf968329ee9ef7f5c552fb3f09fc4e0",
         "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "39f6c670f1643973fd827734c8fd788b3dc42f613dc89cd27fa96fa5f1dc0590"
       },
@@ -326,8 +326,8 @@
       "mechanism": "joint",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-joint-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-200-joint-c01/artifact",
-      "revision_sha256": "38ec9db6b5b64768ea906bc8a12a3ee00304ed2d31108e7805385cc14860306d",
-      "artifact_manifest_sha256": "c387adb80ca110631540137c7d076731a0cc94e132a9efc4268df2a897c4ff93",
+      "revision_sha256": "7753b3c832d40aac6d2e96ee02d13bef1c1b3744db9c2b0612c731a24be2b239",
+      "artifact_manifest_sha256": "bd100db58a24921d52649545307053891e6a3925a6ce19d0a8d85c967cbcf292",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries",
@@ -339,7 +339,7 @@
         "skills/spreadsheet-financial-model/SKILL.md": "096179e1701d41a30227a735cb45bb38478acf8c6241a9e801947bf0dd0a8cb0",
         "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
         "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
-        "src/spreadsheet_harness/arms.py": "c8f8178349ab3068851c64a61dd625f628f36354835a166cec4a463ca4845bbd",
+        "src/spreadsheet_harness/arms.py": "5db5af1f07e30c3c51072a144a41fbe8dab5083cd63d3cb32b54d998a7f516bf",
         "src/spreadsheet_harness/financial_model_repairs.py": "88662c376ab9313333d75773299b1e68af61076f2d1d1ce53c12b8598f40f53c",
         "src/spreadsheet_harness/generated_plugins/manifest.json": "a9dc56fd3a34095a94de94afa9d977e27ea49700d30d08602fee99fd6c62f340",
         "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "75661d49a9306fe0fa5d187ef494f434579598d08d2caaec1fd06ca21727d50d",
@@ -389,8 +389,8 @@
       "mechanism": "h-only",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-h-only-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-500-h-only-c01/artifact",
-      "revision_sha256": "8c31b68fad565c4837faabfe33f9550aa260b5ad242729ba1656ec46be200b78",
-      "artifact_manifest_sha256": "fccec45dfcc451549ea1090e4dc0f6b953dd0ebd3a230f16ba4ad4bcd8d27fb9",
+      "revision_sha256": "9b273fde22d1afcfa60e8f8802b91fdeca72a3072ce8b08b3e098b46511c50cc",
+      "artifact_manifest_sha256": "949216a7445bacaa8fd6f39cac09191f59064fd881ae62555cae268f6e9bbd25",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries"
@@ -400,7 +400,7 @@
       "overlay_manifest": {
         "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
         "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
-        "src/spreadsheet_harness/arms.py": "a8be539e20fcea4bbe10957bf09076ee1da8da79961651848e3b99fee9e8671f",
+        "src/spreadsheet_harness/arms.py": "49f1bc18c380aa6f5a1278d927b34d4fcf2f5305b888a3b7cd3b8acd5e54a95a",
         "src/spreadsheet_harness/generated_plugins/manifest.json": "8dccd35691dfdfcbcdb02841410d3dc1baf968329ee9ef7f5c552fb3f09fc4e0",
         "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "9118f39bd98c951565a771da052a6372fb9c646176c79c1ccd17dbc63765ac09"
       },
@@ -511,8 +511,8 @@
       "mechanism": "joint",
       "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-joint-c01",
       "artifact": "materialization/candidates/r000001-fin15k-plan9-500-joint-c01/artifact",
-      "revision_sha256": "319eeae5bb3a764b9c72383025b485945178eda9907d81876b33e9cd193c7bf8",
-      "artifact_manifest_sha256": "1f85221007d605242e6804c65652562ba7fb4014aa1df56827e458e4fd2e97a6",
+      "revision_sha256": "5715beeec8b2977ef0d6ad6f92b05fc5f8a34a6cfaeccf08dd77c65582f33532",
+      "artifact_manifest_sha256": "0c5a86f93a0ce6843ac4db7d46fe60b985f2fbc91c3355ac815fc8d03b04f08e",
       "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
       "candidate_hooks": [
         "observe-task-boundaries",
@@ -524,7 +524,7 @@
         "skills/spreadsheet-financial-model/SKILL.md": "6450584506a2ceb790e79e0d951953985ea48c8a8795690add7dac853dd1f573",
         "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
         "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
-        "src/spreadsheet_harness/arms.py": "a8be539e20fcea4bbe10957bf09076ee1da8da79961651848e3b99fee9e8671f",
+        "src/spreadsheet_harness/arms.py": "49f1bc18c380aa6f5a1278d927b34d4fcf2f5305b888a3b7cd3b8acd5e54a95a",
         "src/spreadsheet_harness/financial_model_repairs.py": "00f8dc06061bac80f13cca1acfa9a0c3a809466b24084700216a47bc8cc8a062",
         "src/spreadsheet_harness/generated_plugins/manifest.json": "a9dc56fd3a34095a94de94afa9d977e27ea49700d30d08602fee99fd6c62f340",
         "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "b1d206c5c5c3db3c276eb37a63a8e003fc744a57120d7be11ef86bdab3c2bfb0",
@@ -590,5 +590,48 @@
     "new_source_sha256": "9eca4fea8eef1cfa9aa2c54b4fce0ba44ee7bab0dba2e5b89cf5e1829690f7f2",
     "old_baseline_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
     "strict_isolation_unchanged": true
+  },
+  "review_verifier_fix": {
+    "name": "inconclusive-read-only-review-preserves-clean-submit-v1",
+    "affected_candidates": [
+      "fin15k-plan9-50-h-only-c01",
+      "fin15k-plan9-50-joint-c01",
+      "fin15k-plan9-200-h-only-c01",
+      "fin15k-plan9-200-joint-c01",
+      "fin15k-plan9-500-h-only-c01",
+      "fin15k-plan9-500-joint-c01"
+    ],
+    "changes": [
+      {
+        "candidate_id": "fin15k-plan9-50-h-only-c01",
+        "old_revision_sha256": "501888b129473ad38d2d4c48e43de8f25890f391547cceb34c572b7b0f5cd63e",
+        "new_revision_sha256": "f5dc70e775069134b4092de7904b96c587b0223940e7e7fea732dfc89cf3e448"
+      },
+      {
+        "candidate_id": "fin15k-plan9-50-joint-c01",
+        "old_revision_sha256": "04f799c55536362f3a3f0071d2e5816267e3c74c06d7eb43912f0d0385a175a5",
+        "new_revision_sha256": "0a028853170ad0a2a8224e12e62d62d4ee768b1a9beb1b8da38aba0b0803f805"
+      },
+      {
+        "candidate_id": "fin15k-plan9-200-h-only-c01",
+        "old_revision_sha256": "3012d88aed1e065cb0c846d4405356ba15a064564358053edb3f425a3e72934f",
+        "new_revision_sha256": "1b97ad7a13383aa3e3af81ad1847ed1221d848f6b9946157f1877ec46335c7cf"
+      },
+      {
+        "candidate_id": "fin15k-plan9-200-joint-c01",
+        "old_revision_sha256": "38ec9db6b5b64768ea906bc8a12a3ee00304ed2d31108e7805385cc14860306d",
+        "new_revision_sha256": "7753b3c832d40aac6d2e96ee02d13bef1c1b3744db9c2b0612c731a24be2b239"
+      },
+      {
+        "candidate_id": "fin15k-plan9-500-h-only-c01",
+        "old_revision_sha256": "8c31b68fad565c4837faabfe33f9550aa260b5ad242729ba1656ec46be200b78",
+        "new_revision_sha256": "9b273fde22d1afcfa60e8f8802b91fdeca72a3072ce8b08b3e098b46511c50cc"
+      },
+      {
+        "candidate_id": "fin15k-plan9-500-joint-c01",
+        "old_revision_sha256": "319eeae5bb3a764b9c72383025b485945178eda9907d81876b33e9cd193c7bf8",
+        "new_revision_sha256": "5715beeec8b2977ef0d6ad6f92b05fc5f8a34a6cfaeccf08dd77c65582f33532"
+      }
+    ]
   }
 }

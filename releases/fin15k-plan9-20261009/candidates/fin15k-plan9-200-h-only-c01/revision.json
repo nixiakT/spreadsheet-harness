@@ -1,6 +1,6 @@
 {
   "schema_version": "continuous-plugin-revision-v1",
-  "revision_sha256": "3012d88aed1e065cb0c846d4405356ba15a064564358053edb3f425a3e72934f",
+  "revision_sha256": "1b97ad7a13383aa3e3af81ad1847ed1221d848f6b9946157f1877ec46335c7cf",
   "parent_revision_sha256": "d5a20b37919d3328910a91c4890e05b0e8e13d9868372a4c84d65e8e4477a5cf",
   "composition": {
     "name": "spreadsheet-harness-financial",
@@ -23,7 +23,7 @@
     ]
   },
   "resolved_composition_sha256": "f40e86d703eb2a93ec6c6f78d0ddb9dd7ad070eda0ac5b5ebb3c6dceffa6bb3d",
-  "artifact_manifest_sha256": "b7a427b6a42af48abe3b58be97822c7184590a28bd3ded6dda8f137dc7cf61fc",
+  "artifact_manifest_sha256": "ed9fc540d902e8d3186b0569ea9efe5e093934f73238f7330457931f581ceff2",
   "artifact_manifest": {
     "skills/financial-skills/3-statement-model/SKILL.md": "bc2aeb423a3cc9e6ab973dcc4e3c6682427c751e20d8b3a0eec057eab67b1e83",
     "skills/financial-skills/3-statement-model/references/formatting.md": "7e1c5ca7dd566f6821a6094efcbe48913d984766d7278178111ec4c67aca8778",
@@ -102,7 +102,7 @@
     "skills/xlsx/scripts/recalc.py": "66f6e726d5a53cfabea0b6471d6669deb95e54e96cb7913b687e4388da1bb3d9",
     "src/spreadsheet_harness/__init__.py": "1548ee8e7bdb465cf9bed447fe760670ec873a0c985ad02709161a60bff42846",
     "src/spreadsheet_harness/agent.py": "27ea7cfd97a5e98d9f09fbd1a57459e53963661e0b70c6ed1a8d6e83591d0bd7",
-    "src/spreadsheet_harness/arms.py": "c8f8178349ab3068851c64a61dd625f628f36354835a166cec4a463ca4845bbd",
+    "src/spreadsheet_harness/arms.py": "5db5af1f07e30c3c51072a144a41fbe8dab5083cd63d3cb32b54d998a7f516bf",
     "src/spreadsheet_harness/audit.py": "29604a061dc287d9c22303066e5cf9f6bd222e05c1186f01b45e61e93347f252",
     "src/spreadsheet_harness/benchmark.py": "9875c46a56d253f4b8469f4c5bfa12d28d68568199ebe988102ba84275a94e3b",
     "src/spreadsheet_harness/budget.py": "b7d2302dbc0536f194381c271553ab5455298392ce78ef9cc23e72fbbb56e5c6",

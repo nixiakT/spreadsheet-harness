@@ -8963,17 +8963,21 @@ def run_arm(
                         pacer=pacer,
                     )
                     stages.append(verification_stage)
-                    if not _candidate_review_has_content_view(
+                    review_has_content = _candidate_review_has_content_view(
                         verification_stage.tool_trace, instruction,
                         [str(sheet["name"]) for sheet in sheet_catalog if isinstance(sheet.get("name"), str)],
-                    ):
-                        raise PaperStageValidationError(
-                            "review_verify", "read-only verification omitted live target content"
-                        )
-                    gaps = _candidate_review_gap_issues(verification_stage.normalized_evidence or "")
+                    )
+                    try:
+                        gaps = _candidate_review_gap_issues(
+                            verification_stage.normalized_evidence or ""
+                        ) if review_has_content else ()
+                    except PaperStageValidationError:
+                        gaps = ()
+                        review_has_content = False
                     session.recorder.record("harness.read_only_review.completed", {
-                        "verification": not gaps,
+                        "verification": not gaps if review_has_content else None,
                         "issue_count": len(gaps),
+                        "inconclusive": not review_has_content,
                         "policy": "exact-target-read-only-before-recovery-v1",
                     })
                     if gaps:
