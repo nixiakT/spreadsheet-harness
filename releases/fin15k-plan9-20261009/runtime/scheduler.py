@@ -1036,6 +1036,10 @@ def import_finished_attempts(
 
 
 def needs_attempt(history: list[dict[str, Any]]) -> bool:
+    if history and history[-1].get("imported_external_output"):
+        # Imported cells are explicitly historical and must never be rerun,
+        # including provider-salvage outcomes.
+        return False
     return not history or len(history) < 2 and history[-1].get("retryable") is True
 
 
