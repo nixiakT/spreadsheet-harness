@@ -630,7 +630,8 @@ def classify_record(record: dict[str, Any], *, returncode: int = 0) -> dict[str,
 
 
 def verify_child_result(
-    run_dir: Path, arm: Arm, job: dict[str, str], binding: dict[str, Any]
+    run_dir: Path, arm: Arm, job: dict[str, str], binding: dict[str, Any],
+    *, allow_external_output: bool = False,
 ) -> dict[str, Any]:
     records = read_json(run_dir / "results.json")
     manifest = read_json(run_dir / "manifest.json")
@@ -709,11 +710,10 @@ def verify_child_result(
             / "artifacts/output.xlsx"
         )
         recorded_workbook = Path(str(record.get("output_workbook", "")))
-        if (
-            recorded_workbook.resolve() != workbook.resolve()
-            or not workbook.is_file()
-            or file_sha256(workbook) != record.get("output_sha256")
-        ):
+        local_output = recorded_workbook.resolve() == workbook.resolve() and workbook.is_file()
+        external_output = allow_external_output and recorded_workbook.is_file()
+        output_path = recorded_workbook if external_output else workbook
+        if not (local_output or external_output) or file_sha256(output_path) != record.get("output_sha256"):
             raise HarnessError("Child output workbook path/content checksum mismatch")
     return record
 
@@ -949,7 +949,10 @@ def collect_attempts(
                 run_dir / "manifest.json"
             ) != meta.get("manifest_sha256"):
                 raise HarnessError("Persisted child result/manifest content changed")
-            record = verify_child_result(run_dir, arm, job, binding)
+            record = verify_child_result(
+                run_dir, arm, job, binding,
+                allow_external_output=bool(meta.get("imported_external_output")),
+            )
             verdict = classify_record(record, returncode=meta.get("returncode", 0))
             if any(
                 meta.get(field) != verdict[field]
@@ -1015,19 +1018,6 @@ def import_finished_attempts(
         if target.exists():
             raise HarnessError(f"Imported target already exists: {target}")
         shutil.copytree(path.parent, target)
-        source_run = path.parent / "run"
-        target_run = target / "run"
-        # Child JSON records contain absolute output paths. Rebind only textual
-        # metadata to the new audited run root; workbook bytes remain untouched.
-        old_root = str(source_run)
-        new_root = str(target_run)
-        for metadata_path in target_run.rglob("*"):
-            if not metadata_path.is_file() or metadata_path.suffix.lower() not in {".json", ".jsonl", ".log"}:
-                continue
-            raw = metadata_path.read_bytes()
-            replaced = raw.replace(old_root.encode(), new_root.encode())
-            if replaced != raw:
-                metadata_path.write_bytes(replaced)
         imported = read_json(target / "attempt.json")
         expected_output = target / "run"
         imported.update({
@@ -1037,6 +1027,8 @@ def import_finished_attempts(
             "artifact": next(
                 row["artifact"] for row in binding["arms"] if row["label"] == job["arm"]
             ),
+            "imported_external_output": True,
+            "imported_from": str(path.parent),
         })
         atomic_json(target / "attempt.json", imported)
         copied += 1
