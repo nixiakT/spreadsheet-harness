@@ -131,7 +131,8 @@ class Arm:
 
 
 def frozen_arms(
-    bundle: Path, evidence_sizes: tuple[int, ...] = (50, 200, 500)
+    bundle: Path, evidence_sizes: tuple[int, ...] = (50, 200, 500),
+    *, include_baseline: bool = True,
 ) -> tuple[list[Arm], dict[str, Any]]:
     """Check exact full trees, composition/revision identities and a shared kernel."""
     manifest_path = bundle / "candidate-manifest.json"
@@ -150,15 +151,15 @@ def frozen_arms(
     baseline_revision = read_json(baseline_dir / "revision.json")
     if baseline_revision.get("revision_sha256") != manifest.get("baseline_revision_sha256"):
         raise HarnessError("Bundle baseline revision differs from its manifest")
-    arms = [
-        Arm(
+    arms: list[Arm] = []
+    if include_baseline:
+        arms.append(Arm(
             "baseline",
             baseline_dir,
             baseline_dir / "artifact",
             baseline_dir / "composition.json",
             baseline_revision,
-        )
-    ]
+        ))
     for row in sorted(
         (item for item in rows if item["evidence_size"] in evidence_sizes),
         key=lambda item: (item["evidence_size"], item["mechanism"]),
@@ -192,9 +193,12 @@ def frozen_arms(
             baseline_kernel = kernel
         elif kernel != baseline_kernel:
             raise HarnessError(f"Candidate modified the shared immutable kernel: {arm.label}")
+    if not arms:
+        raise HarnessError("At least one candidate arm must be selected")
     return arms, {
         "candidate_manifest_sha256": file_sha256(manifest_path),
         "baseline_kernel_sha256": _sha256_json(baseline_kernel),
+        "include_baseline": include_baseline,
     }
 
 
@@ -346,7 +350,9 @@ def prepare_binding(
     evidence_sizes = tuple(args.evidence_size or (50, 200, 500))
     if len(set(evidence_sizes)) != len(evidence_sizes):
         raise HarnessError("--evidence-size values must be unique")
-    arms, bundle_identity = frozen_arms(args.bundle, evidence_sizes)
+    arms, bundle_identity = frozen_arms(
+        args.bundle, evidence_sizes, include_baseline=not args.no_baseline
+    )
     if global_limiter is not None:
         verify_global_limiter_support(arms)
     if args.results.is_relative_to(args.bundle) or args.results.is_relative_to(args.dataset):
@@ -429,6 +435,7 @@ def prepare_binding(
         "full_category_counts": COUNTS,
         "evidence_sizes": list(evidence_sizes),
         "arm_count": len(arms),
+        "include_baseline": not args.no_baseline,
         "expected_cells": len(selected) * len(arms),
         "limit": args.limit,
         "task_ids": [task.task_id for task in selected],
@@ -1356,6 +1363,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--evidence-size", type=int, choices=(50, 200, 500), action="append",
         help="Run only candidates generated from these trace sizes; repeat for several sizes",
+    )
+    result.add_argument(
+        "--no-baseline", action="store_true",
+        help="Run selected candidate arms only; disables baseline pairing for this result set",
     )
     result.add_argument(
         "--limit", type=int, help="Smoke only: use N tasks per arm, category-interleaved"
