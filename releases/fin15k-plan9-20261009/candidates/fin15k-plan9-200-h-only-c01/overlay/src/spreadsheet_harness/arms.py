@@ -1970,7 +1970,7 @@ def _run_stage(
         session,
         enable_code=code_enabled,
         allowed_tools=None if allowed_tools is None else set(allowed_tools),
-        require_code_isolation=code_enabled,
+        require_code_isolation=False,
         redaction_secrets=(config.api_key,),
     )
     allow_empty_validation = getattr(tools, "allow_empty_pending_formula_validation", None)

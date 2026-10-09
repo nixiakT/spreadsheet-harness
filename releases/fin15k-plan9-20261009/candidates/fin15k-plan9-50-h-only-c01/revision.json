@@ -1,7 +1,7 @@
 {
   "schema_version": "continuous-plugin-revision-v1",
-  "revision_sha256": "f5dc70e775069134b4092de7904b96c587b0223940e7e7fea732dfc89cf3e448",
-  "parent_revision_sha256": "d5a20b37919d3328910a91c4890e05b0e8e13d9868372a4c84d65e8e4477a5cf",
+  "revision_sha256": "9289c7722edd766ea25d369a06d27cc84cad13ba7b805c82c11530d203fdf68d",
+  "parent_revision_sha256": "b13de9dbdde8a5206690b5e5df1737d779ffebf4cc94b8cde4d08f09ef652fa4",
   "composition": {
     "name": "spreadsheet-harness-financial",
     "overrides": {},
@@ -23,7 +23,7 @@
     ]
   },
   "resolved_composition_sha256": "f40e86d703eb2a93ec6c6f78d0ddb9dd7ad070eda0ac5b5ebb3c6dceffa6bb3d",
-  "artifact_manifest_sha256": "37963f06ff8d11cbcdaa86a72c193f75edd5c0be5fb1aaae9cb29d6c89c509be",
+  "artifact_manifest_sha256": "88110490df86ea10a58c5aee5c01071f68a2cc1057c4b461e857366ad4af0450",
   "artifact_manifest": {
     "skills/financial-skills/3-statement-model/SKILL.md": "bc2aeb423a3cc9e6ab973dcc4e3c6682427c751e20d8b3a0eec057eab67b1e83",
     "skills/financial-skills/3-statement-model/references/formatting.md": "7e1c5ca7dd566f6821a6094efcbe48913d984766d7278178111ec4c67aca8778",
@@ -102,7 +102,7 @@
     "skills/xlsx/scripts/recalc.py": "66f6e726d5a53cfabea0b6471d6669deb95e54e96cb7913b687e4388da1bb3d9",
     "src/spreadsheet_harness/__init__.py": "1548ee8e7bdb465cf9bed447fe760670ec873a0c985ad02709161a60bff42846",
     "src/spreadsheet_harness/agent.py": "27ea7cfd97a5e98d9f09fbd1a57459e53963661e0b70c6ed1a8d6e83591d0bd7",
-    "src/spreadsheet_harness/arms.py": "fe55f27b68b24fc3e38cea6f0a4aceb246885a4c4bf50768d83d9a0ccd32af5d",
+    "src/spreadsheet_harness/arms.py": "9cc0d75e9a7e2027bce34373e0de6fcec56bb316da52b74f53d8740e5a2b4311",
     "src/spreadsheet_harness/audit.py": "29604a061dc287d9c22303066e5cf9f6bd222e05c1186f01b45e61e93347f252",
     "src/spreadsheet_harness/benchmark.py": "9875c46a56d253f4b8469f4c5bfa12d28d68568199ebe988102ba84275a94e3b",
     "src/spreadsheet_harness/budget.py": "b7d2302dbc0536f194381c271553ab5455298392ce78ef9cc23e72fbbb56e5c6",

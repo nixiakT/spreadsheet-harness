@@ -50,15 +50,19 @@ def revision(artifact: Path, composition_path: Path, parent: str | None, mutatio
 
 
 def main() -> None:
-    baseline = read(RELEASE / "baseline/revision.json")
+    old_baseline = read(RELEASE / "baseline/revision.json")
     baseline_artifact = RELEASE / "baseline/artifact"
     manifest = read(RELEASE / "candidate-manifest.json")
+    baseline = revision(
+        baseline_artifact,
+        RELEASE / "baseline/composition.json",
+        old_baseline.get("parent_revision_sha256"),
+        old_baseline.get("mutation"),
+    )
+    write(RELEASE / "baseline/revision.json", baseline)
     changed = []
     for row in manifest["candidates"]:
         candidate = RELEASE / "candidates" / row["candidate_id"]
-        overlay_arms = candidate / "overlay/src/spreadsheet_harness/arms.py"
-        if not overlay_arms.is_file():
-            continue
         previous = read(candidate / "revision.json")
         with tempfile.TemporaryDirectory(prefix="plan9-review-fix-") as temporary:
             artifact = Path(temporary) / "artifact"
@@ -90,6 +94,10 @@ def main() -> None:
             "old_revision_sha256": previous["revision_sha256"],
             "new_revision_sha256": updated["revision_sha256"],
         })
+    manifest.update({
+        "baseline_revision_sha256": baseline["revision_sha256"],
+        "baseline_artifact_manifest_sha256": baseline["artifact_manifest_sha256"],
+    })
     manifest["review_verifier_fix"] = {
         "name": "inconclusive-read-only-review-preserves-clean-submit-v1",
         "affected_candidates": [item["candidate_id"] for item in changed],
