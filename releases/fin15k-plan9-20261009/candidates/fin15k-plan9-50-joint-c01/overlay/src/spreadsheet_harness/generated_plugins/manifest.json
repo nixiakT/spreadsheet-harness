@@ -1,0 +1,61 @@
+{
+  "plugins": [
+    {
+      "config_fields": [],
+      "conflicts": [],
+      "group": "harness",
+      "hooks": [
+        "before_task"
+      ],
+      "kind": "observe",
+      "name": "observe-task-boundaries",
+      "permissions": [
+        "workbook.read"
+      ],
+      "provides": [
+        "context.task-boundaries"
+      ],
+      "requires": [
+        "workbook.read"
+      ],
+      "spreadsheet_capabilities": [
+        "formula",
+        "structure",
+        "verification"
+      ],
+      "surfaces": [
+        "implementation"
+      ],
+      "version": "1.0.0"
+    },
+    {
+      "config_fields": [],
+      "conflicts": [],
+      "group": "domain",
+      "hooks": [
+        "before_task"
+      ],
+      "kind": "observe",
+      "name": "observe-financial-targets",
+      "permissions": [
+        "workbook.read"
+      ],
+      "provides": [
+        "context.financial-targets"
+      ],
+      "requires": [
+        "workbook.read"
+      ],
+      "spreadsheet_capabilities": [
+        "formula",
+        "structure",
+        "verification"
+      ],
+      "surfaces": [
+        "implementation"
+      ],
+      "version": "1.0.0"
+    }
+  ],
+  "schema_version": "plugevolve-candidate-plugins-v1"
+}

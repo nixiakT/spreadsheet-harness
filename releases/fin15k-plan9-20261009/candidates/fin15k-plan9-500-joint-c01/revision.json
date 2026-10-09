@@ -1,0 +1,456 @@
+{
+  "artifact_manifest": {
+    "skills/financial-skills/3-statement-model/SKILL.md": "bc2aeb423a3cc9e6ab973dcc4e3c6682427c751e20d8b3a0eec057eab67b1e83",
+    "skills/financial-skills/3-statement-model/references/formatting.md": "7e1c5ca7dd566f6821a6094efcbe48913d984766d7278178111ec4c67aca8778",
+    "skills/financial-skills/3-statement-model/references/formulas.md": "2492d3ad3d35eb93d1f644e5613f665f33974727d25253e433f1b016e3d92cdb",
+    "skills/financial-skills/3-statement-model/references/sec-filings.md": "9765c2f789b8d87baeca89b7f3a5ddc68d6068c06b39b4445224197d6e444e93",
+    "skills/financial-skills/LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "skills/financial-skills/comps-analysis/SKILL.md": "cf7fb0a8e3e201297f720e6a40b145fda8514d58d4f3c0f5237b6f2b53e7f78f",
+    "skills/financial-skills/dcf-model/SKILL.md": "2bb3ed672ab2fa76f8820ee919b158a67dc6df10e7052eeb661599140a9a2494",
+    "skills/financial-skills/dcf-model/TROUBLESHOOTING.md": "6e605b455032973465f685535251a7d2d889a2dad9b05ba8d6dfc01f801b28d0",
+    "skills/financial-skills/dcf-model/requirements.txt": "c007f21b5659d4a29dfde17ad586b31ace9e2c5cdb2aeaa39950a7f7c6a75a8f",
+    "skills/financial-skills/dcf-model/scripts/validate_dcf.py": "6892a153a0b834f0f31d8676602341a4d721bbb2c294dbed64a03262512e738a",
+    "skills/financial-skills/lbo-model/SKILL.md": "19749a568d6960137a2e0b83a2ac2215bf45c54d94a042626678e0bc955aaca7",
+    "skills/spreadsheet-analysis/SKILL.md": "606e0e3eea63de5705be974b6290d1326c7a5f5698fbc1c51839f0327c3b2219",
+    "skills/spreadsheet-coordination/SKILL.md": "13af3e2c7c670f9979a1a678af79b5c56d79f3693735519fd457cf2304919a0f",
+    "skills/spreadsheet-core/SKILL.md": "341d5f88302f4e249e70f07a7bea941a97652e0d812aaf2179905aadbdaeea34",
+    "skills/spreadsheet-financial-model/SKILL.md": "6450584506a2ceb790e79e0d951953985ea48c8a8795690add7dac853dd1f573",
+    "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
+    "skills/spreadsheet-manipulation/SKILL.md": "7b0e54de97dc65085acd449026f614d9120f8c65674bda0f550ca1e3d162c7cb",
+    "skills/spreadsheet-memory/SKILL.md": "3389278293199e966032089331789782a8cb059bfc17a3c9a87476045edbb614",
+    "skills/spreadsheet-structure/SKILL.md": "ea27d6d5115705a7e7d3cdfae69f9b594d031b61f50edfe747023e3b086dc932",
+    "skills/spreadsheet-verification-safety/SKILL.md": "310554bece0071d3429faedb243b795adea21ae83d16bc3d9b8a6622fb3798ce",
+    "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
+    "skills/visual-review/SKILL.md": "d41ebedc305b9c5de53b5df7701180730a50ae47c96fe94012a6988474f91213",
+    "skills/xlsx/LICENSE.txt": "79f6d8f5b427252fa3b1c11ecdbdb6bf610b944f7530b4de78f770f38741cfaa",
+    "skills/xlsx/SKILL.md": "6712b39718fe815054abca9c3ee72f989613e6f771c8a5c58f30a65a6c905622",
+    "skills/xlsx/scripts/office/helpers/__init__.py": "678e42456d9e10923c8b9a93691cdd993de3433448a184fa72a0c31f4ae086d5",
+    "skills/xlsx/scripts/office/helpers/pptx_chart.py": "47ac266f7d39d11ede6bb0d1f3a19d801394fd2964636f1b48beb701f1832964",
+    "skills/xlsx/scripts/office/helpers/pptx_slide.py": "7b9f69b4a5bd6a2d9eabf9e0e3e796d7a421373145f6a8cd11f60b7ba2d6a5d0",
+    "skills/xlsx/scripts/office/helpers/pptx_theme.py": "ebb54c56e9c13807f5f98f0cae22d47cdd0162da8525eaa664e3f2c8c8d6bb03",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-chart.xsd": "41b93bd8857cc68b1e43be2806a872d736a9bdd6566900062d8fdb57d7bbb354",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-chartDrawing.xsd": "3fd0586f2637b98bb9886f0e0b67d89e1cc987c2d158cc7deb5f5b9890ced412",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-diagram.xsd": "29b254ee0d10414a8504b5a08149c7baec35a60d5ff607d6b3f492aa36815f40",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-lockedCanvas.xsd": "5cb76dabd8b97d1e9308a1700b90c20139be4d50792d21a7f09789f5cccd6026",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-main.xsd": "5375417f0f5394b8dd1a7035b9679151f19a6b65df309dec10cfb4a420cb00e9",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-picture.xsd": "5d389d42befbebd91945d620242347caecd3367f9a3a7cf8d97949507ae1f53c",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-spreadsheetDrawing.xsd": "b4532b6d258832953fbb3ee4c711f4fe25d3faf46a10644b2505f17010d01e88",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/dml-wordprocessingDrawing.xsd": "bdad416b096b61d37b71603b2c949484f9070c830bdaeba93bf35e15c8900614",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/pml.xsd": "d173c3e5d61e42e2e3a97226c632fd2ab7cc481fc4e492365b87024ab546daff",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-additionalCharacteristics.xsd": "3c6709101c6aaa82888df5d8795c33f9e857196790eb320d9194e64be2b6bdd8",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-bibliography.xsd": "0b364451dc36a48dd6dae0f3b6ada05fd9b71e5208211f8ee5537d7e51a587e2",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-commonSimpleTypes.xsd": "e2abacbb9a55ce1365f8961bc1b1395bbc811e512b111000d8c333f98458dece",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlDataProperties.xsd": "0ef4bb354ff44b923564c4ddbdda5987919d220225129ec94614a618ceafc281",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlSchemaProperties.xsd": "0d103b99a4a8652f8871552a69d42d2a3760ac6a5e3ef02d979c4273257ff6a4",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesCustom.xsd": "9c085407751b9061c1f996f6c39ce58451be22a8d334f09175f0e89e42736285",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesExtended.xsd": "bc92e36ccd233722d4c5869bec71ddc7b12e2df56059942cce5a39065cc9c368",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesVariantTypes.xsd": "7b5b7413e2c895b1e148e82e292a117d53c7ec65b0696c992edca57b61b4a74b",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-math.xsd": "3213ef1631606250f5010b42cad7ef716f7c59426367798e33c374c0ec391d3a",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/shared-relationshipReference.xsd": "12264f3c03d738311cd9237d212f1c07479e70f0cbe1ae725d29b36539aef637",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/sml.xsd": "beffeed56945c22a77440122c8bdc426f3fcbe7f3b12ea0976c770d1f8d54578",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/vml-main.xsd": "f5ee623b08b6a66935e5aced2f5d8ad0fc71bf9e8e833cd490150c0fa94b8763",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/vml-officeDrawing.xsd": "585bedc1313b40888dcc544cb74cd939a105ee674f3b1d3aa1cc6d34f70ff155",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/vml-presentationDrawing.xsd": "133c9f64a5c5d573b78d0a474122b22506d8eadb5e063f67cdbbb8fa2f161d0e",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/vml-spreadsheetDrawing.xsd": "6bdeb169c3717eb01108853bd9fc5a3750fb1fa5b82abbdd854d49855a40f519",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/vml-wordprocessingDrawing.xsd": "475dcae1e7d1ea46232db6f8481040c15e53a52a3c256831d3df204212b0e831",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/wml.xsd": "c2dd9f61f892deae6acd8d20771ea79b12018af25f3bf8d06639c8542d218cfd",
+    "skills/xlsx/scripts/office/schemas/ISO-IEC29500-4_2016/xml.xsd": "a539aa2fb154fa50e0f5cc97e6ad7cbc66f8ec3e3746f61ec6a8b0d5d15ecdf2",
+    "skills/xlsx/scripts/office/schemas/ecma/fouth-edition/opc-contentTypes.xsd": "9e0b7209fc69ab11987900404540969976000c5ebe4d4f58c43dc3842886bf3a",
+    "skills/xlsx/scripts/office/schemas/ecma/fouth-edition/opc-coreProperties.xsd": "451958454e8588dfc7cd945981ada142ca06ff3307937f5700df059c2b307fa8",
+    "skills/xlsx/scripts/office/schemas/ecma/fouth-edition/opc-digSig.xsd": "6de111e11403f7cd49027400755bae0ea1cabef2815f09bd40a24f0017613b24",
+    "skills/xlsx/scripts/office/schemas/ecma/fouth-edition/opc-relationships.xsd": "f565adfef5a502044abc3a9153e157edc25af78304d335994afb958874b15e26",
+    "skills/xlsx/scripts/office/schemas/mce/mc.xsd": "3a37e461ecf5a8670fdec34029703401f8728ab9c96ec1739a6ae58d55212413",
+    "skills/xlsx/scripts/office/schemas/microsoft/wml-2010.xsd": "568b26ee156cb9549aa439ca2158965f77b7c1602b7e0316f40ac6cf586e35f2",
+    "skills/xlsx/scripts/office/schemas/microsoft/wml-2012.xsd": "0fa75578a000439a7988ba0c59fdc69f774bbd416cbacc14d07125b3f686cb74",
+    "skills/xlsx/scripts/office/schemas/microsoft/wml-2018.xsd": "be0ff793a22dd31384650c3a4da14c2fa8062751c2e97b0e5ee852bda13c60ad",
+    "skills/xlsx/scripts/office/schemas/microsoft/wml-cex-2018.xsd": "fddc2b880cabb9005aebbc7e783e53c19fec1c03df7d0e2f2076a33a0fdfd081",
+    "skills/xlsx/scripts/office/schemas/microsoft/wml-cid-2016.xsd": "127ca209fa73d7cb708449cb355c871867948a96e4a74f7bf5811ef62d17991d",
+    "skills/xlsx/scripts/office/schemas/microsoft/wml-sdtdatahash-2020.xsd": "842e7163409c8d74f4d7088a8bc99500d80bc75332681a0980055b08f374a604",
+    "skills/xlsx/scripts/office/schemas/microsoft/wml-symex-2015.xsd": "16f6f8072249f431370723c2cd8974672e0d9c897e00e97dd918079df934871b",
+    "skills/xlsx/scripts/office/soffice.py": "df2c8d7249c132a4512d744482e4b5ed0ecbe885f0bcfb1295e7e6a7ced0432c",
+    "skills/xlsx/scripts/office/validate.py": "346a4c89d92fff55e610f11efda48c30228815b29bdb10b987e48f7af70acf1e",
+    "skills/xlsx/scripts/office/validators/__init__.py": "83e0f035c5abea238d3f2c3968afbd511ed022b527b7c9cb60a9434cc34ff987",
+    "skills/xlsx/scripts/office/validators/base.py": "f818ea28c793ba42960fa4498265e2632a62c86f7b5d6aff6fa89dacc02d59ea",
+    "skills/xlsx/scripts/office/validators/docx.py": "93d3444c0ef3f043d21a2285c46d2cda478426b930dc33dcf3b11265935517b5",
+    "skills/xlsx/scripts/office/validators/pptx.py": "17eadad2b7a8374ccbe4cda45693bcd6a36f9d61a7d60f9c9ceef9464dec8299",
+    "skills/xlsx/scripts/office/validators/redlining.py": "ed50d0885eee4b9c387f546b059bcaed64086815880a5167336244f93e305123",
+    "skills/xlsx/scripts/recalc.py": "66f6e726d5a53cfabea0b6471d6669deb95e54e96cb7913b687e4388da1bb3d9",
+    "src/spreadsheet_harness/__init__.py": "1548ee8e7bdb465cf9bed447fe760670ec873a0c985ad02709161a60bff42846",
+    "src/spreadsheet_harness/agent.py": "27ea7cfd97a5e98d9f09fbd1a57459e53963661e0b70c6ed1a8d6e83591d0bd7",
+    "src/spreadsheet_harness/arms.py": "a8be539e20fcea4bbe10957bf09076ee1da8da79961651848e3b99fee9e8671f",
+    "src/spreadsheet_harness/audit.py": "29604a061dc287d9c22303066e5cf9f6bd222e05c1186f01b45e61e93347f252",
+    "src/spreadsheet_harness/benchmark.py": "9875c46a56d253f4b8469f4c5bfa12d28d68568199ebe988102ba84275a94e3b",
+    "src/spreadsheet_harness/budget.py": "b7d2302dbc0536f194381c271553ab5455298392ce78ef9cc23e72fbbb56e5c6",
+    "src/spreadsheet_harness/capability_evolution.py": "3541b89146c250177f1ada8514019693713e118137dcc51269ada58c3d6bd1fe",
+    "src/spreadsheet_harness/cli.py": "2824eeaa2b70f4b135fd5d283c3398f8b744ad25ab91207230d281d8fb77d370",
+    "src/spreadsheet_harness/code_interpreter.py": "8f33723e1173e92114378f838312977dfd381700b145fae4963bcae4499a05a6",
+    "src/spreadsheet_harness/comparison.py": "98c29f834c4ca478640d38830d1612512a9d54494990a78fa7197e4418cb4d13",
+    "src/spreadsheet_harness/config.py": "31670a73d455ee659fb6758f6ced1a00c28dc6bdc0e8d426f7949498c99003b8",
+    "src/spreadsheet_harness/continuous_evolution.py": "367efa31264fcf73ae0cf599f71812e51ecba53ecc454ba94fa8ec8da3c444f1",
+    "src/spreadsheet_harness/debugging_repairs.py": "35250e030fc94d3bb2690837628698aae6e0634a45696805b63df2c07ca87088",
+    "src/spreadsheet_harness/errors.py": "46c6ecff60ed2ffd335cf3dde4df85b15a7c45b73795e61a29efc9bdfe78628f",
+    "src/spreadsheet_harness/evidence_gate.py": "f27a52165482f1976fb8b05644adf27628488cb72c8d567833a8f5cd60e1f09c",
+    "src/spreadsheet_harness/evolution.py": "91343cd3296f99d1bc000bfd2f975ffbe1944d6087893563b7b444aa0a41d85d",
+    "src/spreadsheet_harness/financial_model_repairs.py": "00f8dc06061bac80f13cca1acfa9a0c3a809466b24084700216a47bc8cc8a062",
+    "src/spreadsheet_harness/formula_patterns.py": "ccbedefb2cd57aba4d71b883f73c5599190162140244d641fd7df9ec814d37a4",
+    "src/spreadsheet_harness/formula_runtime.py": "044d4d13858db8310e1844b58109652bfc9863b2a6c8ece6986018038d97358d",
+    "src/spreadsheet_harness/generated_plugins/manifest.json": "a9dc56fd3a34095a94de94afa9d977e27ea49700d30d08602fee99fd6c62f340",
+    "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "b1d206c5c5c3db3c276eb37a63a8e003fc744a57120d7be11ef86bdab3c2bfb0",
+    "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "9118f39bd98c951565a771da052a6372fb9c646176c79c1ccd17dbc63765ac09",
+    "src/spreadsheet_harness/kernel.py": "43fe4159a48633a6abf157b41c8ce752cee3cf152486a04a05702d396ab19d58",
+    "src/spreadsheet_harness/openpyxl_compat.py": "51d062ef29b9859b2504543bf507f96f0c385ca0bdacd420ea3f2c4da352f532",
+    "src/spreadsheet_harness/pacing.py": "56d6b811d639f0d932d213582372de228ce1483f7e6a59ffbc38e9d38f70a809",
+    "src/spreadsheet_harness/plugin_runtime.py": "5d93164d5ba10d78da97862566d9a8a2106257c9e2787bb0800c652d665fe247",
+    "src/spreadsheet_harness/plugin_trace.py": "2faa70aeb26d8fbe83a2c751a69705c6e3408cdd1376dcddd295dd2b1980a3c6",
+    "src/spreadsheet_harness/plugins.py": "6570d6006e9de8543efcd554fe6a8661519c55a2012718f716c7493c7afd1c81",
+    "src/spreadsheet_harness/preprocess.py": "8ce3493d55a791b39e4e49fe5c19b5cc57c0f25382ede733743a9e1297babe0b",
+    "src/spreadsheet_harness/profile_evolution.py": "59a3a7c4f7a77284a2285d03c158ad821e1edf9b65a3a128d76a863952c1497f",
+    "src/spreadsheet_harness/provider_compat.py": "f8eecbe16ea25a17725b06e485654ed56c9a751b79a19edea8a53fcf1132a787",
+    "src/spreadsheet_harness/render.py": "69ef85fa513238b14f27c71b25bfd34d560cd4d273a54d71081435e6c1bc1d43",
+    "src/spreadsheet_harness/session.py": "7a4077521a909e4fe63b05fe37b61bd1f43bb4731101b1c96d1542c033c46d96",
+    "src/spreadsheet_harness/sign_convention_repairs.py": "ba99124d6f9a0c82299b29a7f44d8076b9ccf626ae146daf8117c820c2bb72d3",
+    "src/spreadsheet_harness/skills.py": "dea33f0a844583ac5472293ad23d798a209746f46dbf4dfbc73cd3e211d162f8",
+    "src/spreadsheet_harness/spreadsheetbench_harbor.py": "b5c002738f82aff31da61009374647cbc32e48eff611c821d28bcf47eca59af2",
+    "src/spreadsheet_harness/spreadsheetbench_v1.py": "23156f5f785d5aeca99d438316b0ff317b99c01882e464af61112d48d840264e",
+    "src/spreadsheet_harness/spreadsheetbench_v2.py": "0c4b25386672225a715a7b460c94f2e3cb53fafc51c9127b1cfe02f04129602f",
+    "src/spreadsheet_harness/synthetic_debugging.py": "a4bdf5187b72a1bacca9921bbc3fd13eb3c40f7ffbe102de6f6d676ad3c80315",
+    "src/spreadsheet_harness/template_repairs.py": "1e08322f092216c5e3b05d3ac3df3380cea0350942cc86d0a4e7a0d7da21269f",
+    "src/spreadsheet_harness/tools.py": "2c4b022c07e5f64705a0e19290f37a7cb8978feff09e7d58cb588b71c2ba0607",
+    "src/spreadsheet_harness/trajectory.py": "1a14ea7e8b8fa284a44d274599b8332f714fb16fab877bf4c003061f37eaf44f",
+    "src/spreadsheet_harness/v1_review.py": "ffbe8eebffac6c371a36a7ce498dc43cc5d6a5c44b12a2894750faa5276957f1"
+  },
+  "artifact_manifest_sha256": "82b620150b292f25306b3bf0a4584b65485367c27ccb256cff53a5b4ac6fd440",
+  "composition": {
+    "name": "spreadsheet-harness-financial",
+    "overrides": {
+      "observe-profile-compact": {
+        "max-formula-clusters-per-sheet": 4,
+        "max-regions-per-sheet": 4,
+        "max-rendered-chars": 6000
+      }
+    },
+    "plugins": [
+      "act-code-plus-formula-validation",
+      "observe-profile-compact",
+      "control-ours",
+      "knowledge-structure",
+      "knowledge-formula",
+      "knowledge-manipulation",
+      "knowledge-analysis",
+      "knowledge-visualization",
+      "knowledge-verification",
+      "knowledge-memory",
+      "verify-formula-runtime",
+      "repair-date-text",
+      "knowledge-financial-model",
+      "observe-task-boundaries",
+      "observe-financial-targets"
+    ]
+  },
+  "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+  "mutation": {
+    "changed_paths": [
+      "skills/spreadsheet-financial-model/SKILL.md",
+      "skills/spreadsheet-formula/SKILL.md",
+      "skills/spreadsheet-verification/SKILL.md",
+      "src/spreadsheet_harness/arms.py",
+      "src/spreadsheet_harness/financial_model_repairs.py",
+      "src/spreadsheet_harness/generated_plugins/manifest.json",
+      "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py",
+      "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py"
+    ],
+    "mutations": [
+      {
+        "base_manifest_sha256": "141118f07faee1c9188d5b74fc90a7436a38ba18597dd5ea05e94b22d9b95cd3",
+        "base_version": "1.29.0",
+        "candidate_artifact_sha256": "cae35adf24ce9296c3a678db1a8daa65759aa8864ffc47f9a2a6ee56133c4e52",
+        "changed_paths": [
+          "src/spreadsheet_harness/arms.py"
+        ],
+        "config_patch": {},
+        "evidence_sha256": [
+          "183d2425b06cabdbb41cfedfa5955bdf86f923f244f3d81859d4326abde1736f",
+          "46e9b96e71b145034f6e65b1984aa74b176e453bbc8dbec42f36a4e58829549b",
+          "5441ac4c80128445e60923715fe16e119840d5fcc1d8e0399d8ec79788fd08f3",
+          "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+          "60c33dd70281c65294ec864176b868e55c6ec5332b4aa58a53819e21424f364b",
+          "69ea81daed8d82be4e523dc618d84af78a18dc6bf2fab2e76d6a0ef7dc93950b",
+          "86a4fc0fa0e8115684a515e6faa8e836c035ed1f8253baefde12732fc1bcd75a",
+          "91209aeb469068834b95ce9ecbc198d856ea741cb87870e2e98051cd89fd0913",
+          "ba62736cbf1d27213f393d3af24600cf5b876588af0f4e6dfc1983efa1831798",
+          "bfe7f50ee8f8cca4568240ad1b9e501f8b734c805d05dad658fff59518346cda",
+          "cd5987ec146ae70c40de6bbc386a3999624dd9c9a97d15901f8b847feda879da",
+          "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6"
+        ],
+        "operator": "unified-diff",
+        "schema_version": "plugevolve-plugin-mutation-v1",
+        "surface": "implementation",
+        "target_plugin": "control-ours"
+      },
+      {
+        "changed_paths": [
+          "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py"
+        ],
+        "evidence_sha256": [
+          "183d2425b06cabdbb41cfedfa5955bdf86f923f244f3d81859d4326abde1736f",
+          "46e9b96e71b145034f6e65b1984aa74b176e453bbc8dbec42f36a4e58829549b",
+          "5441ac4c80128445e60923715fe16e119840d5fcc1d8e0399d8ec79788fd08f3",
+          "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+          "60c33dd70281c65294ec864176b868e55c6ec5332b4aa58a53819e21424f364b",
+          "69ea81daed8d82be4e523dc618d84af78a18dc6bf2fab2e76d6a0ef7dc93950b",
+          "86a4fc0fa0e8115684a515e6faa8e836c035ed1f8253baefde12732fc1bcd75a",
+          "91209aeb469068834b95ce9ecbc198d856ea741cb87870e2e98051cd89fd0913",
+          "ba62736cbf1d27213f393d3af24600cf5b876588af0f4e6dfc1983efa1831798",
+          "bfe7f50ee8f8cca4568240ad1b9e501f8b734c805d05dad658fff59518346cda",
+          "cd5987ec146ae70c40de6bbc386a3999624dd9c9a97d15901f8b847feda879da",
+          "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6"
+        ],
+        "operation": "synthesize",
+        "plugin_spec": {
+          "config_fields": [],
+          "conflicts": [],
+          "group": "harness",
+          "hooks": [
+            "before_task"
+          ],
+          "kind": "observe",
+          "name": "observe-task-boundaries",
+          "permissions": [
+            "workbook.read"
+          ],
+          "provides": [
+            "context.task-boundaries"
+          ],
+          "requires": [
+            "workbook.read"
+          ],
+          "spreadsheet_capabilities": [
+            "formula",
+            "structure",
+            "verification"
+          ],
+          "surfaces": [
+            "implementation"
+          ],
+          "version": "1.0.0"
+        },
+        "schema_version": "plugevolve-plugin-synthesis-v2",
+        "target_plugin": "observe-task-boundaries"
+      },
+      {
+        "base_manifest_sha256": "d42052cc111aba6d3b41936cc52f44b8d1170c950ee0a2da5d62f2c8da950d76",
+        "base_version": "1.1.0",
+        "candidate_artifact_sha256": "b17f30982d2f83472070c80c166f43564a8584a106e89c78835327f0d07b5e77",
+        "changed_paths": [
+          "skills/spreadsheet-formula/SKILL.md"
+        ],
+        "config_patch": {},
+        "evidence_sha256": [
+          "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+          "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+          "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+          "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+          "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+          "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+          "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+          "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+          "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+          "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+          "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+          "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+          "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+          "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+        ],
+        "operator": "replace-file",
+        "schema_version": "plugevolve-plugin-mutation-v1",
+        "surface": "prompt",
+        "target_plugin": "knowledge-formula"
+      },
+      {
+        "base_manifest_sha256": "e55c460eccb9c2350062ebb3a529aa8bf4e720e8659bed31796e0c9dca1c4fd7",
+        "base_version": "1.1.0",
+        "candidate_artifact_sha256": "a1c7ccc07a46a88d06b441f8cf7c68faf583d87eb8f630ebcea8a33a4a3ce63f",
+        "changed_paths": [
+          "skills/spreadsheet-verification/SKILL.md"
+        ],
+        "config_patch": {},
+        "evidence_sha256": [
+          "183d2425b06cabdbb41cfedfa5955bdf86f923f244f3d81859d4326abde1736f",
+          "46e9b96e71b145034f6e65b1984aa74b176e453bbc8dbec42f36a4e58829549b",
+          "5441ac4c80128445e60923715fe16e119840d5fcc1d8e0399d8ec79788fd08f3",
+          "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+          "60c33dd70281c65294ec864176b868e55c6ec5332b4aa58a53819e21424f364b",
+          "69ea81daed8d82be4e523dc618d84af78a18dc6bf2fab2e76d6a0ef7dc93950b",
+          "86a4fc0fa0e8115684a515e6faa8e836c035ed1f8253baefde12732fc1bcd75a",
+          "91209aeb469068834b95ce9ecbc198d856ea741cb87870e2e98051cd89fd0913",
+          "ba62736cbf1d27213f393d3af24600cf5b876588af0f4e6dfc1983efa1831798",
+          "bfe7f50ee8f8cca4568240ad1b9e501f8b734c805d05dad658fff59518346cda",
+          "cd5987ec146ae70c40de6bbc386a3999624dd9c9a97d15901f8b847feda879da",
+          "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6"
+        ],
+        "operator": "replace-file",
+        "schema_version": "plugevolve-plugin-mutation-v1",
+        "surface": "prompt",
+        "target_plugin": "knowledge-verification"
+      },
+      {
+        "base_manifest_sha256": "052915049a3a8f2574291ca7b94977eedabf8c8c06b6138801aca57a5fd0655b",
+        "base_version": "1.1.0",
+        "candidate_artifact_sha256": "a1c7ccc07a46a88d06b441f8cf7c68faf583d87eb8f630ebcea8a33a4a3ce63f",
+        "changed_paths": [],
+        "config_patch": {
+          "max-formula-clusters-per-sheet": 4,
+          "max-regions-per-sheet": 4,
+          "max-rendered-chars": 6000
+        },
+        "evidence_sha256": [
+          "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+          "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+          "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+          "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+          "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+          "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+          "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+          "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+          "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+          "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+          "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+          "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+          "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+          "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+        ],
+        "operator": "bounded-config",
+        "schema_version": "plugevolve-plugin-mutation-v1",
+        "surface": "config",
+        "target_plugin": "observe-profile-compact"
+      },
+      {
+        "base_manifest_sha256": "1ebd4436a9597ac7097b8df7e03f8f65e45376c2eb1bdd90b067f55e6bad5e93",
+        "base_version": "1.3.0",
+        "candidate_artifact_sha256": "1531a2e4954171f185451d2759c78335dad7b91771caeadd3d0743564129ee0e",
+        "changed_paths": [
+          "src/spreadsheet_harness/financial_model_repairs.py"
+        ],
+        "config_patch": {},
+        "evidence_sha256": [
+          "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+          "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+          "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+          "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+          "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+          "2bd9a031e7fe4e7f7aeb558442309ae95319f9b39203c65df46f8f9902662a41",
+          "39e0f67c6fc1e87e4f857ef76d073007f4ee960505109fadea78ef251f17d997",
+          "3abaf03b0d7954fd40fc2eda09b8d636857dc05cacebcc63a353ea710f509462",
+          "488e6f8e565231e66ca3c617a3136eff44fb4f5f23e559e4535dfd0f6e0a0767",
+          "52c0a0a966e5c7e7e007ca512e47bc0607db930238520dea39ceaf6eed0505c5",
+          "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+          "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+          "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+          "71773f0656b4389c5ff4d77af1051e13bc76d6984cc75175fa15f6da677d8885",
+          "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+          "796bc0f964ed344ca6f2460e4afeb27fdf21a3b39b05182c977c9ff70b59ca5d",
+          "7abebde1e6596f4024e96ba90dc98c7de568dba5998993bc75eff7e32a943778",
+          "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+          "87d0231d224b0cd23b1d125106f5fdacb309979af15c18fa059c509acb268449",
+          "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+          "963917d6b942530f3db602fbd922460a0487dcbb20fd617f5775adb37d1b932b",
+          "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+          "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+          "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+          "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+        ],
+        "operator": "unified-diff",
+        "schema_version": "plugevolve-plugin-mutation-v1",
+        "surface": "implementation",
+        "target_plugin": "knowledge-financial-model"
+      },
+      {
+        "base_manifest_sha256": "1ebd4436a9597ac7097b8df7e03f8f65e45376c2eb1bdd90b067f55e6bad5e93",
+        "base_version": "1.3.0",
+        "candidate_artifact_sha256": "63aca669c4933cc1ec0a5e3c91a3861a50abe1d98890cb085395cb530e0f5949",
+        "changed_paths": [
+          "skills/spreadsheet-financial-model/SKILL.md"
+        ],
+        "config_patch": {},
+        "evidence_sha256": [
+          "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+          "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+          "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+          "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+          "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+          "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+          "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+          "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+          "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+          "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+          "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+          "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+          "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+          "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+        ],
+        "operator": "replace-file",
+        "schema_version": "plugevolve-plugin-mutation-v1",
+        "surface": "prompt",
+        "target_plugin": "knowledge-financial-model"
+      },
+      {
+        "changed_paths": [
+          "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py"
+        ],
+        "evidence_sha256": [
+          "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+          "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+          "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+          "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+          "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+          "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+          "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+          "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+          "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+          "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+          "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+          "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+          "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+          "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+        ],
+        "operation": "synthesize",
+        "plugin_spec": {
+          "config_fields": [],
+          "conflicts": [],
+          "group": "domain",
+          "hooks": [
+            "before_task"
+          ],
+          "kind": "observe",
+          "name": "observe-financial-targets",
+          "permissions": [
+            "workbook.read"
+          ],
+          "provides": [
+            "context.financial-targets"
+          ],
+          "requires": [
+            "workbook.read"
+          ],
+          "spreadsheet_capabilities": [
+            "formula",
+            "structure",
+            "verification"
+          ],
+          "surfaces": [
+            "implementation"
+          ],
+          "version": "1.0.0"
+        },
+        "schema_version": "plugevolve-plugin-synthesis-v2",
+        "target_plugin": "observe-financial-targets"
+      }
+    ],
+    "schema_version": "plugevolve-joint-mutation-v1",
+    "scope": "joint"
+  },
+  "parent_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+  "resolved_composition_sha256": "9805c50cfbe33508502b74cc4e38c692879accd496e3eb4ce3e64f93c1e2912a",
+  "revision_sha256": "8e818d156a5be2385b6e9873358fdb41327ba86cbcbde4786d3e86d61dbf7426",
+  "schema_version": "continuous-plugin-revision-v1"
+}

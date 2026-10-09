@@ -1,0 +1,282 @@
+{
+  "evidence_sha256": [
+    "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+    "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+    "183d2425b06cabdbb41cfedfa5955bdf86f923f244f3d81859d4326abde1736f",
+    "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+    "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+    "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+    "2bd9a031e7fe4e7f7aeb558442309ae95319f9b39203c65df46f8f9902662a41",
+    "39e0f67c6fc1e87e4f857ef76d073007f4ee960505109fadea78ef251f17d997",
+    "3abaf03b0d7954fd40fc2eda09b8d636857dc05cacebcc63a353ea710f509462",
+    "46e9b96e71b145034f6e65b1984aa74b176e453bbc8dbec42f36a4e58829549b",
+    "488e6f8e565231e66ca3c617a3136eff44fb4f5f23e559e4535dfd0f6e0a0767",
+    "52c0a0a966e5c7e7e007ca512e47bc0607db930238520dea39ceaf6eed0505c5",
+    "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+    "5441ac4c80128445e60923715fe16e119840d5fcc1d8e0399d8ec79788fd08f3",
+    "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+    "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+    "60c33dd70281c65294ec864176b868e55c6ec5332b4aa58a53819e21424f364b",
+    "69ea81daed8d82be4e523dc618d84af78a18dc6bf2fab2e76d6a0ef7dc93950b",
+    "71773f0656b4389c5ff4d77af1051e13bc76d6984cc75175fa15f6da677d8885",
+    "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+    "796bc0f964ed344ca6f2460e4afeb27fdf21a3b39b05182c977c9ff70b59ca5d",
+    "7abebde1e6596f4024e96ba90dc98c7de568dba5998993bc75eff7e32a943778",
+    "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+    "86a4fc0fa0e8115684a515e6faa8e836c035ed1f8253baefde12732fc1bcd75a",
+    "87d0231d224b0cd23b1d125106f5fdacb309979af15c18fa059c509acb268449",
+    "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+    "91209aeb469068834b95ce9ecbc198d856ea741cb87870e2e98051cd89fd0913",
+    "963917d6b942530f3db602fbd922460a0487dcbb20fd617f5775adb37d1b932b",
+    "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+    "ba62736cbf1d27213f393d3af24600cf5b876588af0f4e6dfc1983efa1831798",
+    "bfe7f50ee8f8cca4568240ad1b9e501f8b734c805d05dad658fff59518346cda",
+    "cd5987ec146ae70c40de6bbc386a3999624dd9c9a97d15901f8b847feda879da",
+    "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+    "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+    "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04",
+    "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6"
+  ],
+  "group": "harness",
+  "method_operator": "revision",
+  "mutations": [
+    {
+      "evidence_sha256": [
+        "183d2425b06cabdbb41cfedfa5955bdf86f923f244f3d81859d4326abde1736f",
+        "46e9b96e71b145034f6e65b1984aa74b176e453bbc8dbec42f36a4e58829549b",
+        "5441ac4c80128445e60923715fe16e119840d5fcc1d8e0399d8ec79788fd08f3",
+        "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+        "60c33dd70281c65294ec864176b868e55c6ec5332b4aa58a53819e21424f364b",
+        "69ea81daed8d82be4e523dc618d84af78a18dc6bf2fab2e76d6a0ef7dc93950b",
+        "86a4fc0fa0e8115684a515e6faa8e836c035ed1f8253baefde12732fc1bcd75a",
+        "91209aeb469068834b95ce9ecbc198d856ea741cb87870e2e98051cd89fd0913",
+        "ba62736cbf1d27213f393d3af24600cf5b876588af0f4e6dfc1983efa1831798",
+        "bfe7f50ee8f8cca4568240ad1b9e501f8b734c805d05dad658fff59518346cda",
+        "cd5987ec146ae70c40de6bbc386a3999624dd9c9a97d15901f8b847feda879da",
+        "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6"
+      ],
+      "group": "harness",
+      "method_operator": "revision",
+      "operation": "edit",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 12,
+      "surface": "implementation",
+      "target_plugin": "control-ours"
+    },
+    {
+      "evidence_sha256": [
+        "183d2425b06cabdbb41cfedfa5955bdf86f923f244f3d81859d4326abde1736f",
+        "46e9b96e71b145034f6e65b1984aa74b176e453bbc8dbec42f36a4e58829549b",
+        "5441ac4c80128445e60923715fe16e119840d5fcc1d8e0399d8ec79788fd08f3",
+        "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+        "60c33dd70281c65294ec864176b868e55c6ec5332b4aa58a53819e21424f364b",
+        "69ea81daed8d82be4e523dc618d84af78a18dc6bf2fab2e76d6a0ef7dc93950b",
+        "86a4fc0fa0e8115684a515e6faa8e836c035ed1f8253baefde12732fc1bcd75a",
+        "91209aeb469068834b95ce9ecbc198d856ea741cb87870e2e98051cd89fd0913",
+        "ba62736cbf1d27213f393d3af24600cf5b876588af0f4e6dfc1983efa1831798",
+        "bfe7f50ee8f8cca4568240ad1b9e501f8b734c805d05dad658fff59518346cda",
+        "cd5987ec146ae70c40de6bbc386a3999624dd9c9a97d15901f8b847feda879da",
+        "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6"
+      ],
+      "group": "harness",
+      "method_operator": "synthesis",
+      "operation": "synthesize",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 12,
+      "surface": "implementation",
+      "target_plugin": "observe-task-boundaries"
+    },
+    {
+      "evidence_sha256": [
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+      ],
+      "group": "harness",
+      "method_operator": "revision",
+      "operation": "edit",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 14,
+      "surface": "prompt",
+      "target_plugin": "knowledge-formula"
+    },
+    {
+      "evidence_sha256": [
+        "183d2425b06cabdbb41cfedfa5955bdf86f923f244f3d81859d4326abde1736f",
+        "46e9b96e71b145034f6e65b1984aa74b176e453bbc8dbec42f36a4e58829549b",
+        "5441ac4c80128445e60923715fe16e119840d5fcc1d8e0399d8ec79788fd08f3",
+        "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+        "60c33dd70281c65294ec864176b868e55c6ec5332b4aa58a53819e21424f364b",
+        "69ea81daed8d82be4e523dc618d84af78a18dc6bf2fab2e76d6a0ef7dc93950b",
+        "86a4fc0fa0e8115684a515e6faa8e836c035ed1f8253baefde12732fc1bcd75a",
+        "91209aeb469068834b95ce9ecbc198d856ea741cb87870e2e98051cd89fd0913",
+        "ba62736cbf1d27213f393d3af24600cf5b876588af0f4e6dfc1983efa1831798",
+        "bfe7f50ee8f8cca4568240ad1b9e501f8b734c805d05dad658fff59518346cda",
+        "cd5987ec146ae70c40de6bbc386a3999624dd9c9a97d15901f8b847feda879da",
+        "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6"
+      ],
+      "group": "harness",
+      "method_operator": "revision",
+      "operation": "edit",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 12,
+      "surface": "prompt",
+      "target_plugin": "knowledge-verification"
+    },
+    {
+      "evidence_sha256": [
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+      ],
+      "group": "harness",
+      "method_operator": "revision",
+      "operation": "edit",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 14,
+      "surface": "config",
+      "target_plugin": "observe-profile-compact"
+    },
+    {
+      "evidence_sha256": [
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "2bd9a031e7fe4e7f7aeb558442309ae95319f9b39203c65df46f8f9902662a41",
+        "39e0f67c6fc1e87e4f857ef76d073007f4ee960505109fadea78ef251f17d997",
+        "3abaf03b0d7954fd40fc2eda09b8d636857dc05cacebcc63a353ea710f509462",
+        "488e6f8e565231e66ca3c617a3136eff44fb4f5f23e559e4535dfd0f6e0a0767",
+        "52c0a0a966e5c7e7e007ca512e47bc0607db930238520dea39ceaf6eed0505c5",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "5fc6ae1d0bcecd23ef10b6f57cc27cfa12f4425a8acad85191f6ed6ea8a91423",
+        "71773f0656b4389c5ff4d77af1051e13bc76d6984cc75175fa15f6da677d8885",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "796bc0f964ed344ca6f2460e4afeb27fdf21a3b39b05182c977c9ff70b59ca5d",
+        "7abebde1e6596f4024e96ba90dc98c7de568dba5998993bc75eff7e32a943778",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "87d0231d224b0cd23b1d125106f5fdacb309979af15c18fa059c509acb268449",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "963917d6b942530f3db602fbd922460a0487dcbb20fd617f5775adb37d1b932b",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+      ],
+      "group": "domain",
+      "method_operator": "revision",
+      "operation": "edit",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 25,
+      "surface": "implementation",
+      "target_plugin": "knowledge-financial-model"
+    },
+    {
+      "evidence_sha256": [
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+      ],
+      "group": "domain",
+      "method_operator": "revision",
+      "operation": "edit",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 14,
+      "surface": "prompt",
+      "target_plugin": "knowledge-financial-model"
+    },
+    {
+      "evidence_sha256": [
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "198adda551ead891a0442ba04c3d4042f9c714d827716a767004d61d3d1d04d9",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "dfee2dc1d0445efe9480011690728593a5258506e097c7b4b9868394478bce1d",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04"
+      ],
+      "group": "domain",
+      "method_operator": "synthesis",
+      "operation": "synthesize",
+      "reasons": [
+        "evidence-bound-plugin-plan"
+      ],
+      "replacement_plugin": null,
+      "support_count": 14,
+      "surface": "implementation",
+      "target_plugin": "observe-financial-targets"
+    }
+  ],
+  "operation": "edit",
+  "reasons": [
+    "evidence-bound-plugin-plan"
+  ],
+  "replacement_plugin": null,
+  "scope": "joint",
+  "support_count": 283,
+  "surface": "implementation",
+  "target_plugin": "control-ours"
+}

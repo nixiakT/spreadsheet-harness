@@ -1,0 +1,131 @@
+{
+  "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+  "candidate_id": "fin15k-plan9-50-d-only-c01",
+  "config_patch": {},
+  "files": [],
+  "mutations": [
+    {
+      "config_patch": {},
+      "evidence_sha256": [
+        "e9dae45d83a10fae3691d410ff63d4f25527b39155a6088ba152bb3ff1cfe4d8",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6",
+        "87d0231d224b0cd23b1d125106f5fdacb309979af15c18fa059c509acb268449",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6"
+      ],
+      "files": [],
+      "operation": "edit",
+      "operator": "unified-diff",
+      "patch": "[OMITTED]",
+      "replacement_plugin": null,
+      "surface": "implementation",
+      "target_plugin": "knowledge-financial-model"
+    },
+    {
+      "config_patch": {},
+      "evidence_sha256": [
+        "e9dae45d83a10fae3691d410ff63d4f25527b39155a6088ba152bb3ff1cfe4d8",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6"
+      ],
+      "files": [
+        {
+          "content": "[OMITTED]",
+          "path": "skills/spreadsheet-financial-model/SKILL.md"
+        }
+      ],
+      "operation": "edit",
+      "operator": "replace-file",
+      "patch": null,
+      "replacement_plugin": null,
+      "surface": "prompt",
+      "target_plugin": "knowledge-financial-model"
+    },
+    {
+      "config_patch": {},
+      "evidence_sha256": [
+        "e9dae45d83a10fae3691d410ff63d4f25527b39155a6088ba152bb3ff1cfe4d8",
+        "108dbcc511a54ae64c4615d277a0a18ca3e5efbdaa7eda70f4ca47b4574658d6",
+        "f399c19aa0d7910dfe63e3dcca4967345ca4c19c07b40f66ce4b607f87f20eb6",
+        "e654b34ca4d1bb7a255e1c8d0a53d7f4558b0738368ee87256b5cd805d12ae04",
+        "5d289af2723720f71d96dcbf025899740f370f8cd67756acdf7bcc94eaa45da6",
+        "294faa7400a630baca43a46eefc9e6ca06941fa4fe7a0c81b34dfc00a95e35f1",
+        "81be3e275024d1e1cc95a32072cd28d76a5236270e1ca88a11cbb171ece0cdfa",
+        "1f69605ef6c4bea9aa5e3d6f8b14d83e064b46642893bdd4476dedd6aed0190b",
+        "53e7362e6f9a992fe35c0bb6c8f4526c8244b53f356ac259769686b9dcb3b438",
+        "74f20a62fe3545bbd4dc11c72c25af25f4f12532f2d792e1bb530405469e95cf",
+        "90509fc22e8cbc4d8fbe0dc6d48b29033bb52623a27da9e2ae068130268b2d96",
+        "984fae9ef2c2fc8aba37711c2661d2ba44cd1c9317fc49754d3d27b917b6d61b",
+        "d8a9af474d5f63cd072371b03e6a9d5f1acfe666dd7e7c8d6041e672dce01557",
+        "05715421810e1af27e85290d46826a64c716e3878dc9d6c105f54ecf28ad6dc6"
+      ],
+      "files": [
+        {
+          "content": "[OMITTED]",
+          "path": "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py"
+        }
+      ],
+      "operation": "synthesize",
+      "operator": "replace-file",
+      "patch": null,
+      "plugin_spec": {
+        "group": "domain",
+        "hooks": [
+          "before_task"
+        ],
+        "kind": "observe",
+        "name": "observe-financial-targets",
+        "permissions": [
+          "workbook.read"
+        ],
+        "provides": [
+          "context.financial-targets"
+        ],
+        "requires": [
+          "workbook.read"
+        ],
+        "spreadsheet_capabilities": [
+          "structure",
+          "formula",
+          "verification"
+        ],
+        "surfaces": [
+          "implementation"
+        ],
+        "version": "1.0.0"
+      },
+      "replacement_plugin": null,
+      "surface": "implementation",
+      "target_plugin": "observe-financial-targets"
+    }
+  ],
+  "operation": "edit",
+  "operator": "unified-diff",
+  "patch": "[OMITTED]",
+  "rationale": "From only the selected 50 Financial development traces: 33 failures include 10 first mismatches on unrequested blanks. Apply an atomic target-local observation/implementation/typed-output plan within this coordinate; added observation plugins are enabled in the new composition. The mechanism is a hypothesis, not an already measured gain.",
+  "replacement_plugin": null,
+  "scope": "domain",
+  "surface": "implementation",
+  "target_plugin": "knowledge-financial-model"
+}

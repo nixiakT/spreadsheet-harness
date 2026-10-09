@@ -1,0 +1,2362 @@
+"""Bounded local Python execution with an optional strict filesystem boundary.
+
+Ordinary local runs retain the trusted-code behavior. Comparison runs require a
+Bubblewrap sandbox that exposes only the current run workspace plus allowlisted
+Python/runtime files. Required isolation is fail-closed and never falls back to
+an unsandboxed process.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import platform
+import re
+import resource
+import shlex
+import shutil
+import site
+import subprocess
+import sys
+import tempfile
+import threading
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from openpyxl.formula import Tokenizer
+from openpyxl.utils import FORMULAE, column_index_from_string, coordinate_to_tuple
+
+from .errors import CodeIsolationError, ToolInputError, redact_sensitive_text
+from .openpyxl_compat import load_workbook
+
+STRICT_ISOLATION_POLICY = "bubblewrap-strict-workspace-v1"
+_PROBE_SENTINEL = "SHEET_STRICT_ISOLATION_OK"
+_MAX_SANDBOX_PROCESSES = 64
+_PROBE_LOCK = threading.Lock()
+_PROBE_SUCCESSES: set[tuple[str, ...]] = set()
+_RUNTIME_HELPER_NAME = "sheet_harness.py"
+_MUTATION_MARKER_ENV = "SHEET_MUTATION_MARKER"
+_COMPRESSED_PLACEHOLDER_MARKERS = ("[compressed]", "[truncated]")
+_INVALID_ABSOLUTE_ROW_REFERENCE = re.compile(r"^\$\d+$")
+_FORMULA_TEXT_PREFIX = re.compile(
+    r"^(?P<function>(?:_xlfn\.)?[A-Za-z][A-Za-z0-9_.]*)\(",
+    re.IGNORECASE,
+)
+_A1_ENDPOINT = r"\$?[A-Za-z]{1,3}\$?[1-9]\d*"
+_DEFINITE_A1_REFERENCE = re.compile(
+    rf"^(?:(?P<sheet>'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!)?"
+    rf"(?P<start>{_A1_ENDPOINT})(?::(?P<end>{_A1_ENDPOINT}))?$"
+)
+_FORMULA_SIGNAL_OPERATORS = frozenset(
+    {"+", "-", "*", "/", "^", "%", "=", "<>", "<", ">", "<=", ">="}
+)
+_MODERN_FORMULA_FUNCTIONS = {
+    "AGGREGATE",
+    "CONCAT",
+    "FILTER",
+    "FORMULATEXT",
+    "IFS",
+    "ISFORMULA",
+    "LAMBDA",
+    "LET",
+    "MAXIFS",
+    "MINIFS",
+    "SEQUENCE",
+    "SORT",
+    "SORTBY",
+    "SWITCH",
+    "TEXTJOIN",
+    "UNIQUE",
+    "XLOOKUP",
+    "XMATCH",
+}
+_KNOWN_FORMULA_FUNCTIONS = frozenset(FORMULAE) | _MODERN_FORMULA_FUNCTIONS
+
+
+@dataclass(frozen=True)
+class _FormulaTextCandidate:
+    sheet: str
+    cell: str
+    value: str
+    shape: tuple[str, ...]
+    reference_operand_count: int
+    has_formula_operator: bool
+    has_absolute_or_cross_sheet_reference: bool
+
+
+_OPENPYXL_COMPAT_SHIM = r"""
+import copy as _sheet_harness_stdlib_copy_module
+
+import openpyxl as _sheet_harness_openpyxl
+from openpyxl.chartsheet import Chartsheet as _SheetHarnessChartsheet
+from openpyxl.cell.cell import Cell as _SheetHarnessCell, MergedCell as _SheetHarnessMergedCell
+from openpyxl.drawing.spreadsheet_drawing import (
+    SpreadsheetDrawing as _SheetHarnessSpreadsheetDrawing,
+)
+from openpyxl.packaging.relationship import (
+    RelationshipList as _SheetHarnessRelationshipList,
+    get_rels_path as _sheet_harness_get_rels_path,
+)
+from openpyxl.reader.drawings import find_images as _sheet_harness_find_images
+from openpyxl.reader.excel import ExcelReader as _SheetHarnessExcelReader
+from openpyxl.worksheet.filters import AutoFilter as _SheetHarnessAutoFilter
+from openpyxl.worksheet.worksheet import Worksheet as _SheetHarnessWorksheet
+from openpyxl.xml.functions import fromstring as _sheet_harness_fromstring
+
+
+class _SheetHarnessChartsheetCompatibleReader(_SheetHarnessExcelReader):
+    def read_chartsheet(self, sheet, rel):
+        sheet_path = rel.target
+        rels_path = _sheet_harness_get_rels_path(sheet_path)
+        if rels_path in self.valid_files:
+            super().read_chartsheet(sheet, rel)
+            self.wb._sheets[-1].sheet_state = sheet.state
+            return
+
+        # openpyxl 3.1.5 uses a plain list here, then calls ``find`` on it.
+        rels = _SheetHarnessRelationshipList()
+        with self.archive.open(sheet_path, "r") as source:
+            node = _sheet_harness_fromstring(source.read())
+        chartsheet = _SheetHarnessChartsheet.from_tree(node)
+        chartsheet._parent = self.wb
+        chartsheet.title = sheet.name
+        chartsheet.sheet_state = sheet.state
+        self.wb._add_sheet(chartsheet)
+
+        for drawing_rel in rels.find(_SheetHarnessSpreadsheetDrawing._rel_type):
+            charts, _images = _sheet_harness_find_images(
+                self.archive,
+                drawing_rel.target,
+            )
+            for chart in charts:
+                chartsheet.add_chart(chart)
+
+
+def _sheet_harness_load_workbook(
+    filename,
+    read_only=False,
+    keep_vba=False,
+    data_only=False,
+    keep_links=True,
+    rich_text=False,
+):
+    reader = _SheetHarnessChartsheetCompatibleReader(
+        filename,
+        read_only,
+        keep_vba,
+        data_only,
+        keep_links,
+        rich_text,
+    )
+    reader.read()
+    return reader.wb
+
+
+def _sheet_harness_install_openpyxl_compat():
+    try:
+        from openpyxl.workbook.defined_name import DefinedNameDict
+        if not hasattr(DefinedNameDict, "definedName"):
+            DefinedNameDict.definedName = property(lambda self: list(self.values()))
+
+        from openpyxl.worksheet.table import TableList
+        if getattr(TableList, "_sheet_harness_iterates_values", False) is not True:
+            TableList.__iter__ = lambda self: iter(dict.values(self))
+            TableList.items = lambda self: dict.items(self)
+            TableList._sheet_harness_iterates_values = True
+
+        from openpyxl.workbook.workbook import Workbook
+        if getattr(Workbook, "_sheet_harness_duplicate_name_compat", False) is not True:
+            def _duplicate_name(self, name):
+                candidate = str(name).lower()
+                for sheet in self.worksheets:
+                    for table in getattr(sheet, "tables", []):
+                        table_name = getattr(table, "name", table)
+                        if candidate == str(table_name).lower():
+                            return True
+                return candidate in getattr(self, "defined_names", {})
+            Workbook._duplicate_name = _duplicate_name
+            Workbook._sheet_harness_duplicate_name_compat = True
+
+        if not hasattr(_SheetHarnessWorksheet, "_tableparts"):
+            _SheetHarnessWorksheet._tableparts = property(
+                lambda self: list(getattr(self, "tables", {}).values())
+            )
+        if not hasattr(_SheetHarnessWorksheet, "merged_ranges"):
+            _SheetHarnessWorksheet.merged_ranges = property(
+                lambda self: self.merged_cells.ranges
+            )
+        if not hasattr(_SheetHarnessWorksheet, "dimension"):
+            _SheetHarnessWorksheet.dimension = property(lambda self: self.dimensions)
+        if not hasattr(_SheetHarnessWorksheet, "close"):
+            _SheetHarnessWorksheet.close = lambda self: None
+        if not hasattr(_SheetHarnessAutoFilter, "mode"):
+            _SheetHarnessAutoFilter.mode = property(lambda self: None)
+
+        if not hasattr(_SheetHarnessCell, "dtype"):
+            _SheetHarnessCell.dtype = property(
+                lambda self: "formula" if getattr(self, "data_type", None) == "f" else self.data_type
+            )
+        if not hasattr(_SheetHarnessCell, "formula"):
+            _SheetHarnessCell.formula = property(
+                lambda self: self.value
+                if getattr(self, "data_type", None) == "f"
+                else None
+            )
+        if not hasattr(_SheetHarnessMergedCell, "formula"):
+            _SheetHarnessMergedCell.formula = property(lambda self: None)
+        if not hasattr(_SheetHarnessMergedCell, "dtype"):
+            _SheetHarnessMergedCell.dtype = property(lambda self: self.data_type)
+
+        if not hasattr(_sheet_harness_openpyxl, "copy"):
+            _sheet_harness_openpyxl.copy = _sheet_harness_stdlib_copy_module
+    except Exception as exc:
+        import sys
+        print(
+            "[sheet_harness] openpyxl compatibility shim failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
+_sheet_harness_install_openpyxl_compat()
+"""
+
+
+_RUNTIME_HELPER_SOURCE = (
+    _OPENPYXL_COMPAT_SHIM
+    + r'''
+"""Small runtime helpers available inside spreadsheet-harness code_interpreter."""
+
+import hashlib
+import os
+import re
+from contextlib import contextmanager
+from copy import copy
+from datetime import date, datetime, time
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+from zipfile import ZipFile
+
+from openpyxl.formula.translate import Translator
+from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
+
+_FORMULA_RANGE_RE = re.compile(
+    r"(?P<sheet>(?:'[^']+'|[A-Za-z_][A-Za-z0-9_ .]*)!)?"
+    r"(?P<start>\$?[A-Za-z]{1,3}\$?\d+):(?P<end>\$?[A-Za-z]{1,3}\$?\d+)"
+)
+_CELL_REF_RE = re.compile(
+    r"(?P<col_abs>\$?)(?P<col>[A-Za-z]{1,3})(?P<row_abs>\$?)(?P<row>\d+)\Z"
+)
+
+
+def workbook_path() -> Path:
+    return Path(os.environ["SHEET_WORKBOOK"])
+
+
+# Backward-compatible managed-path alias.  The harness prompt deliberately
+# prefers the no-argument load/save helpers, but models and older snippets may
+# still use ``sheet_harness.SHEET_WORKBOOK``.  Expose only the exact isolated
+# workbook path supplied by the runner (never a guessed or host path).
+SHEET_WORKBOOK = str(workbook_path())
+
+
+def workbook_sha256(path: str | Path | Any | None = None) -> str:
+    # Compatibility: older model-written snippets pass the loaded Workbook
+    # object instead of a filesystem path.  Hash its serialized OOXML without
+    # requiring the model to save/reload merely to compute a diagnostic digest.
+    if path is not None and hasattr(path, "save") and hasattr(path, "worksheets"):
+        return _serialized_workbook_digest(path)
+    target = Path(path) if path is not None else workbook_path()
+    digest = hashlib.sha256()
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _serialized_workbook_digest(workbook: Any) -> str:
+    """Hash serialized OOXML member content while ignoring ZIP timestamps."""
+
+    payload = BytesIO()
+    workbook.save(payload)
+    payload.seek(0)
+    digest = hashlib.sha256()
+    with ZipFile(payload) as archive:
+        for name in sorted(archive.namelist()):
+            encoded_name = name.encode("utf-8")
+            content = archive.read(name)
+            digest.update(len(encoded_name).to_bytes(4, "big"))
+            digest.update(encoded_name)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    return digest.hexdigest()
+
+
+def _record_managed_mutation_attempt() -> None:
+    marker = os.environ.get("SHEET_MUTATION_MARKER")
+    if marker:
+        Path(marker).touch(exist_ok=True)
+
+
+def load_workbook(path: str | Path | None = None, *, data_only: bool = False, **kwargs: Any):
+    """Load SHEET_WORKBOOK when called without a path."""
+
+    target = Path(path) if path is not None else workbook_path()
+    kwargs.setdefault("keep_vba", target.suffix.lower() == ".xlsm")
+    kwargs.setdefault("keep_links", True)
+    return _sheet_harness_load_workbook(target, data_only=data_only, **kwargs)
+
+
+def get_worksheet_by_name(workbook: Any, name: str):
+    """Compatibility wrapper for older model-written openpyxl helpers."""
+
+    try:
+        return workbook[name]
+    except (KeyError, ValueError):
+        wanted = str(name).strip().casefold()
+        matched = next(
+            (
+                sheet_name
+                for sheet_name in workbook.sheetnames
+                if str(sheet_name).strip().casefold() == wanted
+            ),
+            None,
+        )
+        if matched is None:
+            raise KeyError(
+                f"Worksheet not found: {name!r}; available={workbook.sheetnames!r}"
+            )
+        return workbook[matched]
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    return str(value)
+
+
+class _AttrDict(dict):
+    """Dictionary that also exposes keys as attributes for workbook inspection helpers."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+def table_map(worksheet: Any) -> dict[str, Any]:
+    tables = getattr(worksheet, "tables", {})
+    if isinstance(tables, dict):
+        return {
+            str(name): dict.__getitem__(tables, name)
+            for name in dict.keys(tables)
+        }
+    result: dict[str, Any] = {}
+    for table in tables or []:
+        result[str(getattr(table, "name", len(result) + 1))] = table
+    return result
+
+
+def _is_workbook_like(value: Any) -> bool:
+    return hasattr(value, "worksheets") and hasattr(value, "sheetnames")
+
+
+def _load_if_path(value: Any, *, data_only: bool = False) -> tuple[Any, bool]:
+    if value is None:
+        return load_workbook(data_only=data_only), True
+    if isinstance(value, str | Path):
+        return load_workbook(value, data_only=data_only), True
+    return value, False
+
+
+def table_refs(worksheet: Any) -> dict[str, str]:
+    return {
+        name: str(getattr(table, "ref", table))
+        for name, table in table_map(worksheet).items()
+    }
+
+
+def defined_name_refs(workbook: Any | None = None) -> dict[str, str]:
+    workbook, should_close = _load_if_path(workbook)
+    names = getattr(workbook, "defined_names", {})
+    try:
+        if isinstance(names, dict):
+            return {
+                str(name): str(getattr(value, "attr_text", value))
+                for name, value in dict.items(names)
+            }
+        return {
+            str(getattr(value, "name", index)): str(getattr(value, "attr_text", value))
+            for index, value in enumerate(getattr(names, "definedName", []) or [])
+        }
+    finally:
+        if should_close:
+            workbook.close()
+
+
+def workbook_overview(workbook: Any | None = None) -> list[dict[str, Any]]:
+    """Return one structure dictionary per worksheet, in workbook order."""
+
+    workbook, should_close = _load_if_path(workbook)
+    overview: list[dict[str, Any]] = []
+    try:
+        for index, worksheet in enumerate(workbook.worksheets):
+            raw_cells = getattr(worksheet, "_cells", {})
+            if isinstance(raw_cells, dict):
+                populated_cells = list(raw_cells.values())
+                counts = {
+                    "nonempty_cells": sum(
+                        1 for cell in populated_cells if getattr(cell, "value", None) is not None
+                    ),
+                    "formulas": sum(
+                        1 for cell in populated_cells if getattr(cell, "data_type", None) == "f"
+                    ),
+                }
+            else:
+                counts = {"nonempty_cells": None, "formulas": None}
+            overview.append(
+                {
+                    "index": index,
+                    "sheet": worksheet.title,
+                    "name": worksheet.title,
+                    "title": worksheet.title,
+                    "dimension": worksheet.calculate_dimension(),
+                    "dimensions": worksheet.calculate_dimension(),
+                    "max_row": worksheet.max_row,
+                    "max_column": worksheet.max_column,
+                    "counts": counts,
+                    "tables": table_refs(worksheet),
+                    "merged_ranges": [str(item) for item in worksheet.merged_cells.ranges],
+                }
+            )
+        return overview
+    finally:
+        if should_close:
+            workbook.close()
+
+
+def _intersects(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
+    l_min_col, l_min_row, l_max_col, l_max_row = left
+    r_min_col, r_min_row, r_max_col, r_max_row = right
+    return not (
+        l_max_col < r_min_col
+        or r_max_col < l_min_col
+        or l_max_row < r_min_row
+        or r_max_row < l_min_row
+    )
+
+
+class _SheetInventory(list[dict[str, Any]]):
+    """List-like sheet metadata with compatibility helpers for model-written code."""
+
+    def keys(self) -> list[str]:
+        return [
+            str(item.get("name"))
+            for item in self
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ]
+
+    def by_name(self) -> dict[str, dict[str, Any]]:
+        return {
+            str(item["name"]): item
+            for item in self
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except (KeyError, TypeError):
+            return default
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            if key == "sheets":
+                return list(self)
+            if key == "names":
+                return self.keys()
+            if key == "by_name":
+                return self.by_name()
+            raise KeyError(key)
+        return super().__getitem__(key)
+
+
+def list_sheets(workbook: Any | None = None) -> dict[str, Any]:
+    """Return compact workbook inventory similar to the native list_sheets tool."""
+
+    workbook, should_close = _load_if_path(workbook)
+    try:
+        sheets = []
+        for index, worksheet in enumerate(workbook.worksheets):
+            sheets.append(
+                {
+                    "index": index,
+                    "name": worksheet.title,
+                    "state": getattr(worksheet, "sheet_state", "visible"),
+                    "dimension": worksheet.calculate_dimension(),
+                    "max_row": worksheet.max_row,
+                    "max_column": worksheet.max_column,
+                    "merged_ranges": len(worksheet.merged_cells.ranges),
+                    "tables": sorted(table_map(worksheet).keys()),
+                }
+            )
+        active = getattr(getattr(workbook, "active", None), "title", None)
+        inventory = _SheetInventory(sheets)
+        return {
+            "ok": True,
+            "sheets": inventory,
+            "names": inventory.keys(),
+            "by_name": inventory.by_name(),
+            "active": active,
+        }
+    finally:
+        if should_close:
+            workbook.close()
+
+
+def _view_column_bounds(
+    cols: Any,
+    start_col: Any,
+    end_col: Any,
+    min_col: int,
+    max_col: int,
+) -> tuple[int, int]:
+    """Normalize official and historical view_xlsx column spellings."""
+
+    def as_index(value: Any, *, default: int) -> int:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            raise ValueError("column bounds must be letters or positive integers")
+        if isinstance(value, int):
+            index = value
+        else:
+            text = str(value).strip().replace("$", "")
+            # Accept an A1 endpoint while ignoring its row component.
+            match = re.fullmatch(r"([A-Za-z]{1,3})(?:[1-9][0-9]*)?", text)
+            if match is None:
+                raise ValueError(f"Invalid column reference: {value!r}")
+            index = column_index_from_string(match.group(1))
+        if index < 1:
+            raise ValueError("column bounds must be positive")
+        return index
+
+    parsed_start = as_index(start_col, default=min_col)
+    parsed_end = as_index(end_col, default=max_col)
+    if cols is not None:
+        text = str(cols).strip().replace("$", "")
+        # The common historical form is ``A:J``.  A single column is also
+        # useful when a model wants a narrow view.  For comma-separated lists,
+        # use the enclosing interval so the output remains rectangular.
+        pieces = [piece.strip() for piece in text.split(",") if piece.strip()]
+        if not pieces:
+            raise ValueError("cols must not be empty")
+        intervals: list[tuple[int, int]] = []
+        for piece in pieces:
+            endpoints = [endpoint.strip() for endpoint in piece.split(":")]
+            if len(endpoints) > 2:
+                raise ValueError(f"Invalid column range: {cols!r}")
+            left = as_index(endpoints[0], default=min_col)
+            right = as_index(endpoints[-1], default=left)
+            intervals.append((min(left, right), max(left, right)))
+        parsed_start = min(left for left, _ in intervals)
+        parsed_end = max(right for _, right in intervals)
+    parsed_start = max(min_col, parsed_start)
+    parsed_end = min(max_col, parsed_end)
+    if parsed_end < parsed_start:
+        raise ValueError(
+            f"Requested columns {parsed_start}:{parsed_end} do not intersect worksheet "
+            f"bounds {min_col}:{max_col}"
+        )
+    return parsed_start, parsed_end
+
+
+def inspect_range(
+    sheet: str,
+    range_ref: str,
+    workbook: Any | None = None,
+    *,
+    wb: Any | None = None,
+    include_styles: bool = False,
+    max_cells: int = 500,
+) -> dict[str, Any]:
+    """Inspect one bounded A1 range similarly to the native inspect_range tool."""
+
+    # Models sometimes use the short ``wb=`` spelling exposed by the code
+    # interpreter examples.  Keep it as a compatibility alias so a harmless
+    # naming variation does not consume an entire repair turn or terminate a
+    # debugging run before the requested workbook edit is attempted.
+    if workbook is not None and wb is not None and workbook is not wb:
+        raise TypeError("Pass only one of workbook= or wb=")
+    if workbook is None:
+        workbook = wb
+
+    # Historical trajectories occasionally emitted the arguments in the
+    # opposite order (``inspect_range("A1:D8", "Sheet1", wb)``).  Treat that
+    # unambiguous shape as a compatibility spelling instead of returning an
+    # opaque tool error.  This is deliberately limited to A1-looking first
+    # arguments so a real sheet name cannot be silently rewritten.
+    if isinstance(sheet, str) and isinstance(range_ref, str):
+        first_is_range = bool(re.fullmatch(r"\$?[A-Za-z]{1,3}\$?[1-9]\d*(?::\$?[A-Za-z]{1,3}\$?[1-9]\d*)?", sheet.strip()))
+        second_is_range = bool(re.fullmatch(r"\$?[A-Za-z]{1,3}\$?[1-9]\d*(?::\$?[A-Za-z]{1,3}\$?[1-9]\d*)?", range_ref.strip()))
+        if first_is_range and not second_is_range:
+            sheet, range_ref = range_ref, sheet
+
+    requested_bounds = range_boundaries(range_ref.replace("$", ""))
+    min_col, min_row, max_col, max_row = requested_bounds
+    if not all(isinstance(item, int) and item >= 1 for item in requested_bounds):
+        raise ValueError(f"Range must be bounded: {range_ref!r}")
+    if not isinstance(max_cells, int) or max_cells < 1:
+        raise ValueError("max_cells must be a positive integer")
+    requested_count = (max_col - min_col + 1) * (max_row - min_row + 1)
+    truncated = requested_count > max_cells
+    if truncated:
+        # Keep a deterministic row-major prefix while preserving the full
+        # requested column width whenever possible.  Returning bounded data
+        # with an explicit marker is more useful to model-written code than a
+        # hard exception after the model has already spent a turn inspecting.
+        width = max_col - min_col + 1
+        if width <= max_cells:
+            max_row = min(max_row, min_row + max_cells // width - 1)
+        else:
+            max_col = min(max_col, min_col + max_cells - 1)
+        if max_row < min_row or max_col < min_col:
+            max_row, max_col = min_row, min_col
+        count = (max_col - min_col + 1) * (max_row - min_row + 1)
+    else:
+        count = requested_count
+
+    formula_book, should_close_formula = _load_if_path(workbook, data_only=False)
+    if should_close_formula:
+        value_book = load_workbook(data_only=True)
+        should_close_value = True
+    else:
+        value_book = formula_book
+        should_close_value = False
+    try:
+        # Match the native tool's forgiving sheet-name behavior: exact first,
+        # then trimmed/case-insensitive fallback for names copied from output.
+        try:
+            formula_sheet = formula_book[sheet]
+            value_sheet = value_book[sheet]
+        except (KeyError, ValueError):
+            wanted = str(sheet).strip().casefold()
+            matched = next(
+                (name for name in formula_book.sheetnames if str(name).strip().casefold() == wanted),
+                None,
+            )
+            if matched is None:
+                raise KeyError(f"Worksheet not found: {sheet!r}; available={formula_book.sheetnames!r}")
+            formula_sheet = formula_book[matched]
+            value_sheet = value_book[matched]
+        matrix: list[list[Any]] = []
+        cells: list[dict[str, Any]] = []
+        cell_map: dict[str, dict[str, Any]] = {}
+        for row in range(min_row, max_row + 1):
+            matrix_row: list[Any] = []
+            for column in range(min_col, max_col + 1):
+                cell = formula_sheet.cell(row, column)
+                cached_cell = value_sheet.cell(row, column)
+                cached = cached_cell.value
+                raw = cell.value
+                display = raw if isinstance(raw, str) and raw.startswith("=") else cached
+                if display is None:
+                    display = raw
+                matrix_row.append(_json_value(display))
+                if raw is not None or cached is not None or cell.has_style:
+                    item: dict[str, Any] = {
+                        "coordinate": cell.coordinate,
+                        "value": _json_value(cached if cached is not None else raw),
+                        "formula": raw
+                        if isinstance(raw, str) and raw.startswith("=")
+                        else None,
+                        "data_type": cell.data_type,
+                        "cached_data_type": cached_cell.data_type,
+                    }
+                    if include_styles:
+                        item["style"] = {
+                            "style_id": cell.style_id,
+                            "number_format": cell.number_format,
+                        }
+                    cells.append(item)
+                    cell_map[cell.coordinate] = _AttrDict(item)
+            matrix.append(matrix_row)
+
+        merged = [
+            str(item)
+            for item in formula_sheet.merged_cells.ranges
+            if _intersects(requested_bounds, range_boundaries(str(item)))
+        ]
+        tables = []
+        for name, table in table_map(formula_sheet).items():
+            ref = str(getattr(table, "ref", table))
+            if _intersects(requested_bounds, range_boundaries(ref)):
+                tables.append({"name": name, "ref": ref})
+        return {
+            "ok": True,
+            "sheet": sheet,
+            "range": (
+                f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+            ),
+            "requested_range": range_ref,
+            # Compatibility aliases used by older workbook-inspection examples.
+            # Keeping these aliases in the structured result avoids wasting a
+            # model turn on a harmless KeyError while preserving the canonical
+            # ``range`` field above.
+            "dimension": formula_sheet.calculate_dimension(),
+            "dimensions": formula_sheet.calculate_dimension(),
+            "requested_cell_count": requested_count,
+            "truncated": truncated,
+            # Keep a legacy-friendly alias for models that expect inspect tools to
+            # expose the selected region under `region`.
+            "region": (
+                f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+            ),
+            "row_count": max_row - min_row + 1,
+            "column_count": max_col - min_col + 1,
+            "cell_count": count,
+            "matrix": matrix,
+            "cells": cell_map,
+            "cell_list": cells,
+            "merged_ranges": merged,
+            "tables": tables,
+        }
+    finally:
+        if should_close_formula:
+            formula_book.close()
+        if should_close_value:
+            value_book.close()
+
+
+def view_xlsx(
+    path: Any = None,
+    mode: str = "content",
+    sheet: str | None = None,
+    start_row: int | None = None,
+    end_row: int | None = None,
+    *,
+    start_col: int | str | None = None,
+    end_col: int | str | None = None,
+    cols: str | None = None,
+) -> str:
+    """Compact, official-protocol-style workbook view for model grounding.
+
+    This mirrors the released ``view_xlsx`` contract while returning a bounded
+    string suitable for a code-interpreter observation.  It intentionally keeps
+    formulas (rather than only cached values) visible and limits content to the
+    requested row window.
+    """
+    supplied_workbook = bool(
+        path is not None and hasattr(path, "worksheets") and hasattr(path, "sheetnames")
+    )
+    workbook = path if supplied_workbook else load_workbook(path, data_only=False)
+    try:
+        if mode == "list":
+            return "Sheets: " + repr([ws.title for ws in workbook.worksheets if getattr(ws, "sheet_state", "visible") == "visible"])
+        if mode != "content":
+            raise ValueError("mode must be 'list' or 'content'")
+        visible = [ws for ws in workbook.worksheets if getattr(ws, "sheet_state", "visible") == "visible"]
+        if not visible:
+            return "No visible sheets"
+        wanted = sheet.strip().casefold() if isinstance(sheet, str) else None
+        target = next(
+            (ws for ws in visible if wanted is None or ws.title.strip().casefold() == wanted),
+            None,
+        )
+        if target is None:
+            raise KeyError(
+                f"Worksheet not found: {sheet!r}; available={[ws.title for ws in visible]!r}"
+            )
+        min_col, min_row, max_col, max_row = range_boundaries(target.calculate_dimension())
+        min_col, max_col = _view_column_bounds(
+            cols, start_col, end_col, min_col, max_col
+        )
+        actual_start = max(1, int(start_row)) if start_row is not None else min_row
+        actual_end = max(actual_start, int(end_row)) if end_row is not None else max_row
+        actual_end = min(actual_end, max_row)
+        lines = [f"Sheet: {target.title}", f"Data range: {target.calculate_dimension()}"]
+        for row in range(actual_start, actual_end + 1):
+            values = [target.cell(row=row, column=col).value for col in range(min_col, max_col + 1)]
+            lines.append(f"Row {row}: {values!r}")
+        return "\n".join(lines)
+    finally:
+        if not supplied_workbook:
+            workbook.close()
+
+
+def copy_cell_format(source: Any, target: Any) -> None:
+    if source.has_style:
+        target._style = copy(source._style)
+    if source.number_format:
+        target.number_format = source.number_format
+    if source.alignment:
+        target.alignment = copy(source.alignment)
+    if source.protection:
+        target.protection = copy(source.protection)
+
+
+def clear_range(worksheet: Any, range_ref: str) -> dict[str, Any]:
+    min_col, min_row, max_col, max_row = range_boundaries(range_ref.replace("$", ""))
+    count = 0
+    for row in range(min_row, max_row + 1):
+        for column in range(min_col, max_col + 1):
+            worksheet.cell(row=row, column=column).value = None
+            count += 1
+    return {
+        "ok": True,
+        "worksheet": getattr(worksheet, "title", None),
+        "range": range_ref,
+        "cells_cleared": count,
+    }
+
+
+def column_name(column_index: int) -> str:
+    index = int(column_index)
+    if index < 1:
+        raise ValueError("column_index must be >= 1")
+    return get_column_letter(index)
+
+
+def _cell_ref_parts(ref: str) -> dict[str, Any] | None:
+    match = _CELL_REF_RE.fullmatch(ref)
+    if match is None:
+        return None
+    return {
+        "column_absolute": bool(match.group("col_abs")),
+        "row_absolute": bool(match.group("row_abs")),
+    }
+
+
+def _formula_sample_coordinates(
+    source_cell: str,
+    bounds: tuple[int, int, int, int],
+) -> list[str]:
+    min_col, min_row, max_col, max_row = bounds
+    candidates = [
+        source_cell.replace("$", ""),
+        f"{get_column_letter(min_col)}{min_row}",
+        f"{get_column_letter(min(min_col + 1, max_col))}{min_row}",
+        f"{get_column_letter(min_col)}{min(min_row + 1, max_row)}",
+        f"{get_column_letter(max_col)}{max_row}",
+    ]
+    return list(dict.fromkeys(candidates))
+
+
+def _normalize_fill_target_range(
+    source_cell: str,
+    target_range: str,
+) -> tuple[str, bool]:
+    source = source_cell.replace("$", "")
+    target = target_range.replace("$", "")
+    if ":" in target:
+        return target_range, False
+    try:
+        range_boundaries(target)
+        range_boundaries(source)
+    except (TypeError, ValueError):
+        return target_range, False
+    if target.upper() == source.upper():
+        return target_range, False
+    return f"{source}:{target}", True
+
+
+def _fill_formula_warnings(
+    source_formula: str,
+    source_cell: str,
+    bounds: tuple[int, int, int, int],
+    samples: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    min_col, min_row, max_col, max_row = bounds
+    fills_horizontally = max_col > min_col
+    fills_vertically = max_row > min_row
+    if not fills_horizontally and not fills_vertically:
+        return []
+
+    sample_cells = [
+        str(sample["cell"])
+        for sample in samples
+        if sample.get("cell") != source_cell.replace("$", "")
+    ]
+    warnings: list[dict[str, Any]] = []
+    for match in _FORMULA_RANGE_RE.finditer(source_formula):
+        start = _cell_ref_parts(match.group("start"))
+        end = _cell_ref_parts(match.group("end"))
+        if start is None or end is None:
+            continue
+        issues: list[str] = []
+        if fills_horizontally and not (
+            start["column_absolute"] and end["column_absolute"]
+        ):
+            issues.append("column endpoints are not both absolute")
+        if fills_vertically and start["row_absolute"] != end["row_absolute"]:
+            issues.append("mixed row anchors")
+        if not issues:
+            continue
+
+        translated_examples: list[dict[str, str]] = []
+        for destination in sample_cells:
+            translated = Translator(
+                "=" + match.group(0),
+                origin=source_cell,
+            ).translate_formula(destination)[1:]
+            if translated != match.group(0):
+                translated_examples.append(
+                    {"cell": destination, "translated_range": translated}
+                )
+            if len(translated_examples) >= 3:
+                break
+        if not translated_examples:
+            continue
+        warnings.append(
+            {
+                "type": "possible_expanding_or_drifting_range",
+                "source_range": match.group(0),
+                "issues": issues,
+                "examples": translated_examples,
+                "message": (
+                    "This range changes during fill_formula. If the range should stay "
+                    "fixed across the fill direction, lock both endpoints, e.g. use "
+                    "$E6:$G6 instead of E6:G6 or $E6:G6, then refill and verify cached "
+                    "values."
+                ),
+            }
+        )
+    return warnings
+
+
+def fill_formula(
+    worksheet: Any,
+    source_cell: str,
+    target_range: str,
+    *,
+    copy_format: bool = False,
+) -> dict[str, Any]:
+    formula = worksheet[source_cell].value
+    if not isinstance(formula, str) or not formula.startswith("="):
+        if (
+            isinstance(formula, str)
+            and formula == formula.strip()
+            and _FORMULA_RANGE_RE.search(formula) is not None
+            and re.match(r"[A-Za-z][A-Za-z0-9_.]*\(", formula) is not None
+        ):
+            raise ValueError(
+                f"{source_cell} contains formula-like text without a leading '='; assign an "
+                "Excel formula string beginning with '=' before calling fill_formula"
+            )
+        raise ValueError(f"{source_cell} does not contain a formula")
+    normalized_target_range, expanded_from_endpoint = _normalize_fill_target_range(
+        source_cell, target_range
+    )
+    bounds = range_boundaries(normalized_target_range.replace("$", ""))
+    min_col, min_row, max_col, max_row = bounds
+    count = 0
+    samples: list[dict[str, Any]] = []
+    sample_coordinates = set(_formula_sample_coordinates(source_cell, bounds))
+    for row in range(min_row, max_row + 1):
+        for column in range(min_col, max_col + 1):
+            destination = worksheet.cell(row=row, column=column)
+            destination.value = Translator(
+                formula,
+                origin=source_cell.replace("$", ""),
+            ).translate_formula(destination.coordinate)
+            if copy_format:
+                copy_cell_format(worksheet[source_cell], destination)
+            if destination.coordinate in sample_coordinates:
+                samples.append(
+                    {"cell": destination.coordinate, "formula": destination.value}
+                )
+            count += 1
+    return {
+        "ok": True,
+        "worksheet": getattr(worksheet, "title", None),
+        "range": normalized_target_range,
+        "requested_range": target_range,
+        "target_range_expanded_from_endpoint": expanded_from_endpoint,
+        "cells_filled": count,
+        "source_formula": formula,
+        "sample_formulas": samples,
+        "warnings": _fill_formula_warnings(
+            formula,
+            source_cell.replace("$", ""),
+            bounds,
+            samples,
+        ),
+    }
+
+
+def _snapshot_workbook_images(workbook: Any) -> list[tuple[Any, bytes]]:
+    """Capture image payloads before openpyxl consumes their file handles."""
+
+    snapshots: list[tuple[Any, bytes]] = []
+    for worksheet in getattr(workbook, "worksheets", []):
+        for image in getattr(worksheet, "_images", []) or []:
+            ref = getattr(image, "ref", None)
+            data: bytes | None = None
+            if isinstance(ref, (str, Path)):
+                data = Path(ref).read_bytes()
+            elif hasattr(ref, "read"):
+                try:
+                    ref.seek(0)
+                    data = ref.read()
+                    ref.seek(0)
+                except (OSError, ValueError):
+                    data = None
+            elif hasattr(ref, "save"):
+                payload = BytesIO()
+                ref.save(payload, format=str(getattr(image, "format", "png")).upper())
+                data = payload.getvalue()
+            if data is not None:
+                snapshots.append((image, bytes(data)))
+    return snapshots
+
+
+def _restore_workbook_images(snapshots: list[tuple[Any, bytes]]) -> None:
+    for image, data in snapshots:
+        image.ref = BytesIO(data)
+
+
+def save_workbook(workbook: Any, path: str | Path | None = None) -> Path:
+    """Save to SHEET_WORKBOOK when called without a path."""
+
+    target = Path(path) if path is not None else workbook_path()
+    managed_target = target.resolve() == workbook_path().resolve()
+    image_snapshots = _snapshot_workbook_images(workbook)
+    try:
+        if managed_target and target.is_file():
+            try:
+                current = _sheet_harness_load_workbook(
+                    target,
+                    data_only=False,
+                    keep_vba=target.suffix.lower() == ".xlsm",
+                    keep_links=True,
+                )
+                current_image_snapshots = _snapshot_workbook_images(current)
+                try:
+                    workbook_digest = _serialized_workbook_digest(workbook)
+                    _restore_workbook_images(image_snapshots)
+                    current_digest = _serialized_workbook_digest(current)
+                    _restore_workbook_images(current_image_snapshots)
+                    if workbook_digest == current_digest:
+                        return target
+                finally:
+                    current.close()
+            except Exception:
+                # A failed serialization can be caused by a patched/failed save
+                # method.  It is no longer a proven no-op, so expose it as an
+                # attempted managed mutation to enable precise agent recovery.
+                _record_managed_mutation_attempt()
+                raise
+        if managed_target:
+            _record_managed_mutation_attempt()
+        calculation = getattr(workbook, "calculation", None)
+        if calculation is not None:
+            calculation.fullCalcOnLoad = True
+            calculation.forceFullCalc = True
+            calculation.calcMode = "auto"
+        _restore_workbook_images(image_snapshots)
+        workbook.save(target)
+    finally:
+        # Keep the in-memory workbook reusable for a second save or a narrow
+        # post-save verification.  openpyxl closes image streams as it writes.
+        _restore_workbook_images(image_snapshots)
+    validator = _sheet_harness_load_workbook(
+        target,
+        read_only=True,
+        data_only=False,
+        keep_vba=target.suffix.lower() == ".xlsm",
+        keep_links=True,
+    )
+    validator.close()
+    return target
+
+
+@contextmanager
+def editable_workbook(path: str | Path | None = None):
+    workbook = load_workbook(path, data_only=False)
+    try:
+        yield workbook
+        save_workbook(workbook, path)
+    finally:
+        workbook.close()
+
+
+def range_values(worksheet: Any, range_ref: str) -> list[list[Any]]:
+    min_col, min_row, max_col, max_row = range_boundaries(range_ref.replace("$", ""))
+    return [
+        [
+            worksheet.cell(row=row, column=column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        for row in range(min_row, max_row + 1)
+    ]
+
+
+def print_workbook_overview(workbook: Any) -> None:
+    for item in workbook_overview(workbook):
+        print(item)
+    refs = defined_name_refs(workbook)
+    if refs:
+        print({"defined_names": refs})
+'''
+)
+
+
+def _limits(*, include_process_limit: bool = True) -> None:
+    resource.setrlimit(resource.RLIMIT_CPU, (45, 45))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024 * 1024, 100 * 1024 * 1024))
+    if include_process_limit and hasattr(resource, "RLIMIT_NPROC"):
+        resource.setrlimit(
+            resource.RLIMIT_NPROC,
+            (_MAX_SANDBOX_PROCESSES, _MAX_SANDBOX_PROCESSES),
+        )
+    if platform.system() == "Linux" and hasattr(resource, "RLIMIT_AS"):
+        resource.setrlimit(resource.RLIMIT_AS, (4 * 1024**3, 4 * 1024**3))
+
+
+def _outer_sandbox_limits() -> None:
+    """Apply limits that cannot prevent Bubblewrap from creating namespaces.
+
+    RLIMIT_NPROC is charged against every process/thread owned by the host UID,
+    not just this child. Applying a fixed value before Bubblewrap starts makes
+    namespace creation fail on shared servers whose UID already owns more than
+    that many threads. The strict launcher lowers the hard process limit after
+    Bubblewrap has established the sandbox and before any model code runs.
+    """
+
+    _limits(include_process_limit=False)
+
+
+def _require_bubblewrap() -> Path:
+    if platform.system() != "Linux":
+        raise CodeIsolationError(
+            "Strict comparison code isolation requires Linux and Bubblewrap"
+        )
+    discovered = shutil.which("bwrap")
+    if not discovered:
+        raise CodeIsolationError(
+            "Strict comparison code isolation requires the bwrap executable"
+        )
+    return Path(discovered).absolute()
+
+
+def _runtime_roots(workspace: Path) -> list[Path]:
+    """Return the minimum runtime directories needed by the active Python."""
+
+    candidates = [Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64")]
+    candidates.extend([Path(sys.prefix), Path(sys.base_prefix)])
+    user_base = Path(site.getuserbase()) if hasattr(site, "getuserbase") else Path.home() / ".local"
+    candidates.append(user_base)
+    # Packages installed into the active interpreter's user site (for example
+    # openpyxl under ``~/.local``) are not covered by the system runtime roots.
+    # Do not mount arbitrary ``sys.path`` entries: the launcher commonly adds
+    # the repository source tree, and mounting a parent of the task workspace
+    # would violate strict workspace isolation.
+    roots: list[Path] = []
+    resolved_workspace = workspace.resolve()
+    for candidate in candidates:
+        absolute = candidate.absolute()
+        if not absolute.exists() or absolute in roots:
+            continue
+        resolved = absolute.resolve()
+        if (
+            resolved == Path("/")
+            or resolved_workspace == resolved
+            or resolved in resolved_workspace.parents
+        ):
+            raise CodeIsolationError(
+                f"Refusing unsafe runtime mount that contains the task workspace: {absolute}"
+            )
+        # /usr already includes common /usr/local base prefixes. Keep /lib and
+        # /lib64 mount points themselves because dynamic loaders use those paths.
+        if absolute not in {Path("/bin"), Path("/lib"), Path("/lib64")} and any(
+            resolved == root.resolve() or root.resolve() in resolved.parents
+            for root in roots
+        ):
+            continue
+        roots.append(absolute)
+    executable = Path(sys.executable).absolute()
+    if not any(executable == root or root in executable.parents for root in roots):
+        raise CodeIsolationError(
+            f"Active Python executable is outside the allowlisted runtime roots: {executable}"
+        )
+    return roots
+
+
+def _unchanged_workbook_message(*, exit_code: int, stderr: str) -> str:
+    return "Workbook did not change. If this was meant to edit, save changes back to SHEET_WORKBOOK before submitting."
+
+
+def _parent_directories(paths: list[Path]) -> list[Path]:
+    parents: set[Path] = set()
+    for path in paths:
+        current = path.absolute().parent
+        while current != Path("/"):
+            parents.add(current)
+            current = current.parent
+    return sorted(parents, key=lambda item: (len(item.parts), str(item)))
+
+
+def _strict_command(
+    workspace: Path,
+    argv: list[str],
+    *,
+    bubblewrap: Path | None = None,
+) -> list[str]:
+    """Build an empty-root Bubblewrap command with explicit runtime mounts."""
+
+    resolved_workspace = workspace.resolve()
+    bwrap = bubblewrap or _require_bubblewrap()
+    runtime_roots = _runtime_roots(resolved_workspace)
+    runtime_files = [
+        path
+        for path in (
+            Path("/etc/ld.so.cache"),
+            Path("/etc/localtime"),
+        )
+        if path.is_file()
+    ]
+    runtime_parent_paths = _parent_directories([*runtime_roots, *runtime_files])
+    workspace_parent_paths = _parent_directories([resolved_workspace])
+    command = [
+        str(bwrap),
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--cap-drop",
+        "ALL",
+    ]
+    for parent in runtime_parent_paths:
+        command.extend(["--dir", str(parent)])
+    for root in runtime_roots:
+        command.extend(["--ro-bind", str(root), str(root)])
+    for runtime_file in runtime_files:
+        command.extend(["--ro-bind", str(runtime_file), str(runtime_file)])
+    command.extend(
+        [
+            "--tmpfs",
+            "/tmp",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+        ]
+    )
+    # A task workspace is commonly below /tmp during the startup probe. Create
+    # its mount-point hierarchy only after /tmp is replaced, then bind the
+    # exact workspace. Binding an ancestor would expose sibling arms or goldens.
+    for parent in workspace_parent_paths:
+        if parent != Path("/tmp"):
+            command.extend(["--dir", str(parent)])
+    command.extend(
+        [
+            "--bind",
+            str(resolved_workspace),
+            str(resolved_workspace),
+            "--chdir",
+            str(resolved_workspace),
+            "--",
+            *argv,
+        ]
+    )
+    return command
+
+
+def _environment(
+    workspace: Path,
+    workbook: Path,
+    *,
+    mutation_marker: Path | None = None,
+) -> dict[str, str]:
+    executable_dir = str(Path(sys.executable).absolute().parent)
+    environment = {
+        "PATH": f"{executable_dir}:/usr/local/bin:/usr/bin:/bin",
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "VECLIB_MAXIMUM_THREADS": "1",
+        "SHEET_WORKSPACE": str(workspace),
+        "SHEET_WORKBOOK": str(workbook),
+    }
+    import_paths = [str(Path(item).absolute()) for item in sys.path
+                    if item and Path(item).is_dir() and "site-packages" in item]
+    if import_paths:
+        environment["PYTHONPATH"] = os.pathsep.join(import_paths)
+    try:
+        environment["SHEET_PYTHONPATH"] = site.getusersitepackages()
+    except (AttributeError, TypeError):
+        pass
+    if mutation_marker is not None:
+        environment[_MUTATION_MARKER_ENV] = str(mutation_marker)
+    return environment
+
+
+def _diagnostic(stderr: str, *, secrets: tuple[str, ...] = ()) -> str:
+    environment_secrets = tuple(
+        secret
+        for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+        if (secret := os.environ.get(name))
+    )
+    redacted = redact_sensitive_text(
+        stderr,
+        secrets=(*secrets, *environment_secrets),
+    )
+    cleaned = " ".join(redacted.strip().split())[:1_000]
+    return cleaned or "no diagnostic output"
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _valid_a1_endpoint(value: str) -> bool:
+    coordinate = value.replace("$", "")
+    match = re.fullmatch(r"(?P<column>[A-Za-z]{1,3})(?P<row>[1-9]\d*)", coordinate)
+    if match is None:
+        return False
+    return (
+        column_index_from_string(match.group("column")) <= 16_384
+        and int(match.group("row")) <= 1_048_576
+    )
+
+
+def _definite_a1_reference(value: str) -> tuple[str, bool, bool] | None:
+    match = _DEFINITE_A1_REFERENCE.fullmatch(value)
+    if match is None or not all(
+        _valid_a1_endpoint(endpoint)
+        for endpoint in (match.group("start"), match.group("end"))
+        if endpoint is not None
+    ):
+        return None
+    start = match.group("start")
+    end = match.group("end")
+    anchors = ":".join(
+        f"{'C' if part.startswith('$') else 'c'}{'R' if '$' in part[1:] else 'r'}"
+        for part in (start, end)
+        if part is not None
+    )
+    shape = f"REF:{'range' if end else 'cell'}:{anchors}:{bool(match.group('sheet'))}"
+    return shape, "$" in value, match.group("sheet") is not None
+
+
+def _balanced_formula_tokens(tokens: list[Any]) -> bool:
+    stack: list[str] = []
+    expect_operand = True
+    previous_kind: str | None = None
+    for token in tokens:
+        kind = token.type
+        subtype = token.subtype
+        if kind == "WHITE-SPACE":
+            continue
+        if kind in {"FUNC", "PAREN", "ARRAY"} and subtype == "OPEN":
+            if not expect_operand:
+                return False
+            stack.append(kind)
+            expect_operand = True
+        elif kind in {"FUNC", "PAREN", "ARRAY"} and subtype == "CLOSE":
+            if (
+                not stack
+                or stack.pop() != kind
+                or (expect_operand and previous_kind not in {"FUNC", "SEP"})
+            ):
+                return False
+            expect_operand = False
+        elif kind == "OPERAND":
+            if not expect_operand:
+                return False
+            expect_operand = False
+        elif kind == "OPERATOR-PREFIX":
+            if not expect_operand:
+                return False
+        elif kind == "OPERATOR-INFIX":
+            if expect_operand:
+                return False
+            expect_operand = True
+        elif kind == "OPERATOR-POSTFIX":
+            if expect_operand:
+                return False
+        elif kind == "SEP" and subtype in {"ARG", "ROW"}:
+            if expect_operand and previous_kind not in {"FUNC", "SEP"}:
+                return False
+            expect_operand = True
+        else:
+            return False
+        previous_kind = kind
+    return bool(tokens) and not stack and not expect_operand
+
+
+def _formula_text_candidate(sheet: str, cell: Any) -> _FormulaTextCandidate | None:
+    value = cell.value
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value.startswith(("=", "'"))
+        or "\n" in value
+        or "\r" in value
+        or cell.number_format == "@"
+        or bool(
+            getattr(
+                cell,
+                "quotePrefix",
+                getattr(getattr(cell, "style_array", None), "quotePrefix", False),
+            )
+        )
+    ):
+        return None
+    match = _FORMULA_TEXT_PREFIX.match(value)
+    if match is None:
+        return None
+    function = match.group("function").upper().removeprefix("_XLFN.")
+    if function not in _KNOWN_FORMULA_FUNCTIONS:
+        return None
+    try:
+        tokens = Tokenizer("=" + value).items
+    except Exception:
+        return None
+    if (
+        not tokens
+        or tokens[0].type != "FUNC"
+        or tokens[0].subtype != "OPEN"
+        or not _balanced_formula_tokens(tokens)
+    ):
+        return None
+
+    shape: list[str] = []
+    references = 0
+    has_absolute = False
+    has_cross_sheet = False
+    has_operator = False
+    for token in tokens:
+        if token.type == "WHITE-SPACE":
+            continue
+        if token.type == "OPERAND" and token.subtype == "RANGE":
+            reference = _definite_a1_reference(token.value)
+            if reference is None:
+                return None
+            reference_shape, absolute, cross_sheet = reference
+            shape.append(reference_shape)
+            references += 1
+            has_absolute = has_absolute or absolute
+            has_cross_sheet = has_cross_sheet or cross_sheet
+        else:
+            shape.append(f"{token.type}:{token.subtype}:{token.value.upper()}")
+        has_operator = has_operator or (
+            token.type == "OPERATOR-INFIX" and token.value in _FORMULA_SIGNAL_OPERATORS
+        )
+    if references == 0:
+        return None
+    return _FormulaTextCandidate(
+        sheet=sheet,
+        cell=cell.coordinate,
+        value=value,
+        shape=tuple(shape),
+        reference_operand_count=references,
+        has_formula_operator=has_operator,
+        has_absolute_or_cross_sheet_reference=has_absolute or has_cross_sheet,
+    )
+
+
+def _workbook_formula_state(
+    path: Path,
+) -> tuple[
+    set[tuple[str, str, str, str]],
+    dict[tuple[str, str], _FormulaTextCandidate],
+]:
+    workbook = load_workbook(
+        path,
+        read_only=True,
+        data_only=False,
+        keep_vba=path.suffix.lower() == ".xlsm",
+        keep_links=True,
+    )
+    invalid_references: set[tuple[str, str, str, str]] = set()
+    formula_text: dict[tuple[str, str], _FormulaTextCandidate] = {}
+    try:
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and value.startswith("="):
+                        try:
+                            tokens = Tokenizer(value).items
+                        except Exception:
+                            continue
+                        for token in tokens:
+                            if (
+                                token.type == "OPERAND"
+                                and token.subtype == "RANGE"
+                                and _INVALID_ABSOLUTE_ROW_REFERENCE.fullmatch(token.value)
+                            ):
+                                invalid_references.add(
+                                    (worksheet.title, cell.coordinate, token.value, value)
+                                )
+                    else:
+                        candidate = _formula_text_candidate(worksheet.title, cell)
+                        if candidate is not None:
+                            formula_text[(worksheet.title, cell.coordinate)] = candidate
+    finally:
+        workbook.close()
+    return invalid_references, formula_text
+
+
+def _has_adjacent_cells(candidates: list[_FormulaTextCandidate]) -> bool:
+    coordinates = {coordinate_to_tuple(candidate.cell) for candidate in candidates}
+    return any(
+        (row + row_delta, column + column_delta) in coordinates
+        for row, column in coordinates
+        for row_delta, column_delta in ((0, 1), (1, 0))
+    )
+
+
+def _high_confidence_formula_text(
+    introduced: dict[tuple[str, str], _FormulaTextCandidate],
+) -> set[tuple[str, str, str]]:
+    batch_groups: dict[tuple[str, tuple[str, ...]], list[_FormulaTextCandidate]] = {}
+    for candidate in introduced.values():
+        batch_groups.setdefault((candidate.sheet, candidate.shape), []).append(candidate)
+    batch_members = {
+        (candidate.sheet, candidate.cell)
+        for candidates in batch_groups.values()
+        if len(candidates) >= 3 and _has_adjacent_cells(candidates)
+        for candidate in candidates
+    }
+    return {
+        (candidate.sheet, candidate.cell, candidate.value)
+        for key, candidate in introduced.items()
+        if candidate.reference_operand_count >= 2
+        or candidate.has_formula_operator
+        or candidate.has_absolute_or_cross_sheet_reference
+        or key in batch_members
+    }
+
+
+def validate_formula_transaction(
+    previous_path: Path | None,
+    current_path: Path,
+) -> tuple[set[tuple[str, str, str, str]], set[tuple[str, str, str]]]:
+    """Return high-confidence formula issues introduced between two workbooks."""
+
+    if previous_path is None:
+        previous_invalid_references: set[tuple[str, str, str, str]] = set()
+        previous_formula_text: dict[tuple[str, str], _FormulaTextCandidate] = {}
+    else:
+        previous_invalid_references, previous_formula_text = _workbook_formula_state(
+            previous_path
+        )
+    current_invalid_references, current_formula_text = _workbook_formula_state(current_path)
+    introduced_formula_candidates = {
+        key: candidate
+        for key, candidate in current_formula_text.items()
+        if previous_formula_text.get(key) != candidate
+    }
+    return (
+        current_invalid_references - previous_invalid_references,
+        _high_confidence_formula_text(introduced_formula_candidates),
+    )
+
+
+def _restore_workbook(snapshot: Path | None, workbook: Path) -> None:
+    if snapshot is None:
+        workbook.unlink(missing_ok=True)
+        return
+    temporary = workbook.with_name(
+        f".{workbook.stem}.code-rollback-{uuid.uuid4().hex}{workbook.suffix}"
+    )
+    try:
+        shutil.copy2(snapshot, temporary)
+        temporary.replace(workbook)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _formula_validation_failure(
+    invalid_references: set[tuple[str, str, str, str]],
+    formula_text: set[tuple[str, str, str]],
+) -> tuple[str, dict[str, Any]]:
+    invalid_examples = [
+        {
+            "type": "invalid_a1_reference",
+            "sheet": sheet,
+            "cell": cell,
+            "invalid_reference": reference,
+            "formula": formula,
+        }
+        for sheet, cell, reference, formula in sorted(invalid_references)
+    ]
+    text_examples = [
+        {
+            "type": "missing_formula_prefix",
+            "sheet": sheet,
+            "cell": cell,
+            "value": value,
+        }
+        for sheet, cell, value in sorted(formula_text)
+    ]
+    issues = invalid_examples + text_examples
+    details: list[str] = []
+    if invalid_references:
+        locations = ", ".join(
+            f"{sheet}!{cell} ({reference})"
+            for sheet, cell, reference, _ in sorted(invalid_references)[:8]
+        )
+        details.append(f"invalid A1 references at {locations}")
+    if formula_text:
+        locations = ", ".join(
+            f"{sheet}!{cell}" for sheet, cell, _ in sorted(formula_text)[:8]
+        )
+        details.append(f"formula-like text without a leading '=' at {locations}")
+    guidance = []
+    if invalid_references:
+        guidance.append("use a column letter in cell references (for example E$5)")
+    if formula_text:
+        guidance.append("assign intended formulas as strings beginning with '='")
+    error = "Workbook edit rolled back because it introduced " + "; ".join(details) + ". "
+    error += "; then ".join(guidance) + ", save again, recalculate, and verify the target range."
+    return error, {
+        "ok": False,
+        "issue_count": len(issues),
+        "introduced_invalid_reference_count": len(invalid_references),
+        "introduced_formula_text_count": len(formula_text),
+        "issues": issues[:20],
+        "truncated": len(issues) > 20,
+    }
+
+
+def _run_strict_probe(bubblewrap: Path, *, secrets: tuple[str, ...] = ()) -> None:
+    with tempfile.TemporaryDirectory(prefix="sheet-code-isolation-") as temporary:
+        root = Path(temporary)
+        workspace = root / "workspace"
+        workspace.mkdir(mode=0o700)
+        outside = root / "must-not-be-readable.txt"
+        outside.write_text("isolation-probe-secret", encoding="utf-8")
+        script = workspace / "probe.py"
+        script.write_text(
+            f"""from pathlib import Path
+import os
+import sys
+site_path = os.environ.get("SHEET_PYTHONPATH")
+if site_path:
+    sys.path.insert(0, site_path)
+import os
+import resource
+from openpyxl import Workbook
+
+if hasattr(resource, "RLIMIT_NPROC"):
+    resource.setrlimit(
+        resource.RLIMIT_NPROC,
+        ({_MAX_SANDBOX_PROCESSES}, {_MAX_SANDBOX_PROCESSES}),
+    )
+    if resource.getrlimit(resource.RLIMIT_NPROC) != (
+        {_MAX_SANDBOX_PROCESSES},
+        {_MAX_SANDBOX_PROCESSES},
+    ):
+        raise RuntimeError("strict sandbox process limit was not applied")
+outside = Path(os.environ["SHEET_PROBE_OUTSIDE"])
+try:
+    outside.read_bytes()
+except (FileNotFoundError, PermissionError):
+    pass
+else:
+    raise RuntimeError("strict sandbox exposed a file outside the workspace")
+book = Workbook()
+book.active["A1"] = "probe"
+book.save(os.environ["SHEET_WORKBOOK"])
+book.close()
+print("SHEET_STRICT_ISOLATION_OK")
+""",
+            encoding="utf-8",
+        )
+        workbook = workspace / "probe.xlsx"
+        environment = _environment(workspace, workbook)
+        environment["SHEET_PROBE_OUTSIDE"] = str(outside)
+        command = _strict_command(
+            workspace,
+            [sys.executable, "-I", str(script)],
+            bubblewrap=bubblewrap,
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=workspace,
+                env=environment,
+                text=True,
+                capture_output=True,
+                # Under the requested 72-task fan-out, each worker performs a
+                # strict bwrap probe in its own process.  Namespace creation
+                # can be queued by the kernel; 20s caused false
+                # CodeIsolationError results before the model was called.
+                timeout=120,
+                check=False,
+                preexec_fn=_outer_sandbox_limits if os.name == "posix" else None,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = _diagnostic(str(exc), secrets=secrets)
+            raise CodeIsolationError(
+                "Strict comparison sandbox probe could not start: "
+                f"{type(exc).__name__}: {detail}"
+            ) from exc
+        if (
+            completed.returncode != 0
+            or _PROBE_SENTINEL not in completed.stdout
+            or not workbook.is_file()
+        ):
+            raise CodeIsolationError(
+                "Strict comparison sandbox probe failed "
+                f"(exit {completed.returncode}): "
+                f"{_diagnostic(completed.stderr, secrets=secrets)}"
+            )
+
+
+def ensure_strict_code_isolation(secrets: tuple[str, ...] = ()) -> dict[str, str]:
+    """Prove that strict isolation and the active venv's openpyxl work."""
+
+    bubblewrap = _require_bubblewrap()
+    key = (
+        str(bubblewrap),
+        sys.executable,
+        sys.prefix,
+        sys.base_prefix,
+        STRICT_ISOLATION_POLICY,
+    )
+    with _PROBE_LOCK:
+        if key not in _PROBE_SUCCESSES:
+            _run_strict_probe(bubblewrap, secrets=secrets)
+            _PROBE_SUCCESSES.add(key)
+    return {
+        "policy": STRICT_ISOLATION_POLICY,
+        "bubblewrap": str(bubblewrap),
+        "python": sys.executable,
+    }
+
+
+def _reset_isolation_probe_cache() -> None:
+    """Clear successful probes for deterministic tests."""
+
+    with _PROBE_LOCK:
+        _PROBE_SUCCESSES.clear()
+
+
+class LocalCodeInterpreter:
+    def __init__(
+        self,
+        workspace: Path,
+        workbook: Path,
+        *,
+        # Financial workbooks routinely need more than 30s for an isolated
+        # openpyxl load/save round-trip (especially while preserving charts).
+        # The per-call ceiling remains 60s; use the full budget by default so
+        # a valid edit is not rolled back merely because serialization is slow.
+        default_timeout: int = 60,
+        max_output_chars: int = 20_000,
+        require_isolation: bool = False,
+        secrets: tuple[str, ...] = (),
+    ) -> None:
+        self.workspace = workspace.resolve()
+        self.workbook = workbook.resolve()
+        self.default_timeout = default_timeout
+        self.max_output_chars = max_output_chars
+        self.require_isolation = require_isolation
+        self._secrets = tuple(secret for secret in secrets if secret)
+        if self.require_isolation:
+            if (
+                self.workspace != self.workbook
+                and self.workspace not in self.workbook.parents
+            ):
+                raise CodeIsolationError("SHEET_WORKBOOK must be inside the isolated workspace")
+            ensure_strict_code_isolation(self._secrets)
+        self.code_dir = self.workspace / "code"
+        self.code_dir.mkdir(exist_ok=True)
+        self._runtime_helper = self.workspace / _RUNTIME_HELPER_NAME
+        self._runtime_helper.write_text(_RUNTIME_HELPER_SOURCE, encoding="utf-8")
+
+    def _bounded_output(self, value: str | bytes | None) -> tuple[str, bool]:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        raw = value or ""
+        redacted = redact_sensitive_text(raw, secrets=self._secrets)
+        truncated = len(raw) > self.max_output_chars or len(redacted) > self.max_output_chars
+        return redacted[: self.max_output_chars], truncated
+
+    def _bounded_diagnostic(self, value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        return _diagnostic(value or "", secrets=self._secrets)
+
+    def _limits(self) -> None:
+        _limits()
+
+    def _command(
+        self,
+        script: Path,
+        *,
+        launcher: Path,
+        marker: Path | None = None,
+    ) -> tuple[list[str], str]:
+        if self.require_isolation:
+            if marker is None:
+                raise CodeIsolationError("Strict sandbox launcher was not prepared")
+            return (
+                _strict_command(
+                    self.workspace,
+                    [
+                        sys.executable,
+                        "-I",
+                        str(launcher),
+                        str(script),
+                        str(marker),
+                    ],
+                ),
+                f"{STRICT_ISOLATION_POLICY}: writable workspace, runtime allowlist, no network",
+            )
+
+        base = [sys.executable, "-I", str(launcher), str(script)]
+        bubblewrap = shutil.which("bwrap") if platform.system() == "Linux" else None
+        if not bubblewrap:
+            return base, "cwd+rlimit (trusted code only)"
+        return (
+            [
+                bubblewrap,
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-net",
+                "--ro-bind",
+                "/",
+                "/",
+                "--bind",
+                str(self.workspace),
+                str(self.workspace),
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--chdir",
+                str(self.workspace),
+                *base,
+            ],
+            "bubblewrap: read-only host, writable workspace, network disabled",
+        )
+
+    def _execute(
+        self,
+        command: list[str],
+        *,
+        environment: dict[str, str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        preexec_fn = _outer_sandbox_limits if self.require_isolation else self._limits
+        return subprocess.run(
+            command,
+            cwd=self.workspace,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            preexec_fn=preexec_fn if os.name == "posix" else None,
+        )
+
+    def run(self, code: str, *, timeout_seconds: int | None = None) -> dict[str, Any]:
+        if not code.strip():
+            raise ToolInputError("code must not be empty")
+        if len(code) > 30_000:
+            raise ToolInputError("code exceeds the 30,000 character limit")
+        if any(marker in code.lower() for marker in _COMPRESSED_PLACEHOLDER_MARKERS):
+            raise ToolInputError(
+                "code contains a compressed/truncated placeholder; send complete runnable Python"
+            )
+        timeout = timeout_seconds or self.default_timeout
+        if timeout < 1 or timeout > 60:
+            raise ToolInputError("timeout_seconds must be between 1 and 60")
+        before_sha256 = _file_sha256(self.workbook)
+        identifier = uuid.uuid4().hex
+        script = self.code_dir / f"snippet_{identifier}.py"
+        script.write_text(code, encoding="utf-8")
+        launcher = self.code_dir / f".launcher_{identifier}.py"
+        mutation_marker = self.code_dir / f".managed_mutation_{identifier}"
+        rollback_snapshot: Path | None = None
+        if self.workbook.is_file():
+            rollback_snapshot = (
+                self.code_dir / f".workbook_before_{identifier}{self.workbook.suffix}"
+            )
+            shutil.copy2(self.workbook, rollback_snapshot)
+        marker: Path | None = None
+        launcher.write_text(
+            f"""import resource
+import runpy
+import os
+import sys
+from pathlib import Path
+
+script_path = sys.argv[1]
+marker_path = sys.argv[2] if len(sys.argv) > 2 else None
+workspace = Path(script_path).resolve().parents[1]
+sys.path.insert(0, str(workspace))
+site_path = os.environ.get("SHEET_PYTHONPATH")
+if site_path:
+    sys.path.insert(0, site_path)
+import {_RUNTIME_HELPER_NAME[:-3]} as sheet_harness
+
+if hasattr(resource, "RLIMIT_NPROC"):
+    resource.setrlimit(
+        resource.RLIMIT_NPROC,
+        ({_MAX_SANDBOX_PROCESSES}, {_MAX_SANDBOX_PROCESSES}),
+    )
+if marker_path is not None:
+    with open(marker_path, "xb"):
+        pass
+sys.argv = [script_path]
+runpy.run_path(
+    script_path,
+    run_name="__main__",
+    init_globals={{"sheet_harness": sheet_harness}},
+)
+""",
+            encoding="utf-8",
+        )
+        if self.require_isolation:
+            marker = self.code_dir / f".sandbox_started_{identifier}"
+        command, sandbox = self._command(script, launcher=launcher, marker=marker)
+        environment = _environment(
+            self.workspace,
+            self.workbook,
+            mutation_marker=mutation_marker,
+        )
+        try:
+            completed = self._execute(command, environment=environment, timeout=timeout)
+            if self.require_isolation and (marker is None or not marker.is_file()):
+                raise CodeIsolationError(
+                    "Strict comparison sandbox did not start; refusing unsandboxed fallback: "
+                    + self._bounded_diagnostic(completed.stderr)
+                )
+            bubblewrap_error: str | None = None
+            namespace_failure = (
+                not self.require_isolation
+                and sandbox.startswith("bubblewrap:")
+                and completed.returncode != 0
+                and any(
+                    marker_text in completed.stderr.lower()
+                    for marker_text in (
+                        "creating new namespace failed",
+                        "operation not permitted",
+                        "permission denied",
+                    )
+                )
+            )
+            if namespace_failure:
+                bubblewrap_error = self._bounded_diagnostic(completed.stderr)
+                completed = self._execute(
+                    [sys.executable, "-I", str(launcher), str(script)],
+                    environment=environment,
+                    timeout=timeout,
+                )
+                sandbox = "cwd+rlimit fallback (bubblewrap unavailable; trusted code only)"
+            stdout, stdout_truncated = self._bounded_output(completed.stdout)
+            stderr, stderr_truncated = self._bounded_output(completed.stderr)
+            truncated = stdout_truncated or stderr_truncated
+            managed_mutation_attempted = mutation_marker.is_file()
+            after_sha256 = _file_sha256(self.workbook)
+            workbook_changed = before_sha256 != after_sha256
+            if completed.returncode != 0 and workbook_changed:
+                rejected_sha256 = after_sha256
+                _restore_workbook(rollback_snapshot, self.workbook)
+                restored_sha256 = _file_sha256(self.workbook)
+                return {
+                    "ok": False,
+                    "exit_code": completed.returncode,
+                    "error": (
+                        "Code execution failed after changing the workbook; all partial edits "
+                        "were rolled back. Correct the script and apply the complete edit again."
+                    ),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "truncated": truncated,
+                    "sandbox": sandbox,
+                    "bubblewrap_error": bubblewrap_error,
+                    "script": str(script.relative_to(self.workspace)),
+                    "workbook_sha256_before": before_sha256,
+                    "workbook_sha256_rejected": rejected_sha256,
+                    "workbook_sha256_after": restored_sha256,
+                    "workbook_changed": False,
+                    "workbook_rolled_back": True,
+                    "managed_mutation_attempted": managed_mutation_attempted,
+                    "helper_module": _RUNTIME_HELPER_NAME,
+                    "message": (
+                        "The failed code transaction was rolled back. Apply one complete edit, "
+                        "save, recalculate, and verify."
+                    ),
+                }
+            if completed.returncode == 0 and workbook_changed:
+                try:
+                    introduced_invalid_references, introduced_formula_text = (
+                        validate_formula_transaction(
+                            rollback_snapshot,
+                            self.workbook,
+                        )
+                    )
+                except Exception as exc:
+                    rejected_sha256 = after_sha256
+                    _restore_workbook(rollback_snapshot, self.workbook)
+                    restored_sha256 = _file_sha256(self.workbook)
+                    return {
+                        "ok": False,
+                        "exit_code": completed.returncode,
+                        "error": (
+                            "Workbook edit rolled back because the saved artifact could not "
+                            "pass formula validation: "
+                            f"{type(exc).__name__}: "
+                            f"{redact_sensitive_text(str(exc), secrets=self._secrets)}"
+                        ),
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "truncated": truncated,
+                        "sandbox": sandbox,
+                        "bubblewrap_error": bubblewrap_error,
+                        "script": str(script.relative_to(self.workspace)),
+                        "workbook_sha256_before": before_sha256,
+                        "workbook_sha256_rejected": rejected_sha256,
+                        "workbook_sha256_after": restored_sha256,
+                        "workbook_changed": False,
+                        "workbook_rolled_back": True,
+                        "managed_mutation_attempted": managed_mutation_attempted,
+                        "helper_module": _RUNTIME_HELPER_NAME,
+                        "message": (
+                            "The invalid workbook edit was rolled back. Save a valid workbook "
+                            "artifact, reopen it, and verify the target range."
+                        ),
+                    }
+                if introduced_invalid_references or introduced_formula_text:
+                    error, validation = _formula_validation_failure(
+                        introduced_invalid_references,
+                        introduced_formula_text,
+                    )
+                    rejected_sha256 = after_sha256
+                    _restore_workbook(rollback_snapshot, self.workbook)
+                    restored_sha256 = _file_sha256(self.workbook)
+                    return {
+                        "ok": False,
+                        "exit_code": completed.returncode,
+                        "error": error,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "truncated": truncated,
+                        "sandbox": sandbox,
+                        "bubblewrap_error": bubblewrap_error,
+                        "script": str(script.relative_to(self.workspace)),
+                        "workbook_sha256_before": before_sha256,
+                        "workbook_sha256_rejected": rejected_sha256,
+                        "workbook_sha256_after": restored_sha256,
+                        "workbook_changed": False,
+                        "workbook_rolled_back": True,
+                        "managed_mutation_attempted": managed_mutation_attempted,
+                        "formula_validation": validation,
+                        "helper_module": _RUNTIME_HELPER_NAME,
+                        "message": (
+                            "The invalid workbook edit was rolled back. Correct every reported "
+                            "formula issue in one complete edit, save, recalculate, and verify."
+                        ),
+                    }
+            return {
+                "ok": completed.returncode == 0,
+                "exit_code": completed.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": truncated,
+                "sandbox": sandbox,
+                "bubblewrap_error": bubblewrap_error,
+                "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": workbook_changed,
+                "managed_mutation_attempted": managed_mutation_attempted,
+                "helper_module": _RUNTIME_HELPER_NAME,
+                "message": (
+                    "Workbook changed. If your script already reopened or inspected the exact "
+                    "target range and stdout shows the expected state, submit_result next; "
+                    "otherwise run one narrow verification or correction only. Do not dump whole "
+                    "sheets or re-derive the full task after a successful save."
+                    if before_sha256 is not None
+                    and after_sha256 is not None
+                    and before_sha256 != after_sha256
+                    else (
+                        _unchanged_workbook_message(
+                            exit_code=completed.returncode,
+                            stderr=stderr,
+                        )
+                    )
+                ),
+            }
+        except subprocess.TimeoutExpired as exc:
+            after_sha256 = _file_sha256(self.workbook)
+            if self.require_isolation and (marker is None or not marker.is_file()):
+                raise CodeIsolationError(
+                    "Strict comparison sandbox timed out before its launcher started"
+                ) from exc
+            workbook_changed = before_sha256 != after_sha256
+            rejected_sha256: str | None = None
+            if workbook_changed:
+                rejected_sha256 = after_sha256
+                _restore_workbook(rollback_snapshot, self.workbook)
+                after_sha256 = _file_sha256(self.workbook)
+            stdout, stdout_truncated = self._bounded_output(exc.stdout)
+            stderr, stderr_truncated = self._bounded_output(exc.stderr)
+            return {
+                "ok": False,
+                "error": (
+                    f"Code execution timed out after {timeout} seconds"
+                    + (
+                        "; partial workbook edits were rolled back"
+                        if workbook_changed
+                        else ""
+                    )
+                ),
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+                "sandbox": sandbox,
+                "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_rejected": rejected_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": False,
+                "workbook_rolled_back": workbook_changed,
+                "managed_mutation_attempted": mutation_marker.is_file(),
+                "helper_module": _RUNTIME_HELPER_NAME,
+            }
+        except OSError as exc:
+            if self.require_isolation:
+                raise CodeIsolationError(
+                    "Strict comparison sandbox could not start: "
+                    f"{type(exc).__name__}: {self._bounded_diagnostic(str(exc))}"
+                ) from exc
+            raise
+        finally:
+            if launcher is not None:
+                launcher.unlink(missing_ok=True)
+            if marker is not None:
+                marker.unlink(missing_ok=True)
+            if rollback_snapshot is not None:
+                rollback_snapshot.unlink(missing_ok=True)
+            mutation_marker.unlink(missing_ok=True)
+
+    def run_bash(self, command: str, *, timeout_seconds: int | None = None) -> dict[str, Any]:
+        """Run a bounded shell command in the isolated task workspace.
+
+        This is the compatibility counterpart of the official protocol's ``bash``
+        tool.  It deliberately shares the Python tool's workspace boundary and
+        transaction semantics: a failing command, timeout, or invalid formula
+        transaction cannot leave a partial managed workbook behind.  The command
+        receives ``SHEET_WORKBOOK`` and ``SHEET_WORKSPACE``; callers should use
+        those variables rather than guessing an artifact path.
+        """
+
+        if not isinstance(command, str) or not command.strip():
+            raise ToolInputError("command must not be empty")
+        if len(command) > 30_000:
+            raise ToolInputError("command exceeds the 30,000 character limit")
+        timeout = timeout_seconds or self.default_timeout
+        if timeout < 1 or timeout > 60:
+            raise ToolInputError("timeout_seconds must be between 1 and 60")
+
+        before_sha256 = _file_sha256(self.workbook)
+        identifier = uuid.uuid4().hex
+        script = self.code_dir / f"bash_{identifier}.sh"
+        script.write_text(command, encoding="utf-8")
+        rollback_snapshot: Path | None = None
+        if self.workbook.is_file():
+            rollback_snapshot = (
+                self.code_dir / f".workbook_before_bash_{identifier}{self.workbook.suffix}"
+            )
+            shutil.copy2(self.workbook, rollback_snapshot)
+        marker: Path | None = None
+        if self.require_isolation:
+            marker = self.code_dir / f".sandbox_started_bash_{identifier}"
+            # Unlike the Python launcher, a shell has no harness-owned entrypoint
+            # that can create the strict-start marker.  Prefix the script with a
+            # workspace-local touch so a missing marker still fails closed.
+            script.write_text(
+                f"touch -- {shlex.quote(str(marker))}\n{command}\n",
+                encoding="utf-8",
+            )
+        command_argv = ["/bin/bash", "--noprofile", "--norc", str(script)]
+        if self.require_isolation:
+            if marker is None:
+                raise CodeIsolationError("Strict sandbox launcher was not prepared")
+            argv = _strict_command(self.workspace, command_argv)
+            sandbox = f"{STRICT_ISOLATION_POLICY}: writable workspace, runtime allowlist, no network"
+        else:
+            argv = command_argv
+            sandbox = "cwd+rlimit (trusted shell)"
+            bubblewrap = shutil.which("bwrap") if platform.system() == "Linux" else None
+            if bubblewrap:
+                argv = [
+                    bubblewrap,
+                    "--die-with-parent",
+                    "--new-session",
+                    "--unshare-net",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--bind",
+                    str(self.workspace),
+                    str(self.workspace),
+                    "--proc",
+                    "/proc",
+                    "--dev",
+                    "/dev",
+                    "--chdir",
+                    str(self.workspace),
+                    *command_argv,
+                ]
+                sandbox = "bubblewrap: read-only host, writable workspace, network disabled"
+
+        environment = _environment(
+            self.workspace,
+            self.workbook,
+            mutation_marker=self.code_dir / f".managed_bash_mutation_{identifier}",
+        )
+        try:
+            completed = self._execute(argv, environment=environment, timeout=timeout)
+            if self.require_isolation and (marker is None or not marker.is_file()):
+                raise CodeIsolationError(
+                    "Strict comparison sandbox did not start; refusing unsandboxed fallback: "
+                    + self._bounded_diagnostic(completed.stderr)
+                )
+            bubblewrap_error: str | None = None
+            namespace_failure = (
+                not self.require_isolation
+                and sandbox.startswith("bubblewrap:")
+                and completed.returncode != 0
+                and any(
+                    marker_text in completed.stderr.lower()
+                    for marker_text in (
+                        "creating new namespace failed",
+                        "operation not permitted",
+                        "permission denied",
+                    )
+                )
+            )
+            if namespace_failure:
+                bubblewrap_error = self._bounded_diagnostic(completed.stderr)
+                completed = self._execute(command_argv, environment=environment, timeout=timeout)
+                sandbox = "cwd+rlimit fallback (bubblewrap unavailable; trusted shell)"
+
+            stdout, stdout_truncated = self._bounded_output(completed.stdout)
+            stderr, stderr_truncated = self._bounded_output(completed.stderr)
+            after_sha256 = _file_sha256(self.workbook)
+            workbook_changed = before_sha256 != after_sha256
+
+            def rollback_result(error: str) -> dict[str, Any]:
+                rejected_sha256 = after_sha256
+                if workbook_changed:
+                    _restore_workbook(rollback_snapshot, self.workbook)
+                restored_sha256 = _file_sha256(self.workbook)
+                return {
+                    "ok": False,
+                    "exit_code": completed.returncode,
+                    "error": error,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "truncated": stdout_truncated or stderr_truncated,
+                    "sandbox": sandbox,
+                    "bubblewrap_error": bubblewrap_error,
+                    "script": str(script.relative_to(self.workspace)),
+                    "workbook_sha256_before": before_sha256,
+                    "workbook_sha256_rejected": rejected_sha256,
+                    "workbook_sha256_after": restored_sha256,
+                    "workbook_changed": False,
+                    "workbook_rolled_back": workbook_changed,
+                    "managed_mutation_attempted": workbook_changed,
+                }
+
+            if completed.returncode != 0:
+                return rollback_result(
+                    "Bash command failed"
+                    + ("; partial workbook edits were rolled back" if workbook_changed else "")
+                )
+            if workbook_changed:
+                try:
+                    invalid_refs, formula_text = validate_formula_transaction(
+                        rollback_snapshot, self.workbook
+                    )
+                except Exception as exc:
+                    return rollback_result(
+                        "Workbook edit rolled back because the saved artifact could not pass "
+                        f"formula validation: {type(exc).__name__}: "
+                        f"{self._bounded_diagnostic(str(exc))}"
+                    )
+                if invalid_refs or formula_text:
+                    error, _validation = _formula_validation_failure(invalid_refs, formula_text)
+                    return rollback_result(error)
+            return {
+                "ok": True,
+                "exit_code": completed.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+                "sandbox": sandbox,
+                "bubblewrap_error": bubblewrap_error,
+                "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": workbook_changed,
+                "managed_mutation_attempted": workbook_changed,
+                "message": (
+                    "Workbook changed. Verify the exact target range, then submit_result."
+                    if workbook_changed
+                    else _unchanged_workbook_message(
+                        exit_code=completed.returncode, stderr=stderr
+                    )
+                ),
+            }
+        except subprocess.TimeoutExpired as exc:
+            after_sha256 = _file_sha256(self.workbook)
+            workbook_changed = before_sha256 != after_sha256
+            if workbook_changed:
+                _restore_workbook(rollback_snapshot, self.workbook)
+                after_sha256 = _file_sha256(self.workbook)
+            stdout, stdout_truncated = self._bounded_output(exc.stdout)
+            stderr, stderr_truncated = self._bounded_output(exc.stderr)
+            return {
+                "ok": False,
+                "error": f"Bash command timed out after {timeout} seconds"
+                + ("; partial workbook edits were rolled back" if workbook_changed else ""),
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+                "sandbox": sandbox,
+                "script": str(script.relative_to(self.workspace)),
+                "workbook_sha256_before": before_sha256,
+                "workbook_sha256_after": after_sha256,
+                "workbook_changed": False,
+                "workbook_rolled_back": workbook_changed,
+                "managed_mutation_attempted": workbook_changed,
+            }
+        finally:
+            script.unlink(missing_ok=True)
+            if marker is not None:
+                marker.unlink(missing_ok=True)
+            if rollback_snapshot is not None:
+                rollback_snapshot.unlink(missing_ok=True)
+            environment_marker = Path(environment["SHEET_MUTATION_MARKER"])
+            environment_marker.unlink(missing_ok=True)

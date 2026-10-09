@@ -1,0 +1,20 @@
+{
+  "name": "spreadsheet-harness-financial",
+  "overrides": {},
+  "plugins": [
+    "act-code-plus-formula-validation",
+    "observe-profile-compact",
+    "control-ours",
+    "knowledge-structure",
+    "knowledge-formula",
+    "knowledge-manipulation",
+    "knowledge-analysis",
+    "knowledge-visualization",
+    "knowledge-verification",
+    "knowledge-memory",
+    "verify-formula-runtime",
+    "repair-date-text",
+    "knowledge-financial-model",
+    "observe-financial-targets"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "spreadsheet-harness-financial",
+  "overrides": {
+    "observe-profile-compact": {
+      "max-formula-clusters-per-sheet": 4,
+      "max-regions-per-sheet": 4,
+      "max-rendered-chars": 6000
+    }
+  },
+  "plugins": [
+    "act-code-plus-formula-validation",
+    "observe-profile-compact",
+    "control-ours",
+    "knowledge-structure",
+    "knowledge-formula",
+    "knowledge-manipulation",
+    "knowledge-analysis",
+    "knowledge-visualization",
+    "knowledge-verification",
+    "knowledge-memory",
+    "verify-formula-runtime",
+    "repair-date-text",
+    "knowledge-financial-model",
+    "observe-task-boundaries",
+    "observe-financial-targets"
+  ]
+}

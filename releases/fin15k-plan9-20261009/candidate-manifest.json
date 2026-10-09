@@ -1,0 +1,586 @@
+{
+  "schema_version": "fin15k-plugin-plan9-codex-v1",
+  "status": "materialized-not-evaluated",
+  "baseline_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+  "baseline_artifact_manifest_sha256": "67a79c641a2fb8147a6d238c4743a7ac21d616d67b8fdf4315ba8028180b9d68",
+  "candidate_count": 9,
+  "model_calls": 0,
+  "evaluation_calls": 0,
+  "historical_proposals_reused": false,
+  "spreadsheetbench_heldout_used": false,
+  "measured_improvement": null,
+  "candidates": [
+    {
+      "candidate_id": "fin15k-plan9-50-h-only-c01",
+      "scope": "harness",
+      "mutation_count": 3,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "control-ours",
+          "surface": "implementation"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-task-boundaries",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-formula",
+          "surface": "prompt"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "0c832ea183a13af44ea540d076f5a2b17812c7aef5c8e7e4d4311a55982e989b",
+      "request_sha256": "26ba3cfb42514240109b23dbc89313e18e3752c44016f47eed2e17cb44f6dd32",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 50,
+      "mechanism": "h-only",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-h-only-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-50-h-only-c01/artifact",
+      "revision_sha256": "109060d1091e14d7197f2299b25f13a11d51acdaa1b005d3081292a4f8677efc",
+      "artifact_manifest_sha256": "3a1295c8899fec2a2e0fb18cad9abfa41522e723a5909eea7ecc0be722b1bef9",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-task-boundaries"
+      ],
+      "response": "size-50/h-only/response.json",
+      "authored_request_sha256": "13ba6104883c9398129abeda342284cf30241a3705481f713db8b2496f3b006b",
+      "overlay_manifest": {
+        "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
+        "src/spreadsheet_harness/arms.py": "240436e59d27430f4fb72a5b06c4b032112744f43fa5904f7242c221e5e8b030",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "8dccd35691dfdfcbcdb02841410d3dc1baf968329ee9ef7f5c552fb3f09fc4e0",
+        "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "f3dcad202a21fda243da81b3233c66199e1893fd81dafd06680087842c7b4219"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "d0beb3f132cb1b64072eb66b03b77518b1b07f109b08dd3023174dccd5c258c0"
+    },
+    {
+      "candidate_id": "fin15k-plan9-50-d-only-c01",
+      "scope": "domain",
+      "mutation_count": 3,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "prompt"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-financial-targets",
+          "surface": "implementation"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "901b6553016b92db0aeeaf193468dff313541b1558dd9ead2d5cbcf21d8d80d6",
+      "request_sha256": "01ec4f96a6fb7812762a197094ac0b9d118f2422d4417e1588290d04a6d2d7a9",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 50,
+      "mechanism": "d-only",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-d-only-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-50-d-only-c01/artifact",
+      "revision_sha256": "f60e0120a70ddc64393641b9aaae894b612ae433fc72a5adb397c36ccf4cdb5b",
+      "artifact_manifest_sha256": "e69e99902b45da0d1fc326554866c1959a0753967d645b7903410da29571be88",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-financial-targets"
+      ],
+      "response": "size-50/d-only/response.json",
+      "authored_request_sha256": "61978f560464f1f5f6ee749228ea23ba1eb04f75ba0795ca81b7ecf39e75a557",
+      "overlay_manifest": {
+        "skills/spreadsheet-financial-model/SKILL.md": "7c773942c964cc05ef2088c309a324684a8fc0c0877e26e47eb34ea2c7610930",
+        "src/spreadsheet_harness/financial_model_repairs.py": "c3c34bd41771d6d3cc238321f6988958e043f610428b82531348a9f414fb8834",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "69fd54139c7767cd9b743277c4046cd7ead1cdb6b634a12f278d669aca98bf5a",
+        "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "bc9539ccdbaead9bd5acd1206c24889c142499299bb9afceea8ca180f0c70d7e"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "76165e3b3837a7c1ebe1a50b7aa0818573f9e55aed962c2068ef1d14f851ee58"
+    },
+    {
+      "candidate_id": "fin15k-plan9-50-joint-c01",
+      "scope": "joint",
+      "mutation_count": 6,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "control-ours",
+          "surface": "implementation"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-task-boundaries",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-formula",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "prompt"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-financial-targets",
+          "surface": "implementation"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "5123a23f5dff4ac7104512d0cbf8cda2024acad558601560f033c46f3bb5b131",
+      "request_sha256": "8a9efbc80fca374fc2c3fc877874494c2cb311b858282d22f970f3323dc908e8",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 50,
+      "mechanism": "joint",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-50-joint-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-50-joint-c01/artifact",
+      "revision_sha256": "5f1352761e9b779fe3997b52ae6f3693a344ffce7b25813585ee36624ccdefef",
+      "artifact_manifest_sha256": "d0361d38ba3475c4abda9d3f0db41ae4d2bc8aaac2c02853889bf2362fdf84d5",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-task-boundaries",
+        "observe-financial-targets"
+      ],
+      "response": "size-50/joint/response.json",
+      "authored_request_sha256": "ed3394a976bf975ceade9dd1bbc923acbe1e7cc91a128a6f8f45d259af81ec8b",
+      "overlay_manifest": {
+        "skills/spreadsheet-financial-model/SKILL.md": "7c773942c964cc05ef2088c309a324684a8fc0c0877e26e47eb34ea2c7610930",
+        "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
+        "src/spreadsheet_harness/arms.py": "240436e59d27430f4fb72a5b06c4b032112744f43fa5904f7242c221e5e8b030",
+        "src/spreadsheet_harness/financial_model_repairs.py": "c3c34bd41771d6d3cc238321f6988958e043f610428b82531348a9f414fb8834",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "a9dc56fd3a34095a94de94afa9d977e27ea49700d30d08602fee99fd6c62f340",
+        "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "bc9539ccdbaead9bd5acd1206c24889c142499299bb9afceea8ca180f0c70d7e",
+        "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "f3dcad202a21fda243da81b3233c66199e1893fd81dafd06680087842c7b4219"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "fe94b6b5c9517a9de3aa9c038b78c97f25b06ac4785bc5721a16c579182f7b7f"
+    },
+    {
+      "candidate_id": "fin15k-plan9-200-h-only-c01",
+      "scope": "harness",
+      "mutation_count": 4,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "control-ours",
+          "surface": "implementation"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-task-boundaries",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-formula",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-verification",
+          "surface": "prompt"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "9d6038c02b2c18773d28680337557e710fb1b716e3cc75973a6eb817722183da",
+      "request_sha256": "71403a189122ca762d4c711659db4703a3ce9e4bddfd6d9e397ebab6eb0e7e3b",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 200,
+      "mechanism": "h-only",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-h-only-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-200-h-only-c01/artifact",
+      "revision_sha256": "0da908874e0198e813503f8d699d1946398a3e5b768b45565305a95976428ed2",
+      "artifact_manifest_sha256": "1c0dc6e5208349398cdd7ca63f93ba4536a4905e6f76cf1009007763d632f344",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-task-boundaries"
+      ],
+      "response": "size-200/h-only/response.json",
+      "authored_request_sha256": "541a7039e1452cfd7107ca4e4ac2c09b66680592bb98da93fea4bf1776be3c12",
+      "overlay_manifest": {
+        "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
+        "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
+        "src/spreadsheet_harness/arms.py": "c8f8178349ab3068851c64a61dd625f628f36354835a166cec4a463ca4845bbd",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "8dccd35691dfdfcbcdb02841410d3dc1baf968329ee9ef7f5c552fb3f09fc4e0",
+        "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "39f6c670f1643973fd827734c8fd788b3dc42f613dc89cd27fa96fa5f1dc0590"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "6a84343f3ab8596b5969d0cf0bb715f2d0efd8e4c044694c3d51c7047bba3c43"
+    },
+    {
+      "candidate_id": "fin15k-plan9-200-d-only-c01",
+      "scope": "domain",
+      "mutation_count": 3,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "prompt"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-financial-targets",
+          "surface": "implementation"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "231045718a2dc865cb5e682c54499e4af5aee7754ef38d03c8c32e7f561cb72e",
+      "request_sha256": "abec00640071724e05a252ea068aa1c6b049e7a66f4f352e0572957d7a72ad42",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 200,
+      "mechanism": "d-only",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-d-only-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-200-d-only-c01/artifact",
+      "revision_sha256": "45006c4ecd2b149f640b9d71b3697a59bddf37ae8e2669535ce0a07582a215eb",
+      "artifact_manifest_sha256": "ec30d603fb018bc9965b88e78bbaa8ce76f9f2312bd3f460c0ec92ab39e681bd",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-financial-targets"
+      ],
+      "response": "size-200/d-only/response.json",
+      "authored_request_sha256": "63c673184b463b4a32a4e4bb13444f8fed871b6398af63850fe325fdd4f58061",
+      "overlay_manifest": {
+        "skills/spreadsheet-financial-model/SKILL.md": "096179e1701d41a30227a735cb45bb38478acf8c6241a9e801947bf0dd0a8cb0",
+        "src/spreadsheet_harness/financial_model_repairs.py": "88662c376ab9313333d75773299b1e68af61076f2d1d1ce53c12b8598f40f53c",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "69fd54139c7767cd9b743277c4046cd7ead1cdb6b634a12f278d669aca98bf5a",
+        "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "75661d49a9306fe0fa5d187ef494f434579598d08d2caaec1fd06ca21727d50d"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "7ff463973f955638bde7f5ad6c8cb04a8f007ef7ce7c5007845216a33707e12f"
+    },
+    {
+      "candidate_id": "fin15k-plan9-200-joint-c01",
+      "scope": "joint",
+      "mutation_count": 7,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "control-ours",
+          "surface": "implementation"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-task-boundaries",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-formula",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-verification",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "prompt"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-financial-targets",
+          "surface": "implementation"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "dd9499461021daa60a9ec5beabd722ec73a427cfcc402f9c9ca368f1c1546df5",
+      "request_sha256": "efef3ca7065a66c0818d356e9f7b98d3e162a28f4e6d7adcf8bd576e582a1c1a",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 200,
+      "mechanism": "joint",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-200-joint-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-200-joint-c01/artifact",
+      "revision_sha256": "809a97179514bf5259002d8da4ffe60662309fcc30441d2c157dbc6dd8e388f5",
+      "artifact_manifest_sha256": "ada724e9b762e2a4cbbce67b9c363252e6fb01b6fa2cd6030d16b6a8e14fff64",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-task-boundaries",
+        "observe-financial-targets"
+      ],
+      "response": "size-200/joint/response.json",
+      "authored_request_sha256": "f0594d8bb00a9d81d9d86c4991e8cc14e93d3f7b6b848e7f142d8fd67c4f62a5",
+      "overlay_manifest": {
+        "skills/spreadsheet-financial-model/SKILL.md": "096179e1701d41a30227a735cb45bb38478acf8c6241a9e801947bf0dd0a8cb0",
+        "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
+        "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
+        "src/spreadsheet_harness/arms.py": "c8f8178349ab3068851c64a61dd625f628f36354835a166cec4a463ca4845bbd",
+        "src/spreadsheet_harness/financial_model_repairs.py": "88662c376ab9313333d75773299b1e68af61076f2d1d1ce53c12b8598f40f53c",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "a9dc56fd3a34095a94de94afa9d977e27ea49700d30d08602fee99fd6c62f340",
+        "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "75661d49a9306fe0fa5d187ef494f434579598d08d2caaec1fd06ca21727d50d",
+        "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "39f6c670f1643973fd827734c8fd788b3dc42f613dc89cd27fa96fa5f1dc0590"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "8302985977b2dd6e44febd07ceb729db3adb1e3b0855a507e64ff4a0a8763820"
+    },
+    {
+      "candidate_id": "fin15k-plan9-500-h-only-c01",
+      "scope": "harness",
+      "mutation_count": 5,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "control-ours",
+          "surface": "implementation"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-task-boundaries",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-formula",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-verification",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "observe-profile-compact",
+          "surface": "config"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "20629038c94eb2b32e27e2e6b1ad692ce06a7c8d71907e71f151f4eeec43d737",
+      "request_sha256": "4033016161fa4c68fb5a73ab03d2ce257e3ab9a318fca83783acd651a42bd185",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 500,
+      "mechanism": "h-only",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-h-only-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-500-h-only-c01/artifact",
+      "revision_sha256": "4b797cd24f70081322e63f998500bfbd36d97f25118dea37ff358eca24d87fd0",
+      "artifact_manifest_sha256": "6211fe44cd38f566f1b729194ccb45257503e915fec53167ad603cd955ec2684",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-task-boundaries"
+      ],
+      "response": "size-500/h-only/response.json",
+      "authored_request_sha256": "c2c0c0d5a55c53419b1da59abb228d33a83d3e92069e9d2ea9165aaa1d05a1c6",
+      "overlay_manifest": {
+        "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
+        "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
+        "src/spreadsheet_harness/arms.py": "a8be539e20fcea4bbe10957bf09076ee1da8da79961651848e3b99fee9e8671f",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "8dccd35691dfdfcbcdb02841410d3dc1baf968329ee9ef7f5c552fb3f09fc4e0",
+        "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "9118f39bd98c951565a771da052a6372fb9c646176c79c1ccd17dbc63765ac09"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "7171ce46c885d4c8e25d05c563770aa00ca9c2ae1cc6e6cf87c8212374eba69e"
+    },
+    {
+      "candidate_id": "fin15k-plan9-500-d-only-c01",
+      "scope": "domain",
+      "mutation_count": 3,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "prompt"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-financial-targets",
+          "surface": "implementation"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "fbf70dd3745bf5877634ac2fbbf26a2262d682a852132ac0e9af9f80a5e3a5b0",
+      "request_sha256": "626bbe9ec8b6ac8df196e796eff71d3e23d8b37e99c724712924467f98d85d40",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 500,
+      "mechanism": "d-only",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-d-only-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-500-d-only-c01/artifact",
+      "revision_sha256": "03f61a50e00f657940fe2ca25017b899ece7a726b47a2a8553de71a8165d11ab",
+      "artifact_manifest_sha256": "088fd61e9a704d8ff29d6e5b95fd152942c1e13af542488656686c4b323546eb",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-financial-targets"
+      ],
+      "response": "size-500/d-only/response.json",
+      "authored_request_sha256": "4086ac96a62da532f6ba4d371a949982c1d380f013bff688a7d459c4be5e735d",
+      "overlay_manifest": {
+        "skills/spreadsheet-financial-model/SKILL.md": "6450584506a2ceb790e79e0d951953985ea48c8a8795690add7dac853dd1f573",
+        "src/spreadsheet_harness/financial_model_repairs.py": "00f8dc06061bac80f13cca1acfa9a0c3a809466b24084700216a47bc8cc8a062",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "69fd54139c7767cd9b743277c4046cd7ead1cdb6b634a12f278d669aca98bf5a",
+        "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "b1d206c5c5c3db3c276eb37a63a8e003fc744a57120d7be11ef86bdab3c2bfb0"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "3baa038b0f6aa5798a8d9977d693c25529ffd8dc41c79ad9bb870f42a9627942"
+    },
+    {
+      "candidate_id": "fin15k-plan9-500-joint-c01",
+      "scope": "joint",
+      "mutation_count": 8,
+      "operations": [
+        {
+          "operation": "edit",
+          "target_plugin": "control-ours",
+          "surface": "implementation"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-task-boundaries",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-formula",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-verification",
+          "surface": "prompt"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "observe-profile-compact",
+          "surface": "config"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "implementation"
+        },
+        {
+          "operation": "edit",
+          "target_plugin": "knowledge-financial-model",
+          "surface": "prompt"
+        },
+        {
+          "operation": "synthesize",
+          "target_plugin": "observe-financial-targets",
+          "surface": "implementation"
+        }
+      ],
+      "base_revision_sha256": "522324bf96fe720993ab1b45ae7d533463e179885040f51220fa5692108c9dbd",
+      "proposal_sha256": "1cd1aa4f62f57007a5ef6a0dc4ec3a336461c8ffbae3478d2f5acd0635dd1fae",
+      "request_sha256": "1c98cba4c0611197515b6d0b2892cad261d9df76e9bb1c3e416bb14b091b6520",
+      "status": "materialized-not-evaluated",
+      "measured_delta": null,
+      "promoted": false,
+      "evidence_size": 500,
+      "mechanism": "joint",
+      "candidate_dir": "materialization/candidates/r000001-fin15k-plan9-500-joint-c01",
+      "artifact": "materialization/candidates/r000001-fin15k-plan9-500-joint-c01/artifact",
+      "revision_sha256": "8e818d156a5be2385b6e9873358fdb41327ba86cbcbde4786d3e86d61dbf7426",
+      "artifact_manifest_sha256": "82b620150b292f25306b3bf0a4584b65485367c27ccb256cff53a5b4ac6fd440",
+      "kernel_manifest_sha256": "f98ca976f43840baa6ab5c2c41e218917c2774a6f1177b8e4f506927d24ce058",
+      "candidate_hooks": [
+        "observe-task-boundaries",
+        "observe-financial-targets"
+      ],
+      "response": "size-500/joint/response.json",
+      "authored_request_sha256": "a4561a37b9c23274c133def4e49cba18fc4a466717fb4329b158bb135b139ad8",
+      "overlay_manifest": {
+        "skills/spreadsheet-financial-model/SKILL.md": "6450584506a2ceb790e79e0d951953985ea48c8a8795690add7dac853dd1f573",
+        "skills/spreadsheet-formula/SKILL.md": "a3e90d5fe7c7dc994e75c797515eed644480ba023bc0e39f91bbd379acadc4f0",
+        "skills/spreadsheet-verification/SKILL.md": "941bb72b47c690adaf4d65e61be55aca8e5ca3c65da32a049624d24ecc6cd140",
+        "src/spreadsheet_harness/arms.py": "a8be539e20fcea4bbe10957bf09076ee1da8da79961651848e3b99fee9e8671f",
+        "src/spreadsheet_harness/financial_model_repairs.py": "00f8dc06061bac80f13cca1acfa9a0c3a809466b24084700216a47bc8cc8a062",
+        "src/spreadsheet_harness/generated_plugins/manifest.json": "a9dc56fd3a34095a94de94afa9d977e27ea49700d30d08602fee99fd6c62f340",
+        "src/spreadsheet_harness/generated_plugins/observe_financial_targets.py": "b1d206c5c5c3db3c276eb37a63a8e003fc744a57120d7be11ef86bdab3c2bfb0",
+        "src/spreadsheet_harness/generated_plugins/observe_task_boundaries.py": "9118f39bd98c951565a771da052a6372fb9c646176c79c1ccd17dbc63765ac09"
+      },
+      "deleted_files": [],
+      "source_request_sha256": "77dc640487f200974fddf3790ede29e16840219c98ecabdc3b5b4ad00190033c"
+    }
+  ],
+  "design_counts": {
+    "50": {
+      "all_requested_edits_correct_but_task_failed": 6,
+      "fail": 33,
+      "generic_formula_band_completion": 1,
+      "non_target_blank_written": 10,
+      "pass": 17,
+      "read_only_deadline": 14,
+      "regression_loss": 26,
+      "requested_output_missing": 3,
+      "runtime_passed_but_task_failed": 31,
+      "runtime_validation_failed": 3,
+      "wrong_nonblank_value_or_other": 20
+    },
+    "200": {
+      "all_requested_edits_correct_but_task_failed": 27,
+      "fail": 119,
+      "generic_formula_band_completion": 6,
+      "non_target_blank_written": 45,
+      "pass": 81,
+      "read_only_deadline": 47,
+      "regression_loss": 92,
+      "requested_output_missing": 10,
+      "runtime_passed_but_task_failed": 113,
+      "runtime_validation_failed": 11,
+      "wrong_nonblank_value_or_other": 64
+    },
+    "500": {
+      "all_requested_edits_correct_but_task_failed": 60,
+      "fail": 283,
+      "generic_formula_band_completion": 11,
+      "non_target_blank_written": 111,
+      "pass": 217,
+      "read_only_deadline": 113,
+      "regression_loss": 218,
+      "requested_output_missing": 31,
+      "runtime_passed_but_task_failed": 267,
+      "runtime_validation_failed": 18,
+      "wrong_nonblank_value_or_other": 141
+    }
+  },
+  "builder_source_sha256": {
+    "tools/build_fin15k_plugin_candidates_20261009.py": "039ac02ed9a0c52b71408ae5f4f048aeb9dda7a4a6014e708861ed1819c43106",
+    "tools/fin15k_candidate_sources_20261009/harness.py": "aa5b9ced53412f77c9c34eb274eb8cdea9b0684606ff22fe8f606f3e042c5151",
+    "tools/fin15k_candidate_sources_20261009/domain.py": "5609725f9a292aaaf6f1d68a57029a5de7912011de0db56127498396b1b300d6",
+    "tools/fin15k_candidate_sources_20261009/observers.py": "f67ebe560bb2b1df0a2e7abd6e2332f2f39e5f04b239691268a60a771168695a"
+  },
+  "distribution": "baseline-plus-exact-source-overlays-v1",
+  "source_candidate_manifest_sha256": "12d6c44599bde12bb9523409acc95244e6ee0b2c0e4f946ba684087129d1a968"
+}

@@ -1,0 +1,2266 @@
+"""Contract-constrained plugin compositions for harness evolution.
+
+The scorer, sandbox, session log, and benchmark runner are deliberately outside
+this module.  Evolution may jointly edit, add and compose plugins within
+code-owned contracts, but it may not synthesize kernel hooks or permissions.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
+from statistics import fmean, pvariance
+from types import MappingProxyType
+from typing import Any, Literal
+
+from .errors import HarnessError
+
+PluginKind = Literal["observe", "act", "control", "verify", "knowledge", "repair", "workflow"]
+SpreadsheetCapability = Literal[
+    "structure",
+    "formula",
+    "manipulation",
+    "analysis",
+    "visualization",
+    "verification",
+    "memory",
+    "composition",
+]
+Scalar = str | int | float | bool | None
+EvolutionSurface = Literal["config", "implementation", "prompt", "description"]
+
+_IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?$")
+_CANDIDATE_PLUGIN_NAME = re.compile(
+    r"^(observe|control|verify|repair|knowledge)-[a-z0-9]+(?:-[a-z0-9]+)*$"
+)
+_CANDIDATE_ENTRYPOINT = re.compile(r"^generated_plugins\.[a-z][a-z0-9_]*:on_hook$")
+CANDIDATE_PLUGIN_MANIFEST_PATH = "src/spreadsheet_harness/generated_plugins/manifest.json"
+CANDIDATE_PLUGIN_HOOKS = frozenset({"before_task", "before_submit", "after_run"})
+_CANDIDATE_PLUGIN_PERMISSIONS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "observe": frozenset({"workbook.read"}),
+        "control": frozenset({"workbook.read"}),
+        "verify": frozenset({"workbook.read", "subprocess.execute"}),
+        "repair": frozenset({"workbook.read", "workbook.write"}),
+        "knowledge": frozenset({"workbook.read", "workbook.write"}),
+    }
+)
+# These slots are still served by the legacy arm adapter, not by an additive
+# hook.  A new plugin cannot falsely claim that it replaces a built-in adapter.
+_LEGACY_RUNTIME_CAPABILITIES = frozenset(
+    {
+        "action.spreadsheet",
+        "context.workbook-profile",
+        "policy.solve",
+        "workflow.paper",
+        "knowledge.spreadsheet-financial-model",
+        "verification.formula-runtime",
+        "repair.date-text",
+        "policy.debugging-detector",
+    }
+)
+
+# Canonical plugin names use ``<kind>-<responsibility>``.  The legacy names
+# are accepted at input boundaries so historical run specs and compositions
+# remain replayable, but all newly resolved manifests emit the canonical form.
+LEGACY_PLUGIN_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "runtime-code-interpreter": "act-code-interpreter",
+        "runtime-native-tools": "act-native-tools",
+        "runtime-code-plus-formula-validation": "act-code-plus-formula-validation",
+        "profile-deterministic-full": "observe-profile-full",
+        "profile-deterministic-compact": "observe-profile-compact",
+        "policy-bare": "control-bare",
+        "policy-profile": "control-profile",
+        "policy-native": "control-native",
+        "policy-ours": "control-ours",
+        "skill-spreadsheet-core": "knowledge-core",
+        "skill-spreadsheet-structure": "knowledge-structure",
+        "skill-spreadsheet-formula": "knowledge-formula",
+        "skill-spreadsheet-financial-model": "knowledge-financial-model",
+        "skill-spreadsheet-manipulation": "knowledge-manipulation",
+        "skill-spreadsheet-analysis": "knowledge-analysis",
+        "skill-spreadsheet-visualization": "knowledge-visualization",
+        "skill-spreadsheet-verification": "knowledge-verification",
+        "skill-spreadsheet-memory": "knowledge-memory",
+        "skill-spreadsheet-coordination": "knowledge-coordination",
+        "verifier-formula-runtime": "verify-formula-runtime",
+    }
+)
+
+
+def canonical_plugin_name(name: str) -> str:
+    """Normalize a plugin name while preserving compatibility with old specs."""
+
+    normalized = str(name).strip()
+    return LEGACY_PLUGIN_ALIASES.get(normalized, normalized)
+
+ALLOWED_PLUGIN_HOOKS = frozenset(
+    {
+        "before_task",
+        "before_model_request",
+        "tool_registry",
+        "after_tool",
+        "before_submit",
+        "after_run",
+    }
+)
+
+KERNEL_CAPABILITIES = frozenset(
+    {
+        "agent.execute",
+        "artifact.validate",
+        "model.request",
+        "trajectory.record",
+        "workbook.read",
+        "workbook.write",
+    }
+)
+
+SPREADSHEET_CAPABILITIES: tuple[SpreadsheetCapability, ...] = (
+    "structure",
+    "formula",
+    "manipulation",
+    "analysis",
+    "visualization",
+    "verification",
+    "memory",
+    "composition",
+)
+
+
+def _identifier(value: str, *, label: str) -> str:
+    normalized = str(value).strip()
+    if not _IDENTIFIER.fullmatch(normalized):
+        raise ValueError(f"{label} must be a lowercase dotted/dashed identifier: {value!r}")
+    return normalized
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def _scalar(value: Any, *, label: str) -> Scalar:
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise ValueError(f"{label} must be a finite JSON scalar")
+
+
+@dataclass(frozen=True)
+class ConfigField:
+    """One code-owned, evolvable scalar configuration field."""
+
+    name: str
+    value_type: Literal["string", "integer", "number", "boolean"]
+    default: Scalar
+    choices: tuple[Scalar, ...] = ()
+    minimum: float | None = None
+    maximum: float | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier(self.name, label="config field"))
+        if self.value_type not in {"string", "integer", "number", "boolean"}:
+            raise ValueError(f"Unsupported config type: {self.value_type!r}")
+        if self.minimum is not None and not math.isfinite(self.minimum):
+            raise ValueError("minimum must be finite")
+        if self.maximum is not None and not math.isfinite(self.maximum):
+            raise ValueError("maximum must be finite")
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("minimum must not exceed maximum")
+        normalized_choices = tuple(
+            _scalar(value, label=f"choice for {self.name}") for value in self.choices
+        )
+        object.__setattr__(self, "choices", normalized_choices)
+        self.validate(self.default)
+
+    def validate(self, value: Any) -> Scalar:
+        value = _scalar(value, label=self.name)
+        valid_type = {
+            "string": isinstance(value, str),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "number": isinstance(value, int | float) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
+        }[self.value_type]
+        if not valid_type:
+            raise ValueError(f"Plugin config {self.name!r} must be {self.value_type}")
+        if self.choices and value not in self.choices:
+            raise ValueError(f"Plugin config {self.name!r} must be one of {list(self.choices)!r}")
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            if self.minimum is not None and value < self.minimum:
+                raise ValueError(f"Plugin config {self.name!r} is below its minimum")
+            if self.maximum is not None and value > self.maximum:
+                raise ValueError(f"Plugin config {self.name!r} exceeds its maximum")
+        return value
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "type": self.value_type,
+            "default": self.default,
+            "choices": list(self.choices),
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+        }
+
+
+@dataclass(frozen=True)
+class EvolutionStrategy:
+    """Code-owned evidence and update policy for one plugin family."""
+
+    evidence: tuple[str, ...]
+    operators: tuple[str, ...]
+    validation_contexts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for attribute, label in (
+            ("evidence", "evolution evidence"),
+            ("operators", "evolution operator"),
+            ("validation_contexts", "validation context"),
+        ):
+            values = tuple(
+                _identifier(str(value), label=label) for value in getattr(self, attribute)
+            )
+            if not values or len(values) != len(set(values)):
+                raise ValueError(f"{label} entries must be non-empty and unique")
+            object.__setattr__(self, attribute, values)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "evidence": list(self.evidence),
+            "operators": list(self.operators),
+            "validation_contexts": list(self.validation_contexts),
+        }
+
+
+@dataclass(frozen=True)
+class PluginEditPolicy:
+    """Code-owned authority for one evolvable plugin surface.
+
+    Paths are repository-relative POSIX glob patterns.  They are deliberately
+    separate from a proposal: the proposal may choose an allowed operator and
+    content, but it cannot enlarge its own write authority.
+    """
+
+    surface: EvolutionSurface
+    paths: tuple[str, ...]
+    operators: tuple[str, ...]
+    max_changed_files: int = 1
+    max_patch_bytes: int = 128_000
+
+    def __post_init__(self) -> None:
+        if self.surface not in {"config", "implementation", "prompt", "description"}:
+            raise ValueError(f"Unsupported plugin edit surface: {self.surface!r}")
+        normalized_paths: list[str] = []
+        for raw in self.paths:
+            path = str(raw).strip().replace("\\", "/")
+            parts = PurePosixPath(path).parts
+            if (
+                not path
+                or path.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise ValueError(f"Plugin edit path must be contained and relative: {raw!r}")
+            normalized_paths.append(path)
+        if len(normalized_paths) != len(set(normalized_paths)):
+            raise ValueError("Plugin edit paths must be unique")
+        normalized_operators = tuple(
+            _identifier(str(value), label="plugin edit operator") for value in self.operators
+        )
+        if not normalized_operators or len(normalized_operators) != len(
+            set(normalized_operators)
+        ):
+            raise ValueError("Plugin edit operators must be non-empty and unique")
+        if (
+            isinstance(self.max_changed_files, bool)
+            or not isinstance(self.max_changed_files, int)
+            or self.max_changed_files < 1
+        ):
+            raise ValueError("max_changed_files must be a positive integer")
+        if (
+            isinstance(self.max_patch_bytes, bool)
+            or not isinstance(self.max_patch_bytes, int)
+            or self.max_patch_bytes < 1
+        ):
+            raise ValueError("max_patch_bytes must be a positive integer")
+        if self.surface == "config" and normalized_paths:
+            raise ValueError("Config edit policy must not grant filesystem paths")
+        if self.surface != "config" and not normalized_paths:
+            raise ValueError("File-backed edit policy requires at least one path")
+        object.__setattr__(self, "paths", tuple(sorted(normalized_paths)))
+        object.__setattr__(self, "operators", normalized_operators)
+
+    def allows_path(self, path: str) -> bool:
+        normalized = str(path).strip().replace("\\", "/")
+        parts = PurePosixPath(normalized).parts
+        if (
+            not normalized
+            or normalized.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            return False
+        return any(PurePosixPath(normalized).match(pattern) for pattern in self.paths)
+
+    def validate_edit(
+        self,
+        *,
+        operator: str,
+        changed_paths: Sequence[str] = (),
+        patch_bytes: int = 0,
+    ) -> None:
+        normalized_operator = _identifier(str(operator), label="plugin edit operator")
+        if normalized_operator not in self.operators:
+            raise HarnessError(
+                f"Surface {self.surface!r} does not allow operator {normalized_operator!r}"
+            )
+        paths = tuple(str(path).strip().replace("\\", "/") for path in changed_paths)
+        if len(paths) != len(set(paths)):
+            raise HarnessError("A plugin proposal may not change the same path twice")
+        if len(paths) > self.max_changed_files:
+            raise HarnessError(
+                f"Plugin proposal changes {len(paths)} files; limit is {self.max_changed_files}"
+            )
+        if self.surface == "config":
+            if paths:
+                raise HarnessError("A config proposal may not change files")
+        elif not paths or any(not self.allows_path(path) for path in paths):
+            raise HarnessError(
+                f"Plugin proposal changes a path outside the {self.surface!r} contract"
+            )
+        if isinstance(patch_bytes, bool) or not isinstance(patch_bytes, int) or patch_bytes < 0:
+            raise ValueError("patch_bytes must be a non-negative integer")
+        if patch_bytes > self.max_patch_bytes:
+            raise HarnessError(
+                f"Plugin proposal contains {patch_bytes} bytes; limit is {self.max_patch_bytes}"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "surface": self.surface,
+            "paths": list(self.paths),
+            "operators": list(self.operators),
+            "max_changed_files": self.max_changed_files,
+            "max_patch_bytes": self.max_patch_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class PluginContract:
+    """Immutable ABI and mutation boundary for one harness plugin."""
+
+    name: str
+    version: str
+    kind: PluginKind
+    implementation: str
+    provides: frozenset[str]
+    requires: frozenset[str] = frozenset()
+    hooks: frozenset[str] = frozenset()
+    permissions: frozenset[str] = frozenset()
+    config_fields: tuple[ConfigField, ...] = ()
+    evolvable_surfaces: frozenset[str] = frozenset()
+    conflicts: frozenset[str] = frozenset()
+    spreadsheet_capabilities: frozenset[SpreadsheetCapability] = frozenset()
+    evolution_strategy: EvolutionStrategy | None = None
+    edit_policies: tuple[PluginEditPolicy, ...] = ()
+    synthesis_template: str | None = None
+    runtime_entrypoint: str | None = None
+    candidate_group: Literal["harness", "domain"] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier(self.name, label="plugin name"))
+        if not _VERSION.fullmatch(self.version):
+            raise ValueError(f"Plugin version must be semver-like: {self.version!r}")
+        if self.kind not in {
+            "observe",
+            "act",
+            "control",
+            "verify",
+            "knowledge",
+            "repair",
+            "workflow",
+        }:
+            raise ValueError(f"Unsupported plugin kind: {self.kind!r}")
+        _identifier(self.implementation, label="implementation")
+        for attribute, label, values in (
+            ("provides", "provided capability", self.provides),
+            ("requires", "required capability", self.requires),
+            ("hooks", "hook", self.hooks),
+            ("permissions", "permission", self.permissions),
+            ("evolvable_surfaces", "evolvable surface", self.evolvable_surfaces),
+            ("conflicts", "conflict", self.conflicts),
+        ):
+            normalized = frozenset(_identifier(value, label=label) for value in values)
+            object.__setattr__(self, attribute, normalized)
+        object.__setattr__(self, "config_fields", tuple(self.config_fields))
+        if not self.provides:
+            raise ValueError("A plugin must provide at least one capability")
+        unknown_hooks = self.hooks - ALLOWED_PLUGIN_HOOKS
+        if unknown_hooks:
+            raise ValueError(f"Plugin declares unknown hooks: {sorted(unknown_hooks)}")
+        field_names = [field.name for field in self.config_fields]
+        if len(field_names) != len(set(field_names)):
+            raise ValueError(f"Plugin {self.name!r} has duplicate config fields")
+        allowed_surfaces = {"config", "implementation", "prompt", "description"}
+        unknown_surfaces = self.evolvable_surfaces - allowed_surfaces
+        if unknown_surfaces:
+            raise ValueError(
+                f"Plugin {self.name!r} has unsupported evolvable surfaces: "
+                f"{sorted(unknown_surfaces)}"
+            )
+        unknown_capabilities = set(self.spreadsheet_capabilities) - set(
+            SPREADSHEET_CAPABILITIES
+        )
+        if unknown_capabilities:
+            raise ValueError(
+                f"Plugin {self.name!r} has unknown spreadsheet capabilities: "
+                f"{sorted(unknown_capabilities)}"
+            )
+        object.__setattr__(
+            self,
+            "spreadsheet_capabilities",
+            frozenset(self.spreadsheet_capabilities),
+        )
+        policies = tuple(self.edit_policies)
+        policy_surfaces = [policy.surface for policy in policies]
+        if len(policy_surfaces) != len(set(policy_surfaces)):
+            raise ValueError(f"Plugin {self.name!r} has duplicate edit policies")
+        if not set(policy_surfaces) <= set(self.evolvable_surfaces):
+            raise ValueError("Plugin edit policies may target only evolvable surfaces")
+        object.__setattr__(self, "edit_policies", policies)
+        if self.evolution_strategy is not None and not self.evolvable_surfaces:
+            raise ValueError("A frozen plugin cannot declare an evolution strategy")
+        if self.synthesis_template is not None:
+            object.__setattr__(
+                self,
+                "synthesis_template",
+                _identifier(self.synthesis_template, label="synthesis template"),
+            )
+            if self.kind != "knowledge" or "prompt" not in self.evolvable_surfaces:
+                raise ValueError(
+                    "Synthesis templates must be prompt-evolvable knowledge plugins"
+                )
+        if self.runtime_entrypoint is not None and not _CANDIDATE_ENTRYPOINT.fullmatch(
+            self.runtime_entrypoint
+        ):
+            raise ValueError("Candidate entrypoint must use the generated_plugins on_hook ABI")
+        if self.candidate_group is not None and self.candidate_group not in {"harness", "domain"}:
+            raise ValueError("Candidate plugin group must be harness or domain")
+
+    @property
+    def manifest_sha256(self) -> str:
+        return hashlib.sha256(_canonical_json(self.to_dict()).encode("ascii")).hexdigest()
+
+    def configure(self, overrides: Mapping[str, Any] | None = None) -> PluginInstance:
+        fields = {field.name: field for field in self.config_fields}
+        values: dict[str, Scalar] = {name: field.default for name, field in fields.items()}
+        for key, value in (overrides or {}).items():
+            if key not in fields:
+                raise ValueError(f"Plugin {self.name!r} has no configurable field {key!r}")
+            values[key] = fields[key].validate(value)
+        return PluginInstance(self, tuple(sorted(values.items())))
+
+    def edit_policy(self, surface: EvolutionSurface) -> PluginEditPolicy:
+        for policy in self.edit_policies:
+            if policy.surface == surface:
+                return policy
+        raise HarnessError(
+            f"Plugin {self.name!r} has no executable edit policy for {surface!r}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        document = {
+            "name": self.name,
+            "version": self.version,
+            "kind": self.kind,
+            "implementation": self.implementation,
+            "provides": sorted(self.provides),
+            "requires": sorted(self.requires),
+            "hooks": sorted(self.hooks),
+            "permissions": sorted(self.permissions),
+            "config_fields": [field.to_dict() for field in self.config_fields],
+            "evolvable_surfaces": sorted(self.evolvable_surfaces),
+            "conflicts": sorted(self.conflicts),
+            "spreadsheet_capabilities": sorted(self.spreadsheet_capabilities),
+            "evolution_strategy": (
+                self.evolution_strategy.to_dict()
+                if self.evolution_strategy is not None
+                else None
+            ),
+            "edit_policies": [policy.to_dict() for policy in self.edit_policies],
+            "synthesis_template": self.synthesis_template,
+        }
+        # Preserve the manifest hashes of historical built-in contracts.
+        if self.runtime_entrypoint is not None:
+            document["runtime_entrypoint"] = self.runtime_entrypoint
+        if self.candidate_group is not None:
+            document["candidate_group"] = self.candidate_group
+        return document
+
+
+@dataclass(frozen=True)
+class CandidatePluginSpec:
+    """Data-only declaration for an additive, candidate-owned plugin.
+
+    Paths, entrypoints and edit authority are derived by the controller.  A
+    proposal cannot choose an arbitrary import, rewrite a built-in manifest,
+    invent a hook, or expand the permission envelope of its plugin family.
+    Parsing and registry construction never execute candidate Python code.
+    """
+
+    name: str
+    kind: PluginKind
+    group: Literal["harness", "domain"]
+    provides: frozenset[str]
+    version: str = "1.0.0"
+    requires: frozenset[str] = frozenset()
+    hooks: frozenset[str] = frozenset()
+    permissions: frozenset[str] = frozenset()
+    spreadsheet_capabilities: frozenset[SpreadsheetCapability] = frozenset()
+    surfaces: frozenset[str] = frozenset({"implementation"})
+    config_fields: tuple[ConfigField, ...] = ()
+    conflicts: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not _CANDIDATE_PLUGIN_NAME.fullmatch(self.name):
+            raise HarnessError("Candidate plugin name must be kind-prefixed and dashed")
+        if self.name.split("-", 1)[0] != self.kind:
+            raise HarnessError("Candidate plugin name prefix must match its kind")
+        if self.group not in {"harness", "domain"}:
+            raise HarnessError("Candidate plugin group must be harness or domain")
+        if not isinstance(self.version, str) or not _VERSION.fullmatch(self.version):
+            raise HarnessError("Candidate plugin version must be semver-like")
+        for attribute in (
+            "provides", "requires", "hooks", "permissions", "spreadsheet_capabilities",
+            "surfaces", "conflicts",
+        ):
+            raw_values = getattr(self, attribute)
+            if isinstance(raw_values, str) or not all(isinstance(value, str) for value in raw_values):
+                raise HarnessError(f"Candidate plugin {attribute} must contain strings")
+            values = frozenset(raw_values)
+            try:
+                for value in values:
+                    if _identifier(value, label=f"candidate {attribute}") != value:
+                        raise ValueError("Candidate identifiers must not contain surrounding whitespace")
+            except ValueError as exc:
+                raise HarnessError(str(exc)) from exc
+            object.__setattr__(self, attribute, values)
+        object.__setattr__(self, "config_fields", tuple(self.config_fields))
+        if not self.provides:
+            raise HarnessError("Candidate plugin must provide at least one capability")
+        if self.provides & (KERNEL_CAPABILITIES | _LEGACY_RUNTIME_CAPABILITIES):
+            raise HarnessError("Candidate plugin may not replace kernel or legacy runtime capabilities")
+        if not self.surfaces or not self.surfaces <= {"implementation", "prompt", "config"}:
+            raise HarnessError("Candidate plugin has unsupported evolution surfaces")
+        if "prompt" in self.surfaces and self.kind != "knowledge":
+            raise HarnessError("Only a knowledge plugin can own a candidate skill prompt")
+        if not self.surfaces & {"implementation", "prompt"}:
+            raise HarnessError("Candidate plugin needs an implementation or prompt")
+        if self.hooks - CANDIDATE_PLUGIN_HOOKS:
+            raise HarnessError("Candidate implementation declares an unsupported runtime hook")
+        if "implementation" in self.surfaces and not self.hooks:
+            raise HarnessError("Candidate implementation must declare an executable hook")
+        if "implementation" not in self.surfaces and self.hooks:
+            raise HarnessError("A prompt-only plugin cannot declare implementation hooks")
+        if self.permissions - _CANDIDATE_PLUGIN_PERMISSIONS[self.kind]:
+            raise HarnessError("Candidate plugin permissions exceed its code-owned kind boundary")
+        if "implementation" not in self.surfaces and self.permissions:
+            raise HarnessError("A prompt-only plugin cannot acquire runtime permissions")
+        if not self.spreadsheet_capabilities <= frozenset(SPREADSHEET_CAPABILITIES):
+            raise HarnessError("Candidate plugin declares an unknown spreadsheet capability")
+        if self.config_fields and "config" not in self.surfaces:
+            raise HarnessError("Candidate config fields require the config surface")
+        # Reuse the immutable contract's remaining ABI/config validations.
+        try:
+            _ = self.contract
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise HarnessError(f"Invalid candidate plugin contract: {exc}") from exc
+
+    @property
+    def slug(self) -> str:
+        return self.name.replace("-", "_")
+
+    @property
+    def implementation_path(self) -> str | None:
+        if "implementation" not in self.surfaces:
+            return None
+        return f"src/spreadsheet_harness/generated_plugins/{self.slug}.py"
+
+    @property
+    def prompt_path(self) -> str | None:
+        return f"skills/{self.name}/SKILL.md" if "prompt" in self.surfaces else None
+
+    @property
+    def owned_paths(self) -> tuple[str, ...]:
+        return tuple(path for path in (self.implementation_path, self.prompt_path) if path)
+
+    @property
+    def contract(self) -> PluginContract:
+        policies: list[PluginEditPolicy] = []
+        if self.implementation_path:
+            policies.append(
+                PluginEditPolicy("implementation", (self.implementation_path,), ("replace-file", "unified-diff"))
+            )
+        if self.prompt_path:
+            policies.append(PluginEditPolicy("prompt", (self.prompt_path,), ("replace-file", "unified-diff")))
+        if "config" in self.surfaces:
+            policies.append(PluginEditPolicy("config", (), ("bounded-config",)))
+        entrypoint = f"generated_plugins.{self.slug}:on_hook" if self.implementation_path else None
+        return PluginContract(
+            name=self.name,
+            version=self.version,
+            kind=self.kind,
+            implementation=f"knowledge.{self.name}" if self.prompt_path else f"generated.{self.slug}",
+            provides=self.provides,
+            requires=self.requires,
+            hooks=self.hooks | (frozenset({"before_model_request"}) if self.prompt_path else frozenset()),
+            permissions=self.permissions,
+            config_fields=self.config_fields,
+            evolvable_surfaces=self.surfaces,
+            conflicts=self.conflicts,
+            spreadsheet_capabilities=self.spreadsheet_capabilities,
+            evolution_strategy=EvolutionStrategy(
+                ("redacted-trajectories", "evaluator-outcomes", "workbook-diff"),
+                ("plugin-implementation", "plugin-prompt", "bounded-config"),
+                ("failure-replay", "neighbor-transfer", "workbook-regression"),
+            ),
+            edit_policies=tuple(policies),
+            runtime_entrypoint=entrypoint,
+            candidate_group=self.group,
+        )
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> CandidatePluginSpec:
+        if not isinstance(document, Mapping):
+            raise HarnessError("Candidate plugin spec must be a JSON object")
+        allowed = {
+            "name", "kind", "group", "version", "provides", "requires", "hooks", "permissions",
+            "spreadsheet_capabilities", "surfaces", "config_fields", "conflicts",
+        }
+        if set(document) - allowed:
+            raise HarnessError("Candidate plugin spec contains unsupported or authority-bearing fields")
+        for attribute in ("name", "kind", "group"):
+            if not isinstance(document.get(attribute), str):
+                raise HarnessError(f"Candidate plugin {attribute} must be a string")
+        values: dict[str, Any] = {key: document[key] for key in ("name", "kind", "group")}
+        values["version"] = document.get("version", "1.0.0")
+        for attribute in (
+            "provides", "requires", "hooks", "permissions", "spreadsheet_capabilities", "surfaces", "conflicts",
+        ):
+            default = ["implementation"] if attribute == "surfaces" else []
+            raw_values = document.get(attribute, default)
+            if (
+                not isinstance(raw_values, list)
+                or not all(isinstance(value, str) for value in raw_values)
+                or len(raw_values) != len(set(raw_values))
+            ):
+                raise HarnessError(f"Candidate plugin {attribute} must be a unique string list")
+            values[attribute] = frozenset(raw_values)
+        raw_fields = document.get("config_fields", [])
+        if not isinstance(raw_fields, list):
+            raise HarnessError("Candidate config_fields must be a JSON list")
+        fields: list[ConfigField] = []
+        for item in raw_fields:
+            if not isinstance(item, Mapping) or set(item) - {
+                "name", "type", "default", "choices", "minimum", "maximum",
+            }:
+                raise HarnessError("Candidate config field contains unsupported fields")
+            if not {"name", "type", "default"} <= set(item):
+                raise HarnessError("Candidate config field requires name, type and default")
+            choices = item.get("choices", [])
+            if not isinstance(choices, list):
+                raise HarnessError("Candidate config field choices must be a JSON list")
+            try:
+                fields.append(ConfigField(
+                    name=item["name"], value_type=item["type"], default=item["default"],
+                    choices=tuple(choices), minimum=item.get("minimum"), maximum=item.get("maximum"),
+                ))
+            except (ValueError, TypeError) as exc:
+                raise HarnessError(f"Invalid candidate config field: {exc}") from exc
+        values["config_fields"] = tuple(fields)
+        return cls(**values)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "group": self.group,
+            "version": self.version,
+            "provides": sorted(self.provides),
+            "requires": sorted(self.requires),
+            "hooks": sorted(self.hooks),
+            "permissions": sorted(self.permissions),
+            "spreadsheet_capabilities": sorted(self.spreadsheet_capabilities),
+            "surfaces": sorted(self.surfaces),
+            "config_fields": [field.to_dict() for field in self.config_fields],
+            "conflicts": sorted(self.conflicts),
+        }
+
+
+@dataclass(frozen=True)
+class PluginInstance:
+    contract: PluginContract
+    _config: tuple[tuple[str, Scalar], ...]
+
+    def __post_init__(self) -> None:
+        fields = {field.name: field for field in self.contract.config_fields}
+        provided = dict(self._config)
+        if len(provided) != len(self._config) or set(provided) != set(fields):
+            raise ValueError("Plugin instance config must contain each declared field exactly once")
+        normalized = tuple(
+            sorted((name, fields[name].validate(value)) for name, value in provided.items())
+        )
+        object.__setattr__(self, "_config", normalized)
+
+    @property
+    def config(self) -> Mapping[str, Scalar]:
+        return MappingProxyType(dict(self._config))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.contract.name,
+            "version": self.contract.version,
+            "manifest_sha256": self.contract.manifest_sha256,
+            "config": dict(self._config),
+        }
+
+
+@dataclass(frozen=True)
+class CompositionSpec:
+    name: str
+    plugins: tuple[str, ...]
+    _overrides: tuple[tuple[str, tuple[tuple[str, Scalar], ...]], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier(self.name, label="composition name"))
+        normalized = tuple(
+            _identifier(canonical_plugin_name(name), label="plugin name")
+            for name in self.plugins
+        )
+        if not normalized or len(normalized) != len(set(normalized)):
+            raise ValueError("A composition needs unique plugin names")
+        object.__setattr__(self, "plugins", normalized)
+        normalized_overrides: list[tuple[str, tuple[tuple[str, Scalar], ...]]] = []
+        for raw_name, raw_values in self._overrides:
+            plugin_name = _identifier(
+                canonical_plugin_name(raw_name), label="override plugin"
+            )
+            values = tuple(
+                sorted(
+                    (
+                        _identifier(str(key), label="config field"),
+                        _scalar(value, label=f"{plugin_name}.{key}"),
+                    )
+                    for key, value in raw_values
+                )
+            )
+            if len(dict(values)) != len(values):
+                raise ValueError("Composition config fields must be unique per plugin")
+            normalized_overrides.append((plugin_name, values))
+        normalized_override_tuple = tuple(sorted(normalized_overrides))
+        object.__setattr__(self, "_overrides", normalized_override_tuple)
+        override_names = [name for name, _values in normalized_override_tuple]
+        if len(override_names) != len(set(override_names)):
+            raise ValueError("Composition config overrides must target unique plugins")
+        if any(name not in normalized for name in override_names):
+            raise ValueError("Composition config overrides may target only enabled plugins")
+
+    @classmethod
+    def create(
+        cls,
+        name: str,
+        plugins: Sequence[str],
+        overrides: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> CompositionSpec:
+        normalized_overrides: list[tuple[str, tuple[tuple[str, Scalar], ...]]] = []
+        for plugin_name, values in sorted((overrides or {}).items()):
+            normalized_overrides.append(
+                (
+                    str(plugin_name),
+                    tuple(
+                        sorted(
+                            (str(key), _scalar(value, label=f"{plugin_name}.{key}"))
+                            for key, value in values.items()
+                        )
+                    ),
+                )
+            )
+        return cls(str(name), tuple(str(item) for item in plugins), tuple(normalized_overrides))
+
+    @property
+    def overrides(self) -> Mapping[str, Mapping[str, Scalar]]:
+        return MappingProxyType(
+            {name: MappingProxyType(dict(values)) for name, values in self._overrides}
+        )
+
+    def with_plugins(
+        self,
+        *,
+        name: str,
+        plugins: Sequence[str],
+        overrides: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> CompositionSpec:
+        return CompositionSpec.create(
+            name, plugins, overrides if overrides is not None else self.overrides
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "plugins": list(self.plugins),
+            "overrides": {plugin: dict(values) for plugin, values in self._overrides},
+        }
+
+
+@dataclass(frozen=True)
+class ResolvedComposition:
+    spec: CompositionSpec
+    plugins: tuple[PluginInstance, ...]
+    _providers: tuple[tuple[str, str], ...]
+
+    @property
+    def providers(self) -> Mapping[str, str]:
+        return MappingProxyType(dict(self._providers))
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(_canonical_json(self.to_dict()).encode("ascii")).hexdigest()
+
+    def provider(self, capability: str) -> PluginInstance | None:
+        name = self.providers.get(capability)
+        return next((plugin for plugin in self.plugins if plugin.contract.name == name), None)
+
+    def has(self, plugin_name: str) -> bool:
+        return any(plugin.contract.name == plugin_name for plugin in self.plugins)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "plugevolve-composition-v1",
+            "name": self.spec.name,
+            "plugins": [plugin.to_dict() for plugin in self.plugins],
+            "providers": dict(self._providers),
+            "kernel_capabilities": sorted(KERNEL_CAPABILITIES),
+        }
+
+
+class PluginRegistry:
+    def __init__(self, plugins: Sequence[PluginContract]) -> None:
+        by_name: dict[str, PluginContract] = {}
+        for plugin in plugins:
+            if plugin.name in by_name:
+                raise ValueError(f"Duplicate plugin name: {plugin.name}")
+            by_name[plugin.name] = plugin
+        self._plugins = MappingProxyType(by_name)
+
+    def contracts(self) -> tuple[PluginContract, ...]:
+        return tuple(self._plugins[name] for name in sorted(self._plugins))
+
+    def get(self, name: str) -> PluginContract:
+        name = canonical_plugin_name(name)
+        try:
+            return self._plugins[name]
+        except KeyError as exc:
+            raise HarnessError(f"Unknown harness plugin: {name}") from exc
+
+    def resolve(self, spec: CompositionSpec) -> ResolvedComposition:
+        selected = [self.get(name) for name in spec.plugins]
+        providers: dict[str, str] = {}
+        for plugin in selected:
+            for capability in plugin.provides:
+                prior = providers.get(capability)
+                if prior is not None:
+                    raise HarnessError(
+                        f"Composition {spec.name!r} has two providers for {capability!r}: "
+                        f"{prior!r} and {plugin.name!r}"
+                    )
+                providers[capability] = plugin.name
+        available = KERNEL_CAPABILITIES | frozenset(providers)
+        for plugin in selected:
+            missing = plugin.requires - available
+            if missing:
+                raise HarnessError(
+                    f"Plugin {plugin.name!r} has unsatisfied capabilities: {sorted(missing)}"
+                )
+            conflicts = plugin.conflicts & (available | frozenset(spec.plugins))
+            if conflicts:
+                raise HarnessError(
+                    f"Plugin {plugin.name!r} conflicts with active entries: {sorted(conflicts)}"
+                )
+
+        # Stable topological order: providers precede consumers while original
+        # composition order breaks otherwise independent ties.
+        pending = list(selected)
+        ordered: list[PluginContract] = []
+        ready_capabilities = set(KERNEL_CAPABILITIES)
+        while pending:
+            ready = [plugin for plugin in pending if plugin.requires <= ready_capabilities]
+            if not ready:
+                raise HarnessError(f"Composition {spec.name!r} contains a capability cycle")
+            plugin = ready[0]
+            pending.remove(plugin)
+            ordered.append(plugin)
+            ready_capabilities.update(plugin.provides)
+
+        overrides = spec.overrides
+        instances = tuple(plugin.configure(overrides.get(plugin.name)) for plugin in ordered)
+        return ResolvedComposition(spec, instances, tuple(sorted(providers.items())))
+
+
+def registry_with_candidate_plugins(
+    base_registry: PluginRegistry,
+    specs: Sequence[CandidatePluginSpec | Mapping[str, Any]],
+) -> PluginRegistry:
+    """Extend a registry additively without importing any candidate code."""
+
+    contracts = list(base_registry.contracts())
+    names = {contract.name for contract in contracts}
+    slugs: set[str] = set()
+    for item in specs:
+        spec = item if isinstance(item, CandidatePluginSpec) else CandidatePluginSpec.from_document(item)
+        if canonical_plugin_name(spec.name) in names:
+            raise HarnessError(f"Candidate plugin shadows an existing plugin: {spec.name}")
+        if spec.slug in slugs:
+            raise HarnessError(f"Candidate plugins share an implementation namespace: {spec.slug}")
+        names.add(spec.name)
+        slugs.add(spec.slug)
+        contracts.append(spec.contract)
+    return PluginRegistry(contracts)
+
+
+def _candidate_manifest_specs(manifest_path: Path) -> tuple[CandidatePluginSpec, ...]:
+    """Read only the bounded data manifest; never import candidate entrypoints."""
+
+    if manifest_path.is_symlink():
+        raise HarnessError("Candidate plugin manifest may not be a symlink")
+    if not manifest_path.exists():
+        return ()
+    if not manifest_path.is_file() or manifest_path.stat().st_size > 1_000_000:
+        raise HarnessError("Candidate plugin manifest must be a bounded regular file")
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HarnessError("Candidate plugin manifest is not valid JSON") from exc
+    if (
+        not isinstance(document, Mapping)
+        or set(document) != {"schema_version", "plugins"}
+        or document["schema_version"] != "plugevolve-candidate-plugins-v1"
+        or not isinstance(document["plugins"], list)
+        or len(document["plugins"]) > 128
+    ):
+        raise HarnessError("Invalid candidate plugin manifest schema")
+    return tuple(CandidatePluginSpec.from_document(item) for item in document["plugins"])
+
+
+def _candidate_owned_file(root: Path, relative: str) -> Path:
+    path = root
+    for part in PurePosixPath(relative).parts:
+        path = path / part
+        if path.is_symlink():
+            raise HarnessError(f"Candidate plugin path may not contain a symlink: {relative}")
+    if not path.is_file():
+        raise HarnessError(f"Candidate plugin owned file is missing: {relative}")
+    return path
+
+
+def load_candidate_plugin_specs(artifact_root: str | Path) -> tuple[CandidatePluginSpec, ...]:
+    """Load candidate declarations and verify their contained files, without execution."""
+
+    root = Path(artifact_root).resolve()
+    relative = PurePosixPath(CANDIDATE_PLUGIN_MANIFEST_PATH)
+    manifest_path = root
+    for part in relative.parts:
+        manifest_path = manifest_path / part
+        if manifest_path.is_symlink():
+            raise HarnessError("Candidate plugin manifest path may not contain a symlink")
+    specs = _candidate_manifest_specs(manifest_path)
+    for spec in specs:
+        for path in spec.owned_paths:
+            _candidate_owned_file(root, path)
+    return specs
+
+
+def load_candidate_plugin_registry(
+    artifact_root: str | Path,
+    base_registry: PluginRegistry | None = None,
+) -> PluginRegistry:
+    """Build an artifact's registry from built-ins and its data-only manifest."""
+
+    base = base_registry if base_registry is not None else _builtin_plugin_registry()
+    return registry_with_candidate_plugins(base, load_candidate_plugin_specs(artifact_root))
+
+
+@dataclass(frozen=True)
+class PluginExecutionPlan:
+    """Narrow adapter from plugin contracts to the existing arm runtime."""
+
+    workflow: Literal["single-stage", "paper"]
+    tool_mode: Literal["code-only", "code-plus-formula-validation", "native"] | None
+    profile_mode: Literal["none", "full", "compact"]
+    profile_config: Mapping[str, Scalar]
+    policy: Literal["bare", "profile", "native", "ours"] | None
+    skill_names: tuple[str, ...]
+    financial_model_runtime: bool
+    require_formula_runtime_validation: bool
+    repair_date_text: bool
+    debugging_detector: bool
+    candidate_hooks: tuple[PluginInstance, ...] = ()
+
+    @property
+    def load_skills(self) -> bool:
+        return bool(self.skill_names)
+
+
+def execution_plan(composition: ResolvedComposition) -> PluginExecutionPlan:
+    workflow = composition.provider("workflow.paper")
+    if workflow is not None:
+        if len(composition.plugins) != 1:
+            raise HarnessError("The paper workflow is an atomic legacy workflow in plugin v1")
+        return PluginExecutionPlan(
+            "paper", None, "none", MappingProxyType({}), None, (), False, False, False, False
+        )
+
+    action = composition.provider("action.spreadsheet")
+    policy = composition.provider("policy.solve")
+    if action is None or policy is None:
+        raise HarnessError(
+            "A single-stage composition requires action.spreadsheet and policy.solve"
+        )
+    tool_modes = {
+        "act-code-interpreter": "code-only",
+        "act-code-plus-formula-validation": "code-plus-formula-validation",
+        "act-native-tools": "native",
+    }
+    policies = {
+        "control-bare": "bare",
+        "control-profile": "profile",
+        "control-native": "native",
+        "control-ours": "ours",
+    }
+    try:
+        tool_mode = tool_modes[action.contract.name]
+        policy_name = policies[policy.contract.name]
+    except KeyError as exc:
+        raise HarnessError(f"No runtime adapter for plugin {exc.args[0]!r}") from exc
+
+    profile = composition.provider("context.workbook-profile")
+    profile_mode: Literal["none", "full", "compact"] = "none"
+    profile_config: Mapping[str, Scalar] = MappingProxyType({})
+    if profile is not None:
+        profile_modes = {
+            "observe-profile-full": "full",
+            "observe-profile-compact": "compact",
+        }
+        try:
+            profile_mode = profile_modes[profile.contract.name]
+        except KeyError as exc:
+            raise HarnessError(f"No runtime adapter for plugin {exc.args[0]!r}") from exc
+        profile_config = profile.config
+
+    if policy_name in {"profile", "ours"} and profile is None:
+        raise HarnessError(f"Policy {policy_name!r} requires a workbook profile provider")
+    if policy_name == "native" and tool_mode != "native":
+        raise HarnessError("The native policy requires the native tool provider")
+
+    knowledge_implementations = {
+        "knowledge.spreadsheet-core": "spreadsheet-core",
+        "knowledge.spreadsheet-structure": "spreadsheet-structure",
+        "knowledge.spreadsheet-formula": "spreadsheet-formula",
+        "knowledge.spreadsheet-financial-model": "spreadsheet-financial-model",
+        "knowledge.spreadsheet-manipulation": "spreadsheet-manipulation",
+        "knowledge.spreadsheet-analysis": "spreadsheet-analysis",
+        "knowledge.spreadsheet-visualization": "visual-review",
+        "knowledge.spreadsheet-verification": "spreadsheet-verification",
+        "knowledge.spreadsheet-memory": "spreadsheet-memory",
+    }
+    skill_names: list[str] = []
+    for plugin in composition.plugins:
+        if plugin.contract.kind != "knowledge":
+            continue
+        if plugin.contract.candidate_group is not None and "prompt" not in plugin.contract.evolvable_surfaces:
+            continue
+        try:
+            skill_name = knowledge_implementations[plugin.contract.implementation]
+        except KeyError:
+            # Generated knowledge plugins use the same constrained
+            # ``knowledge.<skill-directory>`` ABI as built-ins. Keeping this
+            # fallback contract-based lets a generated plugin be materialized
+            # in an isolated skill root without adding runtime code or tools.
+            implementation = plugin.contract.implementation
+            if not implementation.startswith("knowledge."):
+                raise HarnessError(
+                    f"No skill adapter for knowledge plugin {implementation!r}"
+                ) from None
+            skill_name = implementation.removeprefix("knowledge.")
+            if not skill_name:
+                raise HarnessError(
+                    "Generated knowledge plugin has an empty skill name"
+                ) from None
+        if skill_name in skill_names:
+            raise HarnessError(f"Composition selects duplicate skill {skill_name!r}")
+        skill_names.append(skill_name)
+
+    return PluginExecutionPlan(
+        "single-stage",
+        tool_mode,  # type: ignore[arg-type]
+        profile_mode,
+        profile_config,
+        policy_name,  # type: ignore[arg-type]
+        tuple(skill_names),
+        composition.provider("knowledge.spreadsheet-financial-model") is not None,
+        composition.provider("verification.formula-runtime") is not None,
+        composition.provider("repair.date-text") is not None,
+        composition.provider("policy.debugging-detector") is not None,
+        tuple(plugin for plugin in composition.plugins if plugin.contract.runtime_entrypoint is not None),
+    )
+
+
+@dataclass(frozen=True)
+class CompositionCandidate:
+    operation: Literal["enable", "disable", "replace", "configure"]
+    target: str
+    composition: ResolvedComposition
+    replaced_plugin: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operation": self.operation,
+            "target": self.target,
+            "replaced_plugin": self.replaced_plugin,
+            "composition_sha256": self.composition.sha256,
+            "composition": self.composition.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class CompositionRoute:
+    task_type: str
+    matched_rule: str
+    composition: ResolvedComposition
+    router_manifest_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_type": self.task_type,
+            "matched_rule": self.matched_rule,
+            "router_manifest_sha256": self.router_manifest_sha256,
+            "composition_sha256": self.composition.sha256,
+            "composition_name": self.composition.spec.name,
+        }
+
+
+@dataclass(frozen=True)
+class ConstrainedCompositionRouter:
+    """Code-owned exact task-type routing over prevalidated compositions."""
+
+    name: str
+    allowed_task_types: tuple[str, ...]
+    _routes: tuple[tuple[str, CompositionSpec], ...]
+    fallback: CompositionSpec
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier(self.name, label="router name"))
+        allowed = tuple(str(value).strip() for value in self.allowed_task_types)
+        if not allowed or any(not value for value in allowed) or len(set(allowed)) != len(allowed):
+            raise ValueError("Router task types must be unique non-empty strings")
+        object.__setattr__(self, "allowed_task_types", allowed)
+        routes = tuple(sorted((str(key).strip(), spec) for key, spec in self._routes))
+        route_types = [key for key, _spec in routes]
+        if (
+            any(not key for key in route_types)
+            or len(set(route_types)) != len(route_types)
+            or not set(route_types) <= set(allowed)
+        ):
+            raise ValueError("Router rules must uniquely target allowed task types")
+        object.__setattr__(self, "_routes", routes)
+
+    @classmethod
+    def create(
+        cls,
+        name: str,
+        *,
+        allowed_task_types: Sequence[str],
+        routes: Mapping[str, CompositionSpec],
+        fallback: CompositionSpec,
+    ) -> ConstrainedCompositionRouter:
+        return cls(
+            name,
+            tuple(str(value) for value in allowed_task_types),
+            tuple((str(key), spec) for key, spec in routes.items()),
+            fallback,
+        )
+
+    def manifest(self, registry: PluginRegistry) -> dict[str, Any]:
+        resolved_routes: dict[str, str] = {}
+        for task_type, spec in self._routes:
+            resolved = registry.resolve(spec)
+            execution_plan(resolved)
+            resolved_routes[task_type] = resolved.sha256
+        fallback = registry.resolve(self.fallback)
+        execution_plan(fallback)
+        return {
+            "schema_version": "plugevolve-router-v1",
+            "name": self.name,
+            "allowed_task_types": list(self.allowed_task_types),
+            "routes": resolved_routes,
+            "fallback_composition_sha256": fallback.sha256,
+        }
+
+    def route(self, registry: PluginRegistry, task_type: str) -> CompositionRoute:
+        normalized = str(task_type).strip()
+        if normalized not in self.allowed_task_types:
+            raise HarnessError(f"Router {self.name!r} rejects unknown task type {task_type!r}")
+        route_map = dict(self._routes)
+        spec = route_map.get(normalized, self.fallback)
+        resolved = registry.resolve(spec)
+        execution_plan(resolved)
+        manifest = self.manifest(registry)
+        digest = hashlib.sha256(_canonical_json(manifest).encode("ascii")).hexdigest()
+        return CompositionRoute(
+            normalized,
+            normalized if normalized in route_map else "fallback",
+            resolved,
+            digest,
+        )
+
+
+@dataclass(frozen=True)
+class PluginMutation:
+    """One auditable plugin-local edit; contracts are references, never payloads."""
+
+    target_plugin: str
+    base_version: str
+    base_manifest_sha256: str
+    surface: Literal["config", "implementation", "prompt", "description"]
+    candidate_artifact_sha256: str
+    changed_paths: tuple[str, ...] = ()
+    evidence_sha256: tuple[str, ...] = ()
+    _config_patch: tuple[tuple[str, Scalar], ...] = ()
+    operator: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "target_plugin", _identifier(self.target_plugin, label="target plugin")
+        )
+        if not _VERSION.fullmatch(self.base_version):
+            raise ValueError("Plugin mutation base_version must be semver-like")
+        for label, digest in (
+            ("base manifest", self.base_manifest_sha256),
+            ("candidate artifact", self.candidate_artifact_sha256),
+            *(("evidence", digest) for digest in self.evidence_sha256),
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"Plugin mutation {label} SHA-256 is invalid")
+        if self.surface not in {"config", "implementation", "prompt", "description"}:
+            raise ValueError(f"Unsupported plugin mutation surface: {self.surface!r}")
+        normalized_paths: list[str] = []
+        for raw_path in self.changed_paths:
+            path = str(raw_path).strip().replace("\\", "/")
+            parts = path.split("/")
+            if not path or path.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+                raise ValueError(
+                    f"Plugin mutation path must be relative and contained: {raw_path!r}"
+                )
+            normalized_paths.append(path)
+        if len(normalized_paths) != len(set(normalized_paths)):
+            raise ValueError("Plugin mutation changed_paths must be unique")
+        object.__setattr__(self, "changed_paths", tuple(sorted(normalized_paths)))
+        if self.surface == "config" and not self._config_patch:
+            raise ValueError("A config mutation requires a non-empty config patch")
+        if self.surface != "config" and self._config_patch:
+            raise ValueError("Only config mutations may carry a config patch")
+        if self.surface != "config" and not self.changed_paths:
+            raise ValueError("A file-backed plugin mutation requires changed_paths")
+        if self.operator is not None:
+            object.__setattr__(
+                self,
+                "operator",
+                _identifier(str(self.operator), label="plugin edit operator"),
+            )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        target_plugin: str,
+        base_version: str,
+        base_manifest_sha256: str,
+        surface: Literal["config", "implementation", "prompt", "description"],
+        candidate_artifact_sha256: str,
+        changed_paths: Sequence[str] = (),
+        evidence_sha256: Sequence[str] = (),
+        config_patch: Mapping[str, Any] | None = None,
+        operator: str | None = None,
+    ) -> PluginMutation:
+        return cls(
+            target_plugin=target_plugin,
+            base_version=base_version,
+            base_manifest_sha256=base_manifest_sha256,
+            surface=surface,
+            candidate_artifact_sha256=candidate_artifact_sha256,
+            changed_paths=tuple(changed_paths),
+            evidence_sha256=tuple(evidence_sha256),
+            _config_patch=tuple(
+                sorted(
+                    (str(key), _scalar(value, label=f"config patch {key}"))
+                    for key, value in (config_patch or {}).items()
+                )
+            ),
+            operator=operator,
+        )
+
+    @property
+    def config_patch(self) -> Mapping[str, Scalar]:
+        return MappingProxyType(dict(self._config_patch))
+
+    def validate(self, registry: PluginRegistry) -> PluginContract:
+        contract = registry.get(self.target_plugin)
+        if contract.version != self.base_version:
+            raise HarnessError("Plugin mutation targets a different base version")
+        if contract.manifest_sha256 != self.base_manifest_sha256:
+            raise HarnessError("Plugin mutation targets a different contract manifest")
+        if self.surface not in contract.evolvable_surfaces:
+            raise HarnessError(
+                f"Plugin {contract.name!r} does not allow evolution of {self.surface!r}"
+            )
+        if self.surface == "config":
+            contract.configure(self.config_patch)
+        return contract
+
+    def validate_edit_policy(
+        self,
+        registry: PluginRegistry,
+        *,
+        patch_bytes: int = 0,
+    ) -> PluginContract:
+        """Validate both the immutable ABI and the executable edit authority."""
+
+        contract = self.validate(registry)
+        policy = contract.edit_policy(self.surface)
+        default_operator = {
+            "config": "bounded-config",
+            "prompt": "replace-file",
+            "description": "unified-diff",
+            "implementation": "unified-diff",
+        }[self.surface]
+        policy.validate_edit(
+            operator=self.operator or default_operator,
+            changed_paths=self.changed_paths,
+            patch_bytes=patch_bytes,
+        )
+        return contract
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "plugevolve-plugin-mutation-v1",
+            "target_plugin": self.target_plugin,
+            "base_version": self.base_version,
+            "base_manifest_sha256": self.base_manifest_sha256,
+            "surface": self.surface,
+            "candidate_artifact_sha256": self.candidate_artifact_sha256,
+            "changed_paths": list(self.changed_paths),
+            "evidence_sha256": list(self.evidence_sha256),
+            "config_patch": dict(self._config_patch),
+            "operator": self.operator,
+        }
+
+
+def enumerate_single_plugin_candidates(
+    registry: PluginRegistry,
+    base: CompositionSpec,
+    *,
+    config_variants: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> tuple[CompositionCandidate, ...]:
+    """Enumerate code-controlled one-slot mutations; invalid compositions are omitted."""
+
+    baseline = registry.resolve(base)
+    active = set(base.plugins)
+    candidates: list[CompositionCandidate] = []
+    seen = {baseline.sha256}
+
+    def add(
+        operation: Literal["enable", "disable", "replace", "configure"],
+        target: str,
+        spec: CompositionSpec,
+        *,
+        replaced: str | None = None,
+    ) -> None:
+        try:
+            resolved = registry.resolve(spec)
+            execution_plan(resolved)
+        except (HarnessError, ValueError):
+            return
+        if resolved.sha256 in seen:
+            return
+        seen.add(resolved.sha256)
+        candidates.append(CompositionCandidate(operation, target, resolved, replaced))
+
+    base_overrides = {name: dict(values) for name, values in base.overrides.items()}
+    for plugin_name in base.plugins:
+        plugins = tuple(name for name in base.plugins if name != plugin_name)
+        overrides = {name: values for name, values in base_overrides.items() if name != plugin_name}
+        if plugins:
+            add(
+                "disable",
+                plugin_name,
+                CompositionSpec.create(f"{base.name}.disable-{plugin_name}", plugins, overrides),
+            )
+
+    contracts = registry.contracts()
+    for plugin in contracts:
+        if plugin.name not in active:
+            add(
+                "enable",
+                plugin.name,
+                CompositionSpec.create(
+                    f"{base.name}.enable-{plugin.name}",
+                    (*base.plugins, plugin.name),
+                    base_overrides,
+                ),
+            )
+
+    for current_name in base.plugins:
+        current = registry.get(current_name)
+        for replacement in contracts:
+            if replacement.name in active or replacement.kind != current.kind:
+                continue
+            if replacement.provides != current.provides:
+                continue
+            plugins = tuple(
+                replacement.name if name == current_name else name for name in base.plugins
+            )
+            overrides = {
+                name: values for name, values in base_overrides.items() if name != current_name
+            }
+            add(
+                "replace",
+                next(iter(sorted(current.provides))),
+                CompositionSpec.create(
+                    f"{base.name}.replace-{current_name}-with-{replacement.name}",
+                    plugins,
+                    overrides,
+                ),
+                replaced=current_name,
+            )
+
+    for raw_plugin_name, variants in sorted((config_variants or {}).items()):
+        plugin_name = canonical_plugin_name(raw_plugin_name)
+        if plugin_name not in active:
+            raise ValueError(f"Config variants target inactive plugin {raw_plugin_name!r}")
+        for index, variant in enumerate(variants, start=1):
+            overrides = {name: dict(values) for name, values in base_overrides.items()}
+            overrides[plugin_name] = {**overrides.get(plugin_name, {}), **dict(variant)}
+            add(
+                "configure",
+                plugin_name,
+                CompositionSpec.create(
+                    f"{base.name}.configure-{plugin_name}-{index}",
+                    base.plugins,
+                    overrides,
+                ),
+            )
+
+    return tuple(
+        sorted(candidates, key=lambda item: (item.operation, item.target, item.composition.sha256))
+    )
+
+
+@dataclass(frozen=True)
+class CompositionEvaluation:
+    composition: ResolvedComposition
+    context_scores: tuple[tuple[str, float], ...]
+    failed_contexts: tuple[str, ...] = ()
+    cost: float = 0.0
+
+    @classmethod
+    def create(
+        cls,
+        composition: ResolvedComposition,
+        context_scores: Mapping[str, float],
+        *,
+        failed_contexts: Sequence[str] = (),
+        cost: float = 0.0,
+    ) -> CompositionEvaluation:
+        normalized: list[tuple[str, float]] = []
+        for context, score in sorted(context_scores.items()):
+            value = float(score)
+            if not context or not math.isfinite(value):
+                raise ValueError("Context scores require non-empty names and finite values")
+            normalized.append((str(context), value))
+        if not normalized or not math.isfinite(cost) or cost < 0:
+            raise ValueError("An evaluation needs scores and a finite non-negative cost")
+        failures = tuple(sorted(set(str(item) for item in failed_contexts)))
+        return cls(composition, tuple(normalized), failures, float(cost))
+
+    @property
+    def scores(self) -> Mapping[str, float]:
+        return MappingProxyType(dict(self.context_scores))
+
+    @property
+    def mean_score(self) -> float:
+        return fmean(self.scores.values())
+
+    @property
+    def score_variance(self) -> float:
+        return pvariance(self.scores.values()) if len(self.context_scores) > 1 else 0.0
+
+
+def select_composition(
+    evaluations: Sequence[CompositionEvaluation],
+    *,
+    baseline: CompositionEvaluation,
+    min_mean_delta: float = 0.0,
+    max_context_regression: float = 0.0,
+) -> CompositionEvaluation | None:
+    """Select a non-regressive candidate by mean, context variance, cost, then hash."""
+
+    if (
+        not math.isfinite(min_mean_delta)
+        or not math.isfinite(max_context_regression)
+        or min_mean_delta < 0
+        or max_context_regression < 0
+    ):
+        raise ValueError("Selection tolerances must be non-negative")
+    if baseline.failed_contexts:
+        raise ValueError("Baseline evaluation must not contain failed contexts")
+    baseline_scores = baseline.scores
+    eligible: list[CompositionEvaluation] = []
+    for evaluation in evaluations:
+        if evaluation.failed_contexts or set(evaluation.scores) != set(baseline_scores):
+            continue
+        if evaluation.mean_score <= baseline.mean_score + min_mean_delta:
+            continue
+        if any(
+            evaluation.scores[name] < score - max_context_regression
+            for name, score in baseline_scores.items()
+        ):
+            continue
+        eligible.append(evaluation)
+    if not eligible:
+        return None
+    return min(
+        eligible,
+        key=lambda item: (
+            -item.mean_score,
+            item.score_variance,
+            item.cost,
+            item.composition.sha256,
+        ),
+    )
+
+
+def contextual_marginal_contribution(
+    with_plugin: CompositionEvaluation,
+    without_plugin: CompositionEvaluation,
+) -> dict[str, Any]:
+    if set(with_plugin.scores) != set(without_plugin.scores):
+        raise ValueError("Marginal contribution requires identical evaluation contexts")
+    deltas = {
+        name: with_plugin.scores[name] - without_plugin.scores[name] for name in with_plugin.scores
+    }
+    values = list(deltas.values())
+    return {
+        "contexts": deltas,
+        "mean": fmean(values),
+        "minimum": min(values),
+        "variance": pvariance(values) if len(values) > 1 else 0.0,
+        "positive_context_rate": sum(value > 0 for value in values) / len(values),
+    }
+
+
+def _field(
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> ConfigField:
+    return ConfigField(name, "integer", default, minimum=minimum, maximum=maximum)
+
+
+def _strategy(
+    evidence: Sequence[str],
+    operators: Sequence[str],
+    validation_contexts: Sequence[str],
+) -> EvolutionStrategy:
+    return EvolutionStrategy(tuple(evidence), tuple(operators), tuple(validation_contexts))
+
+
+_PLUGIN_FILE_OWNERSHIP: Mapping[str, Mapping[EvolutionSurface, tuple[str, ...]]] = {
+    "act-code-interpreter": {
+        "description": ("src/spreadsheet_harness/code_interpreter.py",),
+        "implementation": ("src/spreadsheet_harness/code_interpreter.py",),
+    },
+    "act-native-tools": {
+        "description": ("src/spreadsheet_harness/tools.py",),
+        "implementation": ("src/spreadsheet_harness/tools.py",),
+    },
+    "act-code-plus-formula-validation": {
+        "description": ("src/spreadsheet_harness/tools.py",),
+        "implementation": (
+            "src/spreadsheet_harness/code_interpreter.py",
+            "src/spreadsheet_harness/formula_runtime.py",
+            "src/spreadsheet_harness/tools.py",
+        ),
+    },
+    "observe-profile-full": {
+        "implementation": ("src/spreadsheet_harness/preprocess.py",),
+    },
+    "observe-profile-compact": {
+        "implementation": ("src/spreadsheet_harness/preprocess.py",),
+    },
+    "control-bare": {"prompt": ("src/spreadsheet_harness/arms.py",)},
+    "control-profile": {"prompt": ("src/spreadsheet_harness/arms.py",)},
+    "control-native": {
+        "prompt": ("src/spreadsheet_harness/arms.py",),
+        "implementation": ("src/spreadsheet_harness/arms.py",),
+    },
+    "control-ours": {
+        "prompt": ("src/spreadsheet_harness/arms.py",),
+        "implementation": ("src/spreadsheet_harness/arms.py",),
+    },
+    "verify-formula-runtime": {
+        "implementation": (
+            "src/spreadsheet_harness/formula_runtime.py",
+            "src/spreadsheet_harness/arms.py",
+        ),
+    },
+    "repair-date-text": {
+        "implementation": ("src/spreadsheet_harness/arms.py",),
+    },
+    # The financial specialist has a first-class runtime implementation in
+    # addition to its prompt.  Keeping this ownership explicit is what lets a
+    # continuous evolution candidate change a bounded repair rule without
+    # acquiring write access to the rest of the harness.
+    "knowledge-financial-model": {
+        "implementation": ("src/spreadsheet_harness/financial_model_repairs.py",),
+    },
+}
+
+
+def _default_edit_policies(contract: PluginContract) -> tuple[PluginEditPolicy, ...]:
+    ownership = _PLUGIN_FILE_OWNERSHIP.get(contract.name, {})
+    policies: list[PluginEditPolicy] = []
+    for surface in sorted(contract.evolvable_surfaces):
+        if surface == "config":
+            policies.append(PluginEditPolicy("config", (), ("bounded-config",)))
+            continue
+        paths = ownership.get(surface)
+        if paths is None and contract.kind == "knowledge" and surface == "prompt":
+            skill_name = contract.implementation.removeprefix("knowledge.")
+            if skill_name == "spreadsheet-visualization":
+                skill_name = "visual-review"
+            paths = (f"skills/{skill_name}/SKILL.md",)
+        if paths is None:
+            raise ValueError(
+                f"Evolvable plugin {contract.name!r} has no file ownership for {surface!r}"
+            )
+        operators = ("replace-file", "unified-diff") if surface == "prompt" else (
+            "unified-diff",
+        )
+        policies.append(
+            PluginEditPolicy(
+                surface,  # type: ignore[arg-type]
+                paths,
+                operators,
+                max_changed_files=len(paths),
+                max_patch_bytes=256_000,
+            )
+        )
+    return tuple(policies)
+
+
+def _builtin_plugin_registry() -> PluginRegistry:
+    compact_profile_fields = (
+        _field("max-sheets", 8, 1, 12),
+        _field("max-cells-per-sheet", 192, 32, 512),
+        _field("max-regions-per-sheet", 3, 1, 8),
+        _field("max-sample-rows-per-region", 1, 1, 8),
+        _field("max-number-formats-per-region", 3, 1, 12),
+        _field("max-formula-clusters-per-sheet", 2, 1, 12),
+        _field("max-rendered-chars", 4000, 500, 12000),
+    )
+    contracts = (
+            PluginContract(
+                "act-code-interpreter",
+                "1.0.0",
+                "act",
+                "runtime.code-interpreter",
+                frozenset({"action.spreadsheet"}),
+                frozenset({"agent.execute", "workbook.read", "workbook.write"}),
+                frozenset({"tool_registry"}),
+                frozenset({"workbook.read", "workbook.write", "subprocess.execute"}),
+                evolvable_surfaces=frozenset({"description", "implementation"}),
+                spreadsheet_capabilities=frozenset(SPREADSHEET_CAPABILITIES),
+                evolution_strategy=_strategy(
+                    ("tool-errors", "execution-trace", "workbook-diff"),
+                    ("tool-description", "helper-implementation"),
+                    ("target-capability", "co-activated-capabilities", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "act-native-tools",
+                "1.0.0",
+                "act",
+                "runtime.native-tools",
+                frozenset({"action.spreadsheet", "tool.recalculate-and-read"}),
+                frozenset({"agent.execute", "workbook.read", "workbook.write"}),
+                frozenset({"tool_registry"}),
+                frozenset({"workbook.read", "workbook.write", "subprocess.execute"}),
+                evolvable_surfaces=frozenset({"description", "implementation"}),
+                spreadsheet_capabilities=frozenset(SPREADSHEET_CAPABILITIES),
+                evolution_strategy=_strategy(
+                    ("tool-errors", "execution-trace", "workbook-diff"),
+                    ("tool-description", "helper-implementation"),
+                    ("target-capability", "co-activated-capabilities", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "act-code-plus-formula-validation",
+                "1.0.0",
+                "act",
+                "runtime.code-plus-formula-validation",
+                frozenset({"action.spreadsheet", "tool.recalculate-and-read"}),
+                frozenset({"agent.execute", "workbook.read", "workbook.write"}),
+                frozenset({"tool_registry"}),
+                frozenset({"workbook.read", "workbook.write", "subprocess.execute"}),
+                evolvable_surfaces=frozenset({"description", "implementation"}),
+                spreadsheet_capabilities=frozenset({"formula", "verification"}),
+                evolution_strategy=_strategy(
+                    ("tool-errors", "formula-validation-trace", "workbook-diff"),
+                    ("tool-description", "helper-implementation"),
+                    ("verification-formula", "co-activated-capabilities", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "observe-profile-full",
+                "1.1.0",
+                "observe",
+                "profile.deterministic-full",
+                frozenset({"context.workbook-profile"}),
+                frozenset({"workbook.read"}),
+                frozenset({"before_model_request"}),
+                frozenset({"workbook.read"}),
+                evolvable_surfaces=frozenset({"implementation"}),
+                spreadsheet_capabilities=frozenset({"structure"}),
+                evolution_strategy=_strategy(
+                    ("header-boundaries", "cross-sheet-relations", "profile-truncation"),
+                    ("relation-rule", "profile-implementation"),
+                    ("structure-formula", "structure-manipulation", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "observe-profile-compact",
+                "1.1.0",
+                "observe",
+                "profile.deterministic-compact",
+                frozenset({"context.workbook-profile"}),
+                frozenset({"workbook.read"}),
+                frozenset({"before_model_request"}),
+                frozenset({"workbook.read"}),
+                compact_profile_fields,
+                frozenset({"config", "implementation"}),
+                spreadsheet_capabilities=frozenset({"structure"}),
+                evolution_strategy=_strategy(
+                    ("header-boundaries", "cross-sheet-relations", "profile-truncation"),
+                    ("bounded-config", "relation-rule", "profile-implementation"),
+                    ("structure-formula", "structure-manipulation", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "control-bare",
+                "1.0.0",
+                "control",
+                "policy.bare",
+                frozenset({"policy.solve"}),
+                frozenset({"action.spreadsheet", "model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"composition"}),
+                evolution_strategy=_strategy(
+                    ("routing-trace", "unused-capability", "tool-sequence"),
+                    ("policy-prompt",),
+                    ("workflow-replay", "cross-capability", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "control-profile",
+                "1.0.0",
+                "control",
+                "policy.profile",
+                frozenset({"policy.solve"}),
+                frozenset({"action.spreadsheet", "context.workbook-profile", "model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"composition"}),
+                evolution_strategy=_strategy(
+                    ("routing-trace", "profile-usage", "tool-sequence"),
+                    ("policy-prompt",),
+                    ("workflow-replay", "cross-capability", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "control-native",
+                "1.0.0",
+                "control",
+                "policy.native",
+                frozenset({"policy.solve"}),
+                frozenset({"action.spreadsheet", "model.request"}),
+                frozenset({"before_model_request", "after_tool"}),
+                evolvable_surfaces=frozenset({"prompt", "implementation"}),
+                spreadsheet_capabilities=frozenset({"composition"}),
+                evolution_strategy=_strategy(
+                    ("routing-trace", "unused-capability", "tool-sequence"),
+                    ("policy-prompt", "routing-middleware"),
+                    ("workflow-replay", "cross-capability", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "control-ours",
+                "1.29.0",
+                "control",
+                "policy.ours",
+                frozenset({"policy.solve", "policy.debugging-detector"}),
+                frozenset({"action.spreadsheet", "context.workbook-profile", "model.request"}),
+                frozenset({"before_model_request", "after_tool"}),
+                config_fields=(ConfigField("grounded-v2-execution", "boolean", False),),
+                evolvable_surfaces=frozenset({"config", "prompt", "implementation"}),
+                spreadsheet_capabilities=frozenset({"composition"}),
+                evolution_strategy=_strategy(
+                    ("routing-trace", "unused-capability", "tool-sequence"),
+                    ("policy-prompt", "routing-middleware"),
+                    ("workflow-replay", "cross-capability", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-core",
+                "1.0.0",
+                "knowledge",
+                "knowledge.spreadsheet-core",
+                frozenset({"knowledge.spreadsheet-skill"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset(SPREADSHEET_CAPABILITIES),
+                evolution_strategy=_strategy(
+                    ("redacted-trajectories", "evaluator-outcomes", "repeated-failures"),
+                    ("skill-rule", "skill-template"),
+                    ("failure-replay", "neighbor-transfer", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-structure",
+                "1.0.0",
+                "knowledge",
+                "knowledge.spreadsheet-structure",
+                frozenset({"knowledge.spreadsheet-structure"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"structure"}),
+                evolution_strategy=_strategy(
+                    ("header-boundaries", "cross-sheet-relations", "range-grounding"),
+                    ("semantic-edge-rule", "structure-skill-rule"),
+                    ("structure-formula", "structure-manipulation", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-formula",
+                "1.1.0",
+                "knowledge",
+                "knowledge.spreadsheet-formula",
+                frozenset({"knowledge.spreadsheet-formula"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"formula"}),
+                evolution_strategy=_strategy(
+                    ("failed-formula", "expected-value", "dependency-graph", "reference-ast"),
+                    ("formula-template", "reference-rewrite", "formula-skill-rule"),
+                    ("formula-structure", "formula-manipulation", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-financial-model",
+                "1.3.0",
+                "knowledge",
+                "knowledge.spreadsheet-financial-model",
+                frozenset({"knowledge.spreadsheet-financial-model"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt", "implementation"}),
+                spreadsheet_capabilities=frozenset({"formula", "verification"}),
+                evolution_strategy=_strategy(
+                    (
+                        "historical-forecast-boundary",
+                        "dependency-graph",
+                        "model-check",
+                        "workbook-diff",
+                    ),
+                    ("financial-model-rule", "forecast-fill-rule"),
+                    ("financial-formula", "financial-boundary", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-manipulation",
+                "1.1.0",
+                "knowledge",
+                "knowledge.spreadsheet-manipulation",
+                frozenset({"knowledge.spreadsheet-manipulation"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"manipulation"}),
+                evolution_strategy=_strategy(
+                    ("workbook-diff", "boundary-evidence", "format-metadata"),
+                    ("mutation-procedure", "boundary-rule", "format-rule"),
+                    ("manipulation-structure", "manipulation-formula", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-analysis",
+                "1.0.0",
+                "knowledge",
+                "knowledge.spreadsheet-analysis",
+                frozenset({"knowledge.spreadsheet-analysis"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"analysis"}),
+                evolution_strategy=_strategy(
+                    ("expected-aggregation", "grouping-keys", "source-output-pairs"),
+                    ("analysis-template", "aggregation-rule"),
+                    ("analysis-structure", "analysis-visualization", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-visualization",
+                "1.0.0",
+                "knowledge",
+                "knowledge.spreadsheet-visualization",
+                frozenset({"knowledge.spreadsheet-visualization"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"visualization"}),
+                evolution_strategy=_strategy(
+                    ("rendered-pages", "chart-metadata", "visual-diff"),
+                    ("chart-selection-rule", "chart-range-rule", "visual-skill-rule"),
+                    ("visualization-analysis", "visualization-structure", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-verification",
+                "1.1.0",
+                "knowledge",
+                "knowledge.spreadsheet-verification",
+                frozenset({"knowledge.spreadsheet-verification"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"verification"}),
+                evolution_strategy=_strategy(
+                    ("false-positive", "false-negative", "execution-postconditions"),
+                    ("postcondition", "verification-skill-rule"),
+                    ("verification-formula", "verification-structure", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "knowledge-memory",
+                "1.0.0",
+                "knowledge",
+                "knowledge.spreadsheet-memory",
+                frozenset({"knowledge.spreadsheet-memory"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset({"memory"}),
+                evolution_strategy=_strategy(
+                    ("repeated-successes", "backend-workarounds", "transfer-evidence"),
+                    ("experience-rule", "template-merge", "redundancy-prune"),
+                    ("failure-replay", "neighbor-transfer", "workbook-regression"),
+                ),
+            ),
+            # Intentionally inactive in the built-in financial composition.
+            # This is the contract slot used by the co-evolution experiment
+            # for a newly generated coordination skill.  The implementation
+            # ABI is just ``knowledge.<skill-directory>``; the candidate still
+            # has to supply the SKILL.md and pass the same paired gates as an
+            # edit to an existing plugin.
+            PluginContract(
+                "knowledge-coordination",
+                "0.1.0",
+                "knowledge",
+                "knowledge.spreadsheet-coordination",
+                frozenset({"knowledge.spreadsheet-coordination"}),
+                frozenset({"model.request"}),
+                frozenset({"before_model_request"}),
+                evolvable_surfaces=frozenset({"prompt"}),
+                spreadsheet_capabilities=frozenset(
+                    {"composition", "structure", "formula", "verification"}
+                ),
+                evolution_strategy=_strategy(
+                    (
+                        "plugin-activation-trace",
+                        "cross-plugin-contract",
+                        "failure-replay",
+                    ),
+                    ("coordination-rule", "skill-template", "handoff-rule"),
+                    (
+                        "composition-interface",
+                        "structure-formula",
+                        "verification-structure",
+                        "workbook-regression",
+                    ),
+                ),
+                synthesis_template="knowledge-skill-v1",
+            ),
+            PluginContract(
+                "verify-formula-runtime",
+                "1.0.0",
+                "verify",
+                "verification.formula-runtime",
+                frozenset({"verification.formula-runtime"}),
+                frozenset(
+                    {
+                        "artifact.validate",
+                        "tool.recalculate-and-read",
+                        "workbook.read",
+                    }
+                ),
+                frozenset({"before_submit"}),
+                frozenset({"workbook.read", "subprocess.execute"}),
+                evolvable_surfaces=frozenset({"config", "implementation"}),
+                spreadsheet_capabilities=frozenset({"formula", "verification"}),
+                evolution_strategy=_strategy(
+                    ("failed-formula", "cached-values", "dependency-graph", "false-negative"),
+                    ("verifier-postcondition", "bounded-config", "verifier-implementation"),
+                    ("verification-formula", "verification-structure", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "repair-date-text",
+                "1.0.0",
+                "repair",
+                "repair.date-text",
+                frozenset({"repair.date-text"}),
+                frozenset({"artifact.validate", "workbook.read", "workbook.write"}),
+                frozenset({"after_run"}),
+                frozenset({"workbook.read", "workbook.write"}),
+                evolvable_surfaces=frozenset({"implementation"}),
+                spreadsheet_capabilities=frozenset({"formula", "manipulation"}),
+                evolution_strategy=_strategy(
+                    ("date-types", "number-formats", "backend-behavior"),
+                    ("repair-rule", "repair-implementation"),
+                    ("formula-manipulation", "format-regression", "workbook-regression"),
+                ),
+            ),
+            PluginContract(
+                "workflow-paper",
+                "1.0.0",
+                "workflow",
+                "workflow.paper",
+                frozenset({"workflow.paper"}),
+                frozenset({"agent.execute", "model.request"}),
+                frozenset({"before_task", "before_model_request", "after_run"}),
+                spreadsheet_capabilities=frozenset(SPREADSHEET_CAPABILITIES),
+            ),
+        )
+    return PluginRegistry(
+        tuple(replace(contract, edit_policies=_default_edit_policies(contract)) for contract in contracts)
+    )
+
+
+def default_plugin_registry() -> PluginRegistry:
+    """Load built-ins plus this package's candidate-owned data declarations.
+
+    Resolving an isolated candidate package therefore cannot silently fall
+    back to the incumbent's plugin registry.  The manifest parser never
+    imports the executable modules; the benchmark runtime owns invocation.
+    """
+
+    registry = _builtin_plugin_registry()
+    package_root = Path(__file__).resolve().parent
+    generated_root = package_root / "generated_plugins"
+    if generated_root.is_symlink():
+        raise HarnessError("Candidate plugin namespace may not be a symlink")
+    specs = _candidate_manifest_specs(generated_root / "manifest.json")
+    for spec in specs:
+        if spec.implementation_path:
+            _candidate_owned_file(package_root, f"generated_plugins/{spec.slug}.py")
+    return registry_with_candidate_plugins(registry, specs)
+
+
+# Frozen paper-facing ablation pair.  The two compositions differ by exactly
+# one domain-knowledge provider, so any paired Financial_Model delta can be
+# attributed to the business plugin rather than to a runtime or policy change.
+SPREADSHEET_HARNESS_BASIC_COMPOSITION = CompositionSpec.create(
+    "spreadsheet-harness-basic",
+    (
+        "act-code-plus-formula-validation",
+        "observe-profile-compact",
+        "control-ours",
+        "knowledge-structure",
+        "knowledge-formula",
+        "knowledge-manipulation",
+        "knowledge-analysis",
+        "knowledge-visualization",
+        "knowledge-verification",
+        "knowledge-memory",
+        "verify-formula-runtime",
+        "repair-date-text",
+    ),
+)
+
+SPREADSHEET_HARNESS_CORE_COMPOSITION = CompositionSpec.create(
+    "spreadsheet-harness-core",
+    (
+        "act-code-plus-formula-validation",
+        "observe-profile-compact",
+        "control-ours",
+        "knowledge-core",
+        "verify-formula-runtime",
+        "repair-date-text",
+    ),
+)
+
+SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION = CompositionSpec.create(
+    "spreadsheet-harness-financial",
+    (
+        *SPREADSHEET_HARNESS_BASIC_COMPOSITION.plugins,
+        "knowledge-financial-model",
+    ),
+)
+
+
+ARM_COMPOSITIONS: Mapping[str, CompositionSpec] = MappingProxyType(
+    {
+        "bare": CompositionSpec.create("bare", ("act-code-interpreter", "control-bare")),
+        "profile": CompositionSpec.create(
+            "profile",
+            ("act-code-interpreter", "observe-profile-full", "control-profile"),
+        ),
+        "native": CompositionSpec.create("native", ("act-native-tools", "control-native")),
+        "paper": CompositionSpec.create("paper", ("workflow-paper",)),
+        # Clean-room Spreadsheet-RL ablations.  These names are intentionally
+        # explicit so benchmark reports do not conflate a tool-interface proxy
+        # with the paper's RL-trained checkpoint.
+        "spreadsheet-rl-minimal": CompositionSpec.create(
+            "spreadsheet-rl-minimal",
+            ("act-code-plus-formula-validation", "control-bare"),
+        ),
+        "spreadsheet-rl-native": CompositionSpec.create(
+            "spreadsheet-rl-native",
+            ("act-native-tools", "control-native"),
+        ),
+        "paper-vision": CompositionSpec.create("paper-vision", ("workflow-paper",)),
+        "spreadsheet-agent": CompositionSpec.create(
+            "spreadsheet-agent", ("workflow-paper",)
+        ),
+        "spreadsheet-harness-basic": SPREADSHEET_HARNESS_BASIC_COMPOSITION,
+        "spreadsheet-harness-financial": SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION,
+        "ours": CompositionSpec.create(
+            "ours",
+            (
+                "act-code-interpreter",
+                "observe-profile-compact",
+                "control-ours",
+                "repair-date-text",
+            ),
+        ),
+    }
+)
+
+PLUGEOLVE_SEED_COMPOSITION = CompositionSpec.create(
+    "plugevolve-seed",
+    (
+        "act-code-plus-formula-validation",
+        "observe-profile-compact",
+        "control-ours",
+        "knowledge-structure",
+        "knowledge-formula",
+        "knowledge-financial-model",
+        "knowledge-manipulation",
+        "knowledge-analysis",
+        "knowledge-visualization",
+        "knowledge-verification",
+        "knowledge-memory",
+        "verify-formula-runtime",
+        "repair-date-text",
+    ),
+)
+
+BUILTIN_COMPOSITIONS: Mapping[str, CompositionSpec] = MappingProxyType(
+    {
+        **ARM_COMPOSITIONS,
+        PLUGEOLVE_SEED_COMPOSITION.name: PLUGEOLVE_SEED_COMPOSITION,
+        SPREADSHEET_HARNESS_BASIC_COMPOSITION.name: SPREADSHEET_HARNESS_BASIC_COMPOSITION,
+        SPREADSHEET_HARNESS_CORE_COMPOSITION.name: SPREADSHEET_HARNESS_CORE_COMPOSITION,
+        SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION.name: (
+            SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION
+        ),
+    }
+)
+
+
+def resolve_arm_composition(
+    arm: str,
+    *,
+    registry: PluginRegistry | None = None,
+    composition: CompositionSpec | None = None,
+) -> ResolvedComposition:
+    resolved_registry = registry or default_plugin_registry()
+    try:
+        spec = composition or ARM_COMPOSITIONS[arm]
+    except KeyError as exc:
+        raise ValueError(f"Unknown comparison arm: {arm!r}") from exc
+    resolved = resolved_registry.resolve(spec)
+    execution_plan(resolved)
+    return resolved
+
+
+__all__ = [
+    "ALLOWED_PLUGIN_HOOKS",
+    "ARM_COMPOSITIONS",
+    "BUILTIN_COMPOSITIONS",
+    "CANDIDATE_PLUGIN_HOOKS",
+    "CANDIDATE_PLUGIN_MANIFEST_PATH",
+    "LEGACY_PLUGIN_ALIASES",
+    "KERNEL_CAPABILITIES",
+    "PLUGEOLVE_SEED_COMPOSITION",
+    "SPREADSHEET_HARNESS_BASIC_COMPOSITION",
+    "SPREADSHEET_HARNESS_CORE_COMPOSITION",
+    "SPREADSHEET_HARNESS_FINANCIAL_COMPOSITION",
+    "SPREADSHEET_CAPABILITIES",
+    "CompositionCandidate",
+    "CandidatePluginSpec",
+    "CompositionEvaluation",
+    "CompositionRoute",
+    "CompositionSpec",
+    "ConfigField",
+    "ConstrainedCompositionRouter",
+    "EvolutionStrategy",
+    "EvolutionSurface",
+    "PluginContract",
+    "PluginEditPolicy",
+    "PluginExecutionPlan",
+    "PluginInstance",
+    "PluginMutation",
+    "PluginRegistry",
+    "ResolvedComposition",
+    "SpreadsheetCapability",
+    "contextual_marginal_contribution",
+    "canonical_plugin_name",
+    "default_plugin_registry",
+    "enumerate_single_plugin_candidates",
+    "execution_plan",
+    "load_candidate_plugin_registry",
+    "load_candidate_plugin_specs",
+    "registry_with_candidate_plugins",
+    "resolve_arm_composition",
+    "select_composition",
+]

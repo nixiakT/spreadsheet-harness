@@ -1,0 +1,4 @@
+offline-validation.json
+*.log
+__pycache__/
+*.pyc
